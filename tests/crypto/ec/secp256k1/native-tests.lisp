@@ -107,3 +107,15 @@
                    (clempo.secp256k1:ecrecover hash r 1 3))
         (return-from found t)))
     (error "Missing small recid=2 test point."))))
+
+(deftest secp-native-compressed-ecdh ()
+  (let ((peer (clempo.secp256k1:private->public 7)))
+    (loop for secret in '(1 3 19) do
+      (let* ((raw (clempo.secp256k1:ecdh secret peer))
+             (compressed (clempo.secp256k1:ecdh secret peer :compressed t))
+             (public (clempo.secp256k1:private->public (* secret 7))))
+        (is= 33 (length compressed))
+        (is= (+ 2 (logand (aref public 63) 1)) (aref compressed 0))
+        (is-equalp raw (subseq compressed 1))
+        (is-equalp (subseq public 0 32) raw))))
+  (is (null (clempo.secp256k1:ecdh 0 (make-octets 64) :compressed t))))

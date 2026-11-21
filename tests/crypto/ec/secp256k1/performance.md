@@ -18,6 +18,10 @@ used concurrently or reentrantly. No global/thread-local auto-cache is hidden
 inside the crypto layer. `src/types/signatures.lisp` uses the direct address
 API, avoiding both a returned pubkey vector and a second digest conversion.
 
+`ecdh(private,peer,:compressed t)` returns the SEC1 compressed shared point
+needed by discovery v5; the two-argument raw x32 result is unchanged. Discovery
+uses this public API rather than depending on retired private curve internals.
+
 P256 exports `make-p256-scratch` and `*p256-scratch*`; both `p256-verify` and
 `p256-verify-low-s` accept optional sixth scratch arguments. The former accepts
 high-s; the latter preserves Tempo's low-s rule. With a supplied or dynamically

@@ -46,8 +46,9 @@ SCRATCH is private mutable workspace and must not be used concurrently."
       (clempo.keccak:keccak256-into public 0 64 digest 0)
       (digest-address digest))))
 
-(defun ecdh (private-key peer-public-key)
-  "Raw shared x (32 octets), or NIL for invalid private scalar or peer point."
+(defun ecdh (private-key peer-public-key &key compressed)
+  "Raw shared x32, or SEC1 compressed shared point33 with :COMPRESSED T.
+Return NIL for an invalid private scalar or peer point."
   (unless (and (integerp private-key) (< 0 private-key +secp256k1-n+)
                (typep peer-public-key 'octets) (= (length peer-public-key) 64))
     (return-from ecdh nil))
@@ -61,7 +62,9 @@ SCRATCH is private mutable workspace and must not be used concurrently."
     (unless (sf-equal-p arena 32 arena 36) (return-from ecdh nil))
     (sf-zero! arena 24) (sf-from-integer! arena 28 private-key)
     (when (native-joint-affine! arena (recovery-scratch-digits context))
-      (let ((out (clempo.base:make-octets 32))) (sw-write32! out 0 arena 0) out))))
+      (let ((out (clempo.base:make-octets (if compressed 33 32))))
+        (when compressed (setf (aref out 0) (+ 2 (logand (aref arena 4) 1))))
+        (sw-write32! out (if compressed 1 0) arena 0) out))))
 
 (defun sign (hash32 private-key)
   "RFC6979/HMAC-SHA256 deterministic ECDSA. Returns r,s,recid, low-s.
