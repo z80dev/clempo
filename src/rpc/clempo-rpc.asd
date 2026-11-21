@@ -19,7 +19,8 @@
                (:file "sender")
                (:file "subscribe")
                (:file "state")
-               (:file "calls")))
+               (:file "calls")
+               (:file "simulate")))
 
 (defsystem "clempo-rpc/tests"
   :depends-on ("clempo-rpc")

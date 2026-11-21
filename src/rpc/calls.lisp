@@ -2,7 +2,7 @@
   (:use #:cl #:clempo.base #:clempo.rpc #:clempo.rpc.render #:clempo.rpc.state)
   (:local-nicknames (#:json #:clempo.json) (#:serde #:clempo.serde) (#:chain #:clempo.rpc.chain)
                     (#:h #:clempo.headers) (#:executor #:clempo.executor) (#:blocks #:clempo.blocks)
-                    (#:state #:clempo.state))
+                    (#:state #:clempo.state) (#:tx #:clempo.transactions))
   (:documentation "Methods that execute requests on a state: eth_call, eth_estimateGas,
 eth_createAccessList, eth_simulateV1, eth_callMany and tempo_simulateV1, and the replaying
 debug_trace* and trace_* families.
@@ -18,7 +18,15 @@ tracers (EvmAgent's tracing package); until those land the methods fail with an 
 missing piece.")
   (:export #:call-request #:tx-request #:state-override #:block-overrides #:simulate-payload
            #:bundles #:state-context #:tracing-options #:trace-types
-           #:normalize-request))
+           #:normalize-request
+           ;; the execution helpers src/rpc/simulate.lisp builds on
+           #:req-from #:req-to #:req-gas #:req-gas-price #:req-max-fee #:req-max-priority
+           #:req-value #:req-nonce #:req-chain-id #:req-access-list #:req-authorizations
+           #:req-type #:req-calls #:req-fee-token #:req-nonce-key
+           #:request-input #:aa-request-p #:request-type #:request-plist #:request-gas
+           #:call-env #:block-hash-fn #:apply-state-overrides #:check-state-overrides
+           #:run-request #:call-result #:revert-reason #:invalid-request-error
+           #:+invalid-transaction-errors+ #:*rpc-gas-cap* #:header-base-fee))
 
 (in-package #:clempo.rpc.calls)
 
@@ -525,26 +533,35 @@ halt rpc_invalid_transaction_error's text."
                          (:nonce-overflow "nonce has max value")
                          (t (format nil "EVM error: ~A" (halt-name halt)))))))))
 
-(defun run-request (b state request what &key state-overrides block-overrides on-invalid)
-  "Execute REQUEST on STATE in block B's environment. Returns the tx-outcome; an invalid
-request calls ON-INVALID with (code message), or fails with reth's error."
+(defun request-gas (request price what)
+  (let ((g (req-gas request)))
+    (cond (g (min g *rpc-gas-cap*))
+          ((zerop price) *rpc-gas-cap*)
+          (t (internal-error (format nil "~A: capping the gas of a priced request by the caller's fee token allowance is not implemented yet" what))))))
+
+(defun run-request (b state request what &key state-overrides block-overrides on-invalid ctx tracer)
+  "Execute REQUEST on STATE in block B's environment, or in CTX after its earlier requests,
+under TRACER when given. Returns (values tx-outcome gas ctx); an invalid request calls
+ON-INVALID with (code message), or fails with reth's error."
   (when (aa-request-p request)
     (internal-error (format nil "~A: Tempo AA call requests are not converted to executor requests yet" what)))
   (let* ((price (normalize-request request (or (getf block-overrides :base-fee) (header-base-fee b))))
-         (env (call-env b block-overrides price))
-         (ctx (executor:begin-call-block state env))
+         (ctx (or ctx (executor:begin-call-block state (call-env b block-overrides price)
+                                                 :block-hash-fn (block-hash-fn))))
          (world (executor:call-block-world ctx))
-         (gas (let ((g (req-gas request)))
-                (cond (g (min g *rpc-gas-cap*))
-                      ((zerop price) *rpc-gas-cap*)
-                      (t (internal-error (format nil "~A: capping the gas of a priced request by the caller's fee token allowance is not implemented yet" what)))))))
+         (gas (request-gas request price what)))
     (apply-state-overrides world state-overrides)
-    (values (handler-case (executor:execute-request ctx (request-plist request world gas price)
-                                            :skip-nonce-check t :skip-base-fee-check t :skip-gas-caps t)
-      (executor:invalid-transaction (e)
-        (multiple-value-bind (code message) (invalid-request-error (executor:execution-failure-reason e))
-          (if on-invalid (funcall on-invalid code message) (rpc-fail code message)))))
-            gas)))
+    (flet ((execute ()
+             (executor:execute-request ctx (request-plist request world gas price)
+                                       :skip-nonce-check t :skip-base-fee-check t :skip-gas-caps t)))
+      (values (handler-case (if tracer
+                                (clempo.tracing:with-tracer (tracer world) (execute))
+                                (execute))
+                (executor:invalid-transaction (e)
+                  (multiple-value-bind (code message) (invalid-request-error (executor:execution-failure-reason e))
+                    (if on-invalid (funcall on-invalid code message) (rpc-fail code message)))))
+              gas
+              ctx))))
 
 ;;; Methods
 
@@ -573,69 +590,48 @@ request calls ON-INVALID with (code message), or fails with reth's error."
     (run-request b state request "eth_createAccessList" :state-overrides state-overrides)
     (internal-error "eth_createAccessList: recording the accessed addresses and slots is not implemented yet")))
 
-(defparameter *max-simulate-blocks* 256 "reth max_simulate_blocks default")
-
-(defun simulate (payload block what)
-  (when (> (length (getf payload :block-state-calls)) *max-simulate-blocks*)
-    (rpc-fail -38026 "too many blocks"))
-  (when (null (getf payload :block-state-calls)) (rpc-fail +invalid-params+ "calls are empty."))
-  (let* ((n (block-id-number (or block :latest)))
-         (b (and n (<= n chain:*head*) (chain-block n))))
-    (unless b (rpc-fail -38020 (format nil "block not found: ~A" (block-id-text (or block :latest)))))
-    (let ((state (state-at (list :hash (cblock-hash b)))))
-      ;; The first call's request errors come before any block is rendered.
-      (let* ((first-block (first (getf payload :block-state-calls)))
-             (call (first (getf first-block :calls))))
-        (when (and call (not (getf payload :validation)) (not (aa-request-p call)))
-          (run-request b state call what
-                       :state-overrides (getf first-block :state-overrides)
-                       :on-invalid (lambda (code message)
-                                     (declare (ignore code))
-                                     (let ((e (find message +invalid-transaction-errors+ :key #'third :test #'string=)))
-                                       (rpc-fail (fourth e) message))))))
-      (internal-error (format nil "~A: rendering simulated blocks is not implemented yet" what)))))
-
-(defrpc "eth_simulateV1" ((payload simulate-payload) (block block-id :optional t))
-  "execute calls in simulated blocks on top of BLOCK"
-  (simulate payload block "eth_simulateV1"))
-
-(defrpc "tempo_simulateV1" ((payload simulate-payload) (block block-id :optional t))
-  "eth_simulateV1 with the metadata of the TIP-20 tokens involved"
-  (simulate payload block "tempo_simulateV1"))
-
-(defrpc "eth_callMany" ((bundles bundles) (context state-context :optional t)
-                        (state-overrides state-override :optional t))
-  "execute bundles of calls one after another at a block position"
-  (when (null bundles) (rpc-fail +invalid-params+ "bundles are empty."))
+(defun call-many (bundles context state-overrides what &key tracer render)
+  "reth call_many: the bundles' requests run one after another on one overlay at the
+position CONTEXT selects (after the whole block, or after its first transactionIndex
+transactions). Each request renders as RENDER (tracer request outcome gas) under a fresh
+(funcall TRACER), or as eth_callMany's {value}/{error}. Returns one vector per bundle."
   (let* ((target (or (getf context :block-number) :latest))
          (n (block-id-number target)))
     (unless (and n (<= n chain:*head*)) (header-not-found target))
     (let* ((b (chain-block n))
            (index (getf context :transaction-index :all))
-           (all (or (eq index :all) (>= index (length (cblock-txs b))))))
-      (unless all
-        (internal-error "eth_callMany: replaying a block prefix before the bundles is not implemented yet"))
-      ;; All transactions replayed: the state after the block itself.
-      (let ((state (state-at (list :hash (cblock-hash b))))
-            (results '()))
-        (loop for bundle in bundles for bi from 0
-              do (loop for request in (getf bundle :transactions) for ti from 0
-                       for overrides = (when (and (zerop bi) (zerop ti)) state-overrides)
-                       do (multiple-value-bind (outcome gas)
-                                  (run-request b state request "eth_callMany"
-                                               :state-overrides overrides
-                                               :block-overrides (getf bundle :block-override)
-                                               :on-invalid (lambda (code message)
-                                                             (rpc-fail code (format nil "call_many error in bundle ~D and transaction ~D: ~A"
-                                                                                    bi ti message))))
-                            (push (handler-case (json:jobject "value" (hexbytes (call-result outcome gas "eth_callMany")))
-                                    (rpc-error (e) (json:jobject "error" (rpc-error-message e))))
-                                  results)))
-                 ;; Each bundle sees the state its predecessors left: one overlay per request
-                 ;; does not chain them.
-                 (when (or (rest bundles) (rest (getf bundle :transactions)))
-                   (internal-error "eth_callMany: chaining several calls on one overlay is not implemented yet")))
-        (vector (coerce (nreverse results) 'simple-vector))))))
+           (all (or (eq index :all) (>= index (length (cblock-txs b)))))
+           (state (when all (state-at (list :hash (cblock-hash b)))))
+           (ctx (unless all
+                  (let ((ctx (block-context b)))
+                    (dotimes (i index ctx) (replay-tx ctx b i))))))
+      (coerce
+       (loop for bundle in bundles for bi from 0
+             collect (coerce
+                      (loop for request in (getf bundle :transactions) for ti from 0
+                            for overrides = (when (and (zerop bi) (zerop ti)) state-overrides)
+                            collect (let ((tr (and tracer (funcall tracer))))
+                                      (multiple-value-bind (outcome gas c)
+                                          (run-request b state request what
+                                                       :ctx ctx :tracer tr
+                                                       :state-overrides overrides
+                                                       :block-overrides (getf bundle :block-override)
+                                                       :on-invalid (lambda (code message)
+                                                                     (rpc-fail code (format nil "call_many error in bundle ~D and transaction ~D: ~A"
+                                                                                            bi ti message))))
+                                        (setf ctx c)
+                                        (if render
+                                            (funcall render tr request outcome gas)
+                                            (handler-case (json:jobject "value" (hexbytes (call-result outcome gas what)))
+                                              (rpc-error (e) (json:jobject "error" (rpc-error-message e))))))))
+                      'simple-vector))
+       'simple-vector))))
+
+(defrpc "eth_callMany" ((bundles bundles) (context state-context :optional t)
+                        (state-overrides state-override :optional t))
+  "execute bundles of calls one after another at a block position"
+  (when (null bundles) (rpc-fail +invalid-params+ "bundles are empty."))
+  (call-many bundles context state-overrides "eth_callMany"))
 
 ;;; Re-executing recorded blocks: witnesses, intermediate roots, raw block traces
 
@@ -715,12 +711,80 @@ request calls ON-INVALID with (code message), or fails with reth's error."
     (state-at parent)
     (replay-unavailable "debug_traceBlock")))
 
-;;; Tracing: geth's debug_trace* and parity's trace_* families. Parameters and every error that
-;;; depends only on the request are answered here; the replay itself needs the executor's
-;;; overlay replay and EvmAgent's tracers.
+;;; Tracing: geth's debug_trace* and parity's trace_* families, replayed on the executor's
+;;; overlay call block over the parent's state (clempo.executor begin-call-block /
+;;; apply-transaction) with clempo.tracing's tracers.
 
-(defun tracing-unavailable (what)
-  (internal-error (format nil "~A: tracing needs the executor's overlay replay and EvmAgent's tracers, which have not landed yet" what)))
+(defun block-hash-fn ()
+  "BLOCKHASH for replays over historical views: the archive's block hashes."
+  (lambda (n)
+    (let ((b (and (<= 0 n chain:*head*) (chain-block n))))
+      (and b (cblock-hash b)))))
+
+(defun block-context (b)
+  "An overlay context for block B on its parent's state, after its pre-execution changes."
+  (when (zerop (cblock-number b)) (rpc-fail -32000 "genesis is not traceable"))
+  (executor:begin-call-block (state-at (1- (cblock-number b)))
+                             (executor:header-block-env (cblock-header b))
+                             :block-hash-fn (block-hash-fn)))
+
+(defun replay-tx (ctx b i &optional tracer)
+  "Apply transaction I of block B in CTX, under TRACER when given; returns its tx-outcome."
+  (let ((tx (svref (cblock-txs b) i)) (sender (cblock-sender b i)))
+    (handler-case
+        (if tracer
+            (clempo.tracing:with-tracer (tracer (executor:call-block-world ctx))
+              (executor:apply-transaction ctx tx sender))
+            (executor:apply-transaction ctx tx sender))
+      (executor:execution-failure (e)
+        (internal-error (format nil "replaying transaction ~D of block ~D: ~A"
+                                i (cblock-number b) (executor:execution-failure-reason e)))))))
+
+(defun trace-block-txs (b make-tracer result &key (start 0) (end (length (cblock-txs b))))
+  "Replay block B's transactions below END, tracing those from START: MAKE-TRACER takes the
+block-wide index of the transaction's first log, RESULT (tracer index outcome) renders one.
+Returns the rendered results in order."
+  (let ((ctx (block-context b)) (logs 0) (out '()))
+    (loop for i from 0 below end
+          do (let* ((tracer (and (>= i start) (funcall make-tracer logs)))
+                    (outcome (replay-tx ctx b i tracer)))
+               (when tracer (push (funcall result tracer i outcome) out))
+               (incf logs (length (executor:tx-outcome-logs outcome)))))
+    (nreverse out)))
+
+(defun tx-hash-int (b i) (octets->integer (svref (cblock-tx-hashes b) i)))
+
+(defun geth-tx-result (b)
+  "RESULT for TRACE-BLOCK-TXS: the geth tracer's output for transaction I of B."
+  (lambda (tracer i outcome)
+    (clempo.tracing:geth-result tracer
+                                :gas-limit (tx:transaction-gas-limit (svref (cblock-txs b) i))
+                                :caller (cblock-sender b i)
+                                :gas-used (executor:tx-outcome-gas-used outcome)
+                                :output (executor:tx-outcome-output outcome)
+                                :block-hash (octets->integer (cblock-hash b))
+                                :block-number (cblock-number b)
+                                :tx-hash (tx-hash-int b i) :tx-index i)))
+
+(defun parity-localized (b)
+  (lambda (tracer i outcome)
+    (declare (ignore outcome))
+    (clempo.tracing:parity-transaction-traces tracer :block-hash (octets->integer (cblock-hash b))
+                                                     :block-number (cblock-number b)
+                                                     :tx-hash (tx-hash-int b i) :tx-index i)))
+
+(defun parity-replay (b)
+  (lambda (tracer i outcome)
+    (let ((r (clempo.tracing:parity-result tracer :output (executor:tx-outcome-output outcome))))
+      (if b
+          (append r (list (cons "transactionHash" (hex32 (svref (cblock-tx-hashes b) i)))))
+          r))))
+
+(defun opcode-gas (b)
+  (lambda (tracer i outcome)
+    (declare (ignore outcome))
+    (json:jobject "transactionHash" (hex32 (svref (cblock-tx-hashes b) i))
+                  "opcodeGas" (clempo.tracing:opcode-gas-result tracer))))
 
 (defparam plain-u64 (src) "Rust u64 from a JSON number"
   (serde:read-integer src 0 +u64-max+ "u64"))
@@ -820,6 +884,20 @@ request calls ON-INVALID with (code message), or fails with reth's error."
           (progn (serde:peek src) (incf (serde:src-pos src)) (serde:serde-fail-here src "expected value"))))
     (nreverse out)))
 
+(defun options-json (options)
+  "The GethDebugTracingOptions plist as the JSON object clempo.tracing reads."
+  (let ((kvs '()))
+    (loop for (kw name) in (append +tracing-option-fields+ +default-tracing-fields+)
+          for v = (getf options kw :absent)
+          unless (eq v :absent)
+            do (push name kvs)
+               (push (if (member kw '(:tracer :tracer-config :timeout :limit)) v (json:jbool v)) kvs))
+    (apply #'json:jobject (nreverse kvs))))
+
+(defun geth-tracer (options &optional (log-index 0))
+  (handler-case (clempo.tracing:make-geth-tracer (options-json options) :log-index log-index)
+    (clempo.tracing:tracer-error (e) (rpc-fail +invalid-params+ (clempo.tracing:tracer-error-message e)))))
+
 (defun tx-block (hash)
   "(values cblock index) of a transaction at or below the head, or NIL."
   (multiple-value-bind (n i) (chain:backend-tx-location chain:*backend* hash)
@@ -832,61 +910,78 @@ request calls ON-INVALID with (code message), or fails with reth's error."
 
 (defun hash-id-p* (id) (and (consp id) (eq (first id) :hash)))
 
-(defun trace-block-replay (b options what)
-  "debug_traceBlockBy*: the genesis block has no parent state to trace on."
+(defun trace-block-replay (b options)
+  "debug_traceBlockBy*: every transaction of B as {txHash, result}."
   (when (zerop (cblock-number b)) (rpc-fail -32000 "genesis is not traceable"))
   (check-tracer options)
-  (state-at (1- (cblock-number b)))
-  (tracing-unavailable what))
+  (let ((render (geth-tx-result b)))
+    (coerce (trace-block-txs b (lambda (logs) (geth-tracer options logs))
+                             (lambda (tracer i outcome)
+                               (json:jobject "txHash" (hex32 (svref (cblock-tx-hashes b) i))
+                                             "result" (funcall render tracer i outcome))))
+            'simple-vector)))
 
 (defrpc "debug_traceTransaction" ((hash hash) (options tracing-options :optional t))
   "replay a transaction under a geth tracer"
   (multiple-value-bind (b i) (tx-block hash)
-    (declare (ignore i))
     (unless b (rpc-fail -32000 "transaction not found"))
     (check-tracer options)
-    (state-at (1- (cblock-number b)))
-    (tracing-unavailable "debug_traceTransaction")))
+    (first (trace-block-txs b (lambda (logs) (geth-tracer options logs)) (geth-tx-result b)
+                            :start i :end (1+ i)))))
 
 (defrpc "debug_traceBlockByNumber" ((id block-number-or-tag) (options tracing-options :optional t))
   "replay a block under a geth tracer"
   (let* ((n (block-id-number id))
          (b (and n (<= n chain:*head*) (chain-block n))))
     (unless b (tracing-block-not-found id))
-    (trace-block-replay b options "debug_traceBlockByNumber")))
+    (trace-block-replay b options)))
 
 (defrpc "debug_traceBlockByHash" ((hash hash) (options tracing-options :optional t))
   "replay a block under a geth tracer"
   (let ((b (let ((n (block-id-number (list :hash hash)))) (and n (<= n chain:*head*) (chain-block n)))))
     (unless b (tracing-block-not-found (list :hash hash)))
-    (trace-block-replay b options "debug_traceBlockByHash")))
+    (trace-block-replay b options)))
+
+(defun request-geth-result (tracer request outcome gas)
+  (clempo.tracing:geth-result tracer :gas-limit gas :caller (or (req-from request) 0)
+                                     :gas-used (executor:tx-outcome-gas-used outcome)
+                                     :output (executor:tx-outcome-output outcome)))
 
 (defrpc "debug_traceCall" ((request tx-request) (block block-id :optional t)
                            (options call-tracing-options :optional t))
   "trace a call on the state after BLOCK"
-  (let ((b (call-block block)))
-    (check-state-overrides (getf options :state-overrides))
-    (convert-request request (or (getf (getf options :block-overrides) :base-fee) (header-base-fee b)))
+  (let ((b (call-block block))
+        (state-overrides (getf options :state-overrides))
+        (block-overrides (getf options :block-overrides)))
+    (check-state-overrides state-overrides)
+    (convert-request request (or (getf block-overrides :base-fee) (header-base-fee b)))
     (check-tracer options)
-    (state-at (list :hash (cblock-hash b)))
-    (tracing-unavailable "debug_traceCall")))
+    (let ((state (state-at (list :hash (cblock-hash b))))
+          (tracer (geth-tracer options)))
+      (multiple-value-bind (outcome gas)
+          (run-request b state request "debug_traceCall" :state-overrides state-overrides
+                                                         :block-overrides block-overrides :tracer tracer)
+        (request-geth-result tracer request outcome gas)))))
 
 (defrpc "debug_traceCallMany" ((bundles bundles) (context state-context :optional t)
                                (options call-tracing-options :optional t))
   "trace bundles of calls one after another at a block position"
   (when (null bundles) (rpc-fail +invalid-params+ "bundles are empty."))
-  (let* ((target (or (getf context :block-number) :latest))
-         (n (block-id-number target)))
-    (unless (and n (<= n chain:*head*)) (header-not-found target))
-    (check-tracer options)
-    (state-at n)
-    (tracing-unavailable "debug_traceCallMany")))
+  (check-tracer options)
+  (call-many bundles context (getf options :state-overrides) "debug_traceCallMany"
+             :tracer (lambda () (geth-tracer options))
+             :render (lambda (tracer request outcome gas)
+                       (request-geth-result tracer request outcome gas))))
 
 (defrpc "trace_call" ((request tx-request) (types trace-types) (block block-id :optional t)
                       (state-overrides state-override :optional t) (block-overrides block-overrides :optional t))
   "parity traces of a call"
-  (prepare-call request block "trace_call" :state-overrides state-overrides :block-overrides block-overrides)
-  (tracing-unavailable "trace_call"))
+  (multiple-value-bind (b state)
+      (prepare-call request block "trace_call" :state-overrides state-overrides :block-overrides block-overrides)
+    (let ((tracer (clempo.tracing:make-parity-tracer types)))
+      (let ((outcome (run-request b state request "trace_call" :state-overrides state-overrides
+                                                               :block-overrides block-overrides :tracer tracer)))
+        (clempo.tracing:parity-result tracer :output (executor:tx-outcome-output outcome))))))
 
 (defparam traced-call (src) "(TxReq, HashSet<TraceType>), a JSON pair"
   (let ((request nil) (types nil) (n 0))
@@ -902,33 +997,74 @@ request calls ON-INVALID with (code message), or fails with reth's error."
 
 (defrpc "trace_callMany" ((calls traced-calls) (block block-id :optional t))
   "parity traces of calls executed one after another"
-  (let ((b (call-block block)))
-    (state-at (list :hash (cblock-hash b)))
-    (tracing-unavailable "trace_callMany")))
+  (let* ((b (call-block block))
+         (state (state-at (list :hash (cblock-hash b))))
+         (ctx nil))
+    (coerce
+     (loop for (request . types) in calls
+           collect (let ((tracer (clempo.tracing:make-parity-tracer types)))
+                     (multiple-value-bind (outcome gas c)
+                         (run-request b state request "trace_callMany" :ctx ctx :tracer tracer)
+                       (declare (ignore gas))
+                       (setf ctx c)
+                       (clempo.tracing:parity-result tracer :output (executor:tx-outcome-output outcome)))))
+     'simple-vector)))
 
-(defmacro deftx-trace (name (&rest params) doc)
-  "A trace_* method over one transaction: null for an unknown hash."
-  `(defrpc ,name ((hash hash) ,@params) ,doc
-     (let ((b (tx-block hash)))
-       (if (null b)
-           :null
-           (progn (state-at (1- (cblock-number b)))
-                  (tracing-unavailable ,name))))))
+(defun tx-trace (hash make-tracer render)
+  "Trace transaction HASH; NIL when it is unknown."
+  (multiple-value-bind (b i) (tx-block hash)
+    (when b
+      (first (trace-block-txs b make-tracer (funcall render b) :start i :end (1+ i))))))
 
-(deftx-trace "trace_transaction" () "parity traces of a transaction")
-(deftx-trace "trace_get" ((indices any)) "one parity trace of a transaction by trace address")
-(deftx-trace "trace_replayTransaction" ((types trace-types)) "replay a transaction with parity tracers")
-(deftx-trace "trace_transactionOpcodeGas" () "opcode counts and gas of a transaction")
+(defun parity-maker (types) (lambda (logs) (declare (ignore logs)) (clempo.tracing:make-parity-tracer types)))
 
-(defmacro defblock-trace (name (&rest params) doc)
-  "A trace_* method over one block: \"block not found\" for an unknown block."
+(defrpc "trace_transaction" ((hash hash))
+  "parity traces of a transaction"
+  (or (tx-trace hash (parity-maker '(:trace)) #'parity-localized) :null))
+
+(defun index-value (v)
+  (cond ((integerp v) v)
+        ((and (stringp v) (prefixed-p v "0x")) (hex->integer v))
+        ((stringp v) (parse-integer v :junk-allowed t))))
+
+(defrpc "trace_get" ((hash hash) (indices any))
+  "one parity trace of a transaction by its index"
+  (let ((traces (tx-trace hash (parity-maker '(:trace)) #'parity-localized)))
+    (if (and traces (vectorp indices) (= (length indices) 1))
+        (let ((k (index-value (aref indices 0))))
+          (if (and k (< k (length traces))) (aref traces k) :null))
+        :null)))
+
+(defrpc "trace_replayTransaction" ((hash hash) (types trace-types))
+  "replay a transaction with parity tracers"
+  (or (tx-trace hash (parity-maker types) (lambda (b) (declare (ignore b)) (parity-replay nil)))
+      (rpc-fail -32000 "transaction not found")))
+
+(defrpc "trace_transactionOpcodeGas" ((hash hash))
+  "opcode counts and gas of a transaction"
+  (or (tx-trace hash (lambda (logs) (declare (ignore logs)) (clempo.tracing:make-opcode-gas-tracer))
+                #'opcode-gas)
+      :null))
+
+(defmacro defblock-trace (name (&rest params) doc &body body)
+  "A trace_* method over block B (null for an unknown block); BODY renders it."
   `(defrpc ,name ((id block-id) ,@params) ,doc
      (let* ((n (block-id-number id))
             (b (and n (<= n chain:*head*) (chain-block n))))
-       (unless b (header-not-found id))
-       (state-at (max 0 (1- (cblock-number b))))
-       (tracing-unavailable ,name))))
+       (if (null b) :null (progn ,@body)))))
 
-(defblock-trace "trace_block" () "parity traces of every transaction of a block")
-(defblock-trace "trace_replayBlockTransactions" ((types trace-types)) "replay a block with parity tracers")
-(defblock-trace "trace_blockOpcodeGas" () "opcode counts and gas of every transaction of a block")
+(defun block-traces (b make-tracer render)
+  (if (zerop (cblock-number b)) '() (trace-block-txs b make-tracer (funcall render b))))
+
+(defblock-trace "trace_block" () "parity traces of every transaction of a block"
+  (apply #'concatenate 'simple-vector (block-traces b (parity-maker '(:trace)) #'parity-localized)))
+
+(defblock-trace "trace_replayBlockTransactions" ((types trace-types)) "replay a block with parity tracers"
+  (coerce (block-traces b (parity-maker types) #'parity-replay) 'simple-vector))
+
+(defblock-trace "trace_blockOpcodeGas" () "opcode counts and gas of every transaction of a block"
+  (json:jobject "blockHash" (hex32 (cblock-hash b)) "blockNumber" (cblock-number b)
+                "transactions" (coerce (block-traces b (lambda (logs) (declare (ignore logs))
+                                                         (clempo.tracing:make-opcode-gas-tracer))
+                                                     #'opcode-gas)
+                                       'simple-vector)))
