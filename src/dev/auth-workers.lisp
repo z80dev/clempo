@@ -6,6 +6,16 @@
 
 (defconstant +default-sender-threads+ 8)
 (defconstant +pipeline-depth+ 4 "Blocks the producer may read and recover ahead.")
+(defconstant +state-root-threads+ 4
+  "Participants (the replay thread included) hashing a block's storage tries.")
+
+(defun call-with-state-root-workers (function)
+  "Call FUNCTION with clempo.trie's parallel map bound to a pool of +STATE-ROOT-THREADS+, so
+the replay thread's state roots hash dirty storage tries in parallel."
+  (clempo.node.workers:call-with-workers
+   (lambda (mapper)
+     (clempo.trie:call-with-trie-hashing function :parallel-map mapper))
+   :threads +state-root-threads+ :name "state root"))
 
 (defun recover-senders (block mapper batches threads)
   (let* ((txs (clempo.blocks:block-transactions block))
@@ -135,7 +145,9 @@ calling thread. With 1 thread, blocks are read and senders recovered serially on
                        (mapcar #'clempo.transactions:transaction-sender
                                (clempo.blocks:block-transactions block))))))
           (unwind-protect (call-with-recovery-scratch
-                           (lambda () (funcall function #'block-fn #'senders-fn)))
+                           (lambda ()
+                             (call-with-state-root-workers
+                              (lambda () (funcall function #'block-fn #'senders-fn)))))
             (sb-thread:with-mutex ((pipeline-lock pipeline))
               (setf (pipeline-stopped pipeline) t)
               (sb-thread:condition-broadcast (pipeline-room pipeline)))
