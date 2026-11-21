@@ -13,7 +13,8 @@
                (:file "render")
                (:file "eth")
                (:file "logs")
-               (:file "config")))
+               (:file "config")
+               (:file "stubs")))
 
 (defsystem "clempo-rpc/tests"
   :depends-on ("clempo-rpc")

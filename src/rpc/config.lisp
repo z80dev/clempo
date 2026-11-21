@@ -28,7 +28,7 @@ tempo_forkSchedule, rendered from the chain spec's genesis config with EIP-2124 
 
 ;;; The schedule
 
-(defun genesis-config () (json:jget (clempo.chainspec::chain-document (spec:load-chainspec *chain*)) "config"))
+(defun genesis-config () (spec:chain-config *chain*))
 
 (defun fork-schedule ()
   "Tempo forks in the genesis config, oldest first: list of (name . activation-time)."

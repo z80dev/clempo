@@ -21,10 +21,18 @@
                                (or (null method) (string= method (clempo.json:jget c "method"))))
                        collect c)))
 
+(defun mentions-head-p (response)
+  "An error message that quotes the reference's head block number (\"..., head 50058714\")."
+  (let ((message (clempo.json:jget* response "error" "message")))
+    (and (stringp message)
+         (let ((at (search "head " message :from-end t)))
+           (and at (< (+ at 5) (length message)) (digit-char-p (char message (+ at 5))))))))
+
 (defun case-compare-class (c)
   (let ((class (clempo.json:jget c "class")))
     (if (and (string= class "stable")
-             (member (clempo.json:jget c "method") *head-dependent-methods* :test #'string=))
+             (or (member (clempo.json:jget c "method") *head-dependent-methods* :test #'string=)
+                 (mentions-head-p (clempo.json:jget c "response"))))
         "live"
         class)))
 
