@@ -114,3 +114,16 @@
            (is= h (hex (cw-encode 'share share))))
   (signals cw-error (cw-decode 'share (hex->octets (format nil "00~64,'0X" 0))))
   (signals cw-error (cw-decode 'share (hex->octets (format nil "00~64,'0X" +group-order+)))))
+
+(deftest dkg-outcome-rejects-invalid-public-keys ()
+  ;; PublicKey::read: a key must decompress to a curve point
+  (let* ((outcome (decode-onchain-dkg-outcome
+                   (data-octets "mainnet_block_44107199_extradata.hex")))
+         (bad (loop for y from 2
+                    for key = (integer->octets y 32)
+                    do (setf key (reverse key)) ; little-endian y
+                    unless (clempo.ed25519:ed25519-public-key-valid-p key) return key))
+         (copy (clempo.dkg::copy-onchain-dkg-outcome outcome)))
+    (setf (outcome-next-players copy) (cons bad (rest (outcome-next-players outcome))))
+    (is (cw-order< bad (second (outcome-next-players outcome))))
+    (signals cw-error (decode-onchain-dkg-outcome (encode-onchain-dkg-outcome copy)))))

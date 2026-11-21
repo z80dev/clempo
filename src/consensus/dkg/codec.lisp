@@ -47,7 +47,12 @@ RootsOfUnity. Tempo reads with v0.")
 (defun write-ed25519-public-key (w v)
   (invariant (= (length v) 32) "ed25519 public key must be 32 bytes")
   (write-raw w v))
-(defun read-ed25519-public-key (r) (read-fixed r 32))
+(defun read-ed25519-public-key (r)
+  "PublicKey::read: 32 bytes that decompress to a curve point (ed25519-consensus rules)."
+  (let ((key (read-fixed r 32)))
+    (unless (clempo.ed25519:ed25519-public-key-valid-p key)
+      (cw-fail "ed25519: invalid public key"))
+    key))
 (defcwtype ed25519-public-key :write write-ed25519-public-key :read read-ed25519-public-key)
 
 (defun write-g2-point (w v)
