@@ -13,7 +13,7 @@ schedule Tempo layers over Osaka (crates/hardfork: constants.rs, gas_params.rs).
    #:fork-site #:fork-site-fork #:fork-site-kind #:fork-site-where #:fork-site-doc
    #:record-fork-site #:fork-sites #:*fork-site-context* #:with-fork-site-context
    ;; gas schedule
-   #:gas-schedule #:gas #:schedule-for
+   #:gas-schedule #:gas #:schedule-for #:with-gas-parameters-only
    #:+sstore-create-cost+ #:+sstore-set-cost+ #:+storage-credit-value+
    #:+cold-sload-cost+ #:+warm-sload-cost+ #:+cold-account-access-cost+
    #:+log-gas+ #:+keccak256-base-gas+ #:+keccak256-word-gas+ #:keccak-gas
@@ -281,3 +281,27 @@ parameter, defaulting to Osaka's value."
     (error "unknown gas parameter ~S" param))
   `(,(intern (format nil "GAS-SCHEDULE-~A" (symbol-name param)) '#:clempo.forks)
     (schedule-for ,fork)))
+
+(defmacro with-gas-parameters-only ((&rest keep-names) &body body)
+  "Run BODY with copied fork schedules, charging only the named gas parameters.
+KEEP-NAMES are literal keywords, validated at macroexpansion. The original schedules
+are never changed; nested uses restrict the dynamically enclosing schedules."
+  (dolist (name keep-names)
+    (unless (and (keywordp name)
+                 (member (symbol-name name) *gas-parameters*
+                         :key #'symbol-name :test #'string=))
+      (error "unknown gas parameter ~S" name)))
+  (let ((schedule (gensym "SCHEDULE")))
+    `(let ((*schedules*
+             (map 'simple-vector
+                  (lambda (,schedule)
+                    (let ((,schedule (copy-gas-schedule ,schedule)))
+                      (setf ,@(loop for name in *gas-parameters*
+                                    unless (member (symbol-name name) keep-names
+                                                   :key #'symbol-name :test #'string=)
+                                      append `((,(intern (format nil "GAS-SCHEDULE-~A" name)
+                                                         '#:clempo.forks)
+                                                ,schedule) 0)))
+                      ,schedule))
+                  *schedules*)))
+       ,@body)))

@@ -54,3 +54,17 @@
   (let ((fee +t7-base-fee-cap+))
     (dotimes (i 64) (setf fee (t7-next-block-base-fee fee 0)))
     (is= +t7-base-fee-floor+ fee)))
+
+(deftest selectively-metered-gas-parameters ()
+  (with-gas-parameters-only (:sstore-set-without-load-cost :warm-storage-read-cost)
+    (is= 0 (gas :sstore-static :t1))
+    (is= 100 (gas :warm-storage-read-cost :t1))
+    (is= 250000 (gas :sstore-set-without-load-cost :t1))
+    (is= 5000 (gas :sstore-set-without-load-cost :t7))
+    (with-gas-parameters-only (:warm-storage-read-cost)
+      (is= 0 (gas :sstore-set-without-load-cost :t1))
+      (is= 100 (gas :warm-storage-read-cost :t1)))
+    (is= 250000 (gas :sstore-set-without-load-cost :t1)))
+  (is= 100 (gas :sstore-static :t1))
+  (signals error
+    (macroexpand-1 '(with-gas-parameters-only (:unknown-gas-parameter) nil))))
