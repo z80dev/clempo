@@ -10,7 +10,7 @@
 | R3p Precompiles | 4,986/4,992 (goempo's frontier; every Tempo precompile T0..T14; the 6 differences are T14 keychain grants where clempo follows tempo c8b89f9, newer than the corpus: +2,600 gas root-retirement probe) | `fd2d4cf` | 2026-11-21 |
 | R4 Follow | - | | |
 | R5 RPC | 109/132 methods, 5,426/8,221 cases; 107/156 reference methods served (blocks 3,890/3,890, logs 366/366, envelope 50/50, static 106/119; state, calls and traces wait on the executor) | rpc slice 4 | 2026-11-21 |
-| R6 Validator | sim yes: 4, 5 and 7 seeded validators with faults, 3 epochs each with a successful reshare, every chain certified by the mainnet verifier (devnet with Rust validators: -) | `cb8ae2e` | 2026-11-21 |
+| R6 Validator | Sims: 4, 5 and 7 validators, three epochs each. Rust devnet: observed necessary Clempo votes with both one and two Clempo signers through live reshares (integration branch) | `cb8ae2e`, `0f026a5` | 2026-11-21 |
 | R7 Speed | - | | |
 
 ## Evidence
@@ -29,6 +29,42 @@ certify-blocks used for mainnet, anchored at the genesis DKG outcome. Release bu
 - r6-7: 7 validators, epochs of 35, node 6 crashed for the whole run, node 2 down 3-6 s:
   104/104 blocks certified, 3/3 ceremonies, the 6 live nodes at height 104 (474 s real).
 Real time is BLS12-381 field arithmetic (bignum mod); verify.sh runs smoke-4 (2 epochs).
+
+R6 mixed Rust devnet (`origin/r6-validator`, built against the `e378f45`
+builder checkpoint): separate loopback T13 networks, four-member committee and
+3-of-4 threshold, with only slots `0,2,3` launched from genesis. On each fresh
+root, provisioned with `scripts/devnet/devnet.sh --root "$NET" provision --tempo
+"$HOME/dev/tempo/target/release/tempo" --base-port "$PORT"` (ports 24100 and 25100)
+then ran:
+
+```sh
+D=scripts/devnet/devnet.sh
+# Set C=3 for two Rust + one Clempo; C=2,3 for one Rust + two Clempo.
+CLEMPO_BUILD=release $D --root "$NET" start --slots 0,2,3 --clempo "$C"
+$D --root "$NET" capture --slots 0,2,3 --clempo "$C" --quorum \
+  --seconds 95 --stall 20 --report "$NET/mixed-proof.jsonl"
+$D --root "$NET" stop --slots 0,2,3
+```
+
+The two-Rust run compared 122 heights (0–121) and two boundaries (59 and
+119). Clempo slot 3 authored 40 independently finalized proposals and
+continued signing with the new share after both reshares. The one-Rust run
+compared 119 heights (0–118), including boundary 59. Slots 2 and 3 authored
+39 and 40 finalized proposals respectively; both were on-chain dealers and
+finalized blocks with the reshared key material in epoch 1. In both runs
+every Clempo signer was necessary for quorum. `CLEMPO_BUILD=release
+bin/clempo-dev score -rung R6-devnet -json -one "$Q1" -two "$Q2"` returned `2`;
+the reports (`mixed-proof.jsonl`) and node logs are under
+`~/scratch/clempo/devnet/quorum-{1,2}/`. The CLI is on the integration branch
+pending the builder and validator merge.
+
+Reference baseline: four Rust validators agreed on 146 heights (0–145),
+including two 684-byte outcomes; each logged two successful ceremonies and
+no failures. Clempo independently re-derived both DKG outcome byte strings
+from dealer logs and replayed Rust raw blocks 0–130 with matching execution
+commitments. The separate zero-vote probe authenticated three Rust peers and
+received 156 votes, 156 certificates, 23 broadcast blocks and 69 DKG messages
+in 15 seconds.
 
 R4 certificates (bba3dfe): `CLEMPO_RPC=http://127.0.0.1:8545 CLEMPO_BUILD=release bin/clempo-dev certify -from 49995000 -to 50015000 -threads 16`
 verified all 20,001 consecutive mainnet finalization certificates across the epoch 2314/2315
