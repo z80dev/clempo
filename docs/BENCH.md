@@ -83,6 +83,28 @@ wall times were **7.73 / 8.32 s** versus **8.25 / 7.93 s**. These pairs
 isolate the storage changes; they are not the per-block optimization
 comparison above.
 
+### Bounded-memory Recent replay on Linux
+
+On Linux x86-64 with SBCL 2.6.8 release, `6354034` replayed all 40,000
+Recent blocks with every root checked, in **11.4 s** (3,503 blocks/s;
+24 s including startup). The process used a 4,096 MiB heap limit and
+peaked at **2.58 GB RSS** (Linux `VmHWM`), with 325 MB of live heap at the
+end. The in-memory store (`824be08`) exhausted that heap; at 16,384 MiB
+it replayed in **34.8 s**, took about **94 s** including checkpoint
+load and trie rebuild, and peaked at **5.63 GB RSS**. Both used the
+same canonical parent at 49,409,999. The one-time legacy checkpoint
+import was excluded from the replay: 532 s, 8.1 GB peak RSS, and a
+2.2 GB KV datadir versus a 580 MB checkpoint.
+
+```sh
+CLEMPO_HEAP=4096 CLEMPO_BUILD=release bin/clempo-dev bench -range recent \
+  -parent "$KV_PARENT" -datadir "$FRESH_DIR" -result "$REPORT" \
+  -cache-accounts 65536 -cache-slots 524288 -cache-trie-nodes 262144 \
+  -cache-code-mb 64 -cache-dirty 1000000
+```
+
+This measures clempo's bounded-memory storage, not R7 against Rust.
+
 Raw local results: `logs/r7-parity/{clempo,rust}-{early,busy,recent}.{json,log}`
 and `logs/r7-parity/go-{early,busy}.{json,log}`. For Clempo use the commands below
 with `/usr/bin/time -l` before `bin/clempo-dev`; for Rust use the documented

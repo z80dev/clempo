@@ -113,6 +113,8 @@ base io crypto net codec trie types store state evm tempo consensus p2p sync rpc
 | `consensus`, `p2p`, `validator`, `sim` | certificates, Simplex, DKG; devp2p and commonware networking; the validator; the seeded simulator |
 | `sync`, `rpc`, `node`, `dev` | archive and follower, JSON-RPC and WebSocket server, the node binary, the `clempo-dev` tools |
 
+On Linux x86-64, the [bounded-memory Recent replay](docs/BENCH.md#bounded-memory-recent-replay-on-linux) checked all 40,000 block roots at 2.58 GB peak RSS. The previous in-memory store exhausted the same 4 GiB heap limit.
+
 ## Limitations
 
 - **RPC coverage is not protocol equivalence.** The recorded corpus distinguishes values, errors, and live or node-local responses. The [frontier](FRONTIER.md#evidence) records the scope; behavior differences are listed in [docs/DEVIATIONS.md](docs/DEVIATIONS.md).
