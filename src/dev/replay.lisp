@@ -116,7 +116,9 @@ get the restarts in the debugger)."
              (log-line "replay: ~A" c)
              (when (and diagnose (typep c 'clempo.executor:block-mismatch))
                (setf diagnosis (ignore-errors (diagnose-receipts c))))
-             (cond ((and (typep c 'clempo.executor:block-mismatch) (< heals heal))
+             ;; Any failure inside a block (a mismatch or an executor error) can be healed: a
+             ;; survey lists every failure class in one run.
+             (cond ((and (< heals heal) (find-restart 'clempo.executor:heal-from-reference c))
                     (incf heals) (invoke-restart 'clempo.executor:heal-from-reference))
                    ((and (typep c 'clempo.executor:block-mismatch) (< skips skip))
                     (incf skips) (invoke-restart 'clempo.executor:skip-block))
