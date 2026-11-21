@@ -58,9 +58,17 @@ the prime-order subgroup other than the identity (G2::read)."
         (max 1 (- n (loop for c in (reverse coefficients)
                           while (compressed-identity-p c) count t))))))
 
+(defvar *partial-publics* (make-hash-table :test 'eq :weakness :key :synchronized t)
+  "Sharing -> vector of its computed partial public keys (Sharing's OnceLock evals).")
+
 (defun sharing-partial-public (sharing index)
   "Sharing::partial_public: the public key share of participant INDEX (0-based) as G2
-octets. Signals DKG-ERROR when INDEX >= the sharing's total."
+octets, computed once per sharing. Signals DKG-ERROR when INDEX >= the sharing's total."
   (let ((x (mode-scalar (sharing-mode sharing) (sharing-total sharing) index)))
     (unless x (dkg-fail :invalid-index "~D of ~D" index (sharing-total sharing)))
-    (g2-octets (commitment-eval (sharing-coefficients sharing) x))))
+    (let ((evals (or (gethash sharing *partial-publics*)
+                     (setf (gethash sharing *partial-publics*)
+                           (make-array (sharing-total sharing) :initial-element nil)))))
+      (or (aref evals index)
+          (setf (aref evals index)
+                (g2-octets (commitment-eval (sharing-coefficients sharing) x)))))))
