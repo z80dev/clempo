@@ -6,6 +6,7 @@
 (defun modular-expt (base exponent modulus)
   "BASE^EXPONENT mod positive MODULUS, using a left-to-right sliding window."
   (declare #.clempo.base:*hot*
+           (type integer base)
            (type (integer 0 *) exponent)
            (type (integer 1 *) modulus))
   (when (= modulus 1) (return-from modular-expt 0))
@@ -18,7 +19,7 @@
          (b2 (mod (* b b) modulus))
          (result 1)
          (i (1- bits)))
-    (declare (type fixnum bits width i))
+    (declare (type fixnum bits width i) (type integer b b2 result) (type simple-vector table))
     (setf (aref table 0) b)
     (loop for j of-type fixnum from 1 below (length table)
           do (setf (aref table j) (mod (* (aref table (1- j)) b2) modulus)))

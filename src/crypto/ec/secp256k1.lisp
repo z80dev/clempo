@@ -1,12 +1,4 @@
-(defpackage #:clempo.secp256k1
-  (:use #:cl)
-  (:import-from #:clempo.base #:octets #:octets->integer #:integer->octets #:octets-concat)
-  (:export #:ecrecover #:pubkey->address #:sign #:private->public #:ecdh
-           #:+secp256k1-n+ #:+secp256k1-p+))
 (in-package #:clempo.secp256k1)
-
-(defconstant +secp256k1-p+ #xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f)
-(defconstant +secp256k1-n+ #xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141)
 
 
 (clempo.ec:define-prime-curve secp
@@ -14,7 +6,9 @@
   :a 0 :b 7
   :n #xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
   :gx #x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
-  :gy #x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8)
+  :gy #x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8
+  :reduction reduce-field :multiply field-multiply
+  :addition field-add :subtraction field-subtract :scaling field-scale)
 
 (defun encode-public (x y)
   (when x (octets-concat (integer->octets x 32) (integer->octets y 32))))
@@ -22,7 +16,7 @@
 (defun private->public (private-key)
   "Uncompressed public key x||y (64 octets), or NIL for an invalid private scalar."
   (when (typep private-key `(integer 1 ,(1- +secp256k1-n+)))
-    (multiple-value-bind (x y) (secp-mul private-key) (encode-public x y))))
+    (multiple-value-bind (x y) (secp-fast-mul private-key) (encode-public x y))))
 
 (defun pubkey->address (public-key)
   "Low 160 bits of Keccak256(x||y), as an integer."
@@ -41,15 +35,14 @@ RECID is 0..3 (0/1 for Ethereum), NOT the precompile v byte 27/28."
   (let ((rx (+ r (* (ash recid -1) +secp256k1-n+))))
     (when (>= rx +secp256k1-p+) (return-from ecrecover nil))
     (let* ((yy (secp-f (+ (* rx rx rx) 7)))
-           (ry (clempo.modexp:modular-expt yy (ash (1+ +secp256k1-p+) -2)
-                                         +secp256k1-p+)))
+           (ry (field-square-root yy)))
       (unless (= (secp-f* ry ry) yy) (return-from ecrecover nil))
       (unless (= (logand ry 1) (logand recid 1)) (setf ry (secp-f- 0 ry)))
       ;; The curve has prime order n (cofactor 1), so every non-infinity R is in G.
       (let* ((ri (clempo.ec:invert r +secp256k1-n+))
              (u (mod (* (- (octets->integer hash32)) ri) +secp256k1-n+))
              (v (mod (* s ri) +secp256k1-n+)))
-        (multiple-value-bind (x y) (secp-joint u secp-generator v (secp-table rx ry) 7 5)
+        (multiple-value-bind (x y) (secp-fast-joint u v rx ry)
           (encode-public x y))))))
 
 (defun ecdh (private-key peer-public-key)
@@ -61,7 +54,7 @@ Returns NIL for an invalid private scalar or non-curve peer x||y."
   (let ((x (octets->integer peer-public-key :end 32))
         (y (octets->integer peer-public-key :start 32)))
     (when (secp-point-p x y)
-      (let ((shared (secp-mul private-key (secp-table x y) 5)))
+      (let ((shared (secp-fast-mul private-key (secp-table x y) 5)))
         (when shared (integer->octets shared 32))))))
 
 (defun sign (hash32 private-key)
@@ -85,7 +78,7 @@ co-resident timing observer when using a long-lived secret key."
         (setf v (mac k v))
         (let ((nonce (octets->integer v)))
           (when (< 0 nonce +secp256k1-n+)
-            (multiple-value-bind (x y) (secp-mul nonce)
+            (multiple-value-bind (x y) (secp-fast-mul nonce)
               (let* ((r (mod x +secp256k1-n+))
                      (s (mod (* (clempo.ec:invert nonce +secp256k1-n+)
                                 (+ h (* r private-key))) +secp256k1-n+))

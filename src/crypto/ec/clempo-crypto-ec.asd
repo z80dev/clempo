@@ -5,11 +5,25 @@
   :serial t
   :components ((:file "modexp")
                (:file "prime-curve")
+               (:file "secp256k1-field")
                (:file "secp256k1")
-               (:file "p256")))
+               (:file "secp256k1-glv")
+               (:file "p256")
+               (:file "bn254")
+               (:file "bls12-381")
+               (:file "bls12-381-hash")
+               (:file "bls12-381-signatures")
+               (:file "kzg")))
 
 (defsystem "clempo-crypto-ec/tests"
   :depends-on ("clempo-crypto-ec" "clempo-codec")
   :serial t
   :pathname "../../../tests/crypto/ec/"
-  :components ((:file "prime-curves")))
+  :components ((:file "prime-curves")
+               (:file "bn254/bn254-tests")
+               (:file "bls12-381/precompile-tests")
+               (:file "bls12-381/hash-tests")
+               (:file "bls12-381/signature-tests")
+               (:file "bls12-381/signature-min-sig-vectors")
+               (:file "bls12-381/signature-min-pk-vectors")
+               (:file "kzg/kzg-tests")))
