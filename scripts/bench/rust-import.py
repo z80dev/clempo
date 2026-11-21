@@ -68,6 +68,21 @@ def stage_summary(path):
                     terminal[stage] = int(height)
     return totals, terminal
 
+def check_parent(tempo, root, expected):
+    # Finish unwinds first, so Finish alone can also describe a partial unwind.
+    stages = ('Headers', 'Bodies', 'SenderRecovery', 'Execution', 'MerkleUnwind',
+              'AccountHashing', 'StorageHashing', 'MerkleExecute', 'TransactionLookup',
+              'IndexStorageHistory', 'IndexAccountHistory', 'Prune', 'Finish')
+    text = subprocess.check_output([tempo, '--color', 'never', 'db', '--datadir', root,
+                                    'stage-checkpoints', 'get'], text=True)
+    heights = {name: int(height) for name, height in re.findall(
+        r'^(\w+): StageCheckpoint \{ block_number: (\d+)', text, re.M)}
+    mismatches = [f'{stage}={heights.get(stage)}' for stage in stages
+                  if heights.get(stage, 0 if expected == 0 else None) != expected]
+    if mismatches:
+        raise ValueError(f'datadir has not fully reached parent {expected}: {", ".join(mismatches)}')
+
+
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -83,11 +98,10 @@ def main():
         parser.error('expected 1 <= --from <= --to')
     root = args.datadir.resolve()
     if args.first != 1 or root.exists():
-        checkpoint = subprocess.check_output([args.tempo, '--color', 'never', 'db', '--datadir', root,
-                                              'stage-checkpoints', 'get', '--stage', 'finish'], text=True)
-        height = re.search(r'^Finish: Some\(StageCheckpoint \{ block_number: (\d+)', checkpoint, re.M)
-        if not height or int(height[1]) != args.first - 1:
-            parser.error(f'datadir does not have Finish checkpoint {args.first - 1}')
+        try:
+            check_parent(args.tempo, root, args.first - 1)
+        except ValueError as error:
+            parser.error(str(error))
     gas = corpus_gas(args.rlp, args.first, args.last)
     command = [str(args.tempo), 'import', '--datadir', str(root), '--chain', 'mainnet',
                '--fail-on-invalid-block', '--color', 'never', '--log.file.max-files', '0', str(args.rlp)]

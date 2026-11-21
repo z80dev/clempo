@@ -41,7 +41,7 @@ python3 scripts/bench/rust-import.py --tempo "$tempo" --datadir "$busy_work" \
   --from 9890000 --to 9909999 --rlp "$busy_rlp" --log "$log" --out "$result"
 ```
 
-`export-rlp.py` writes original wire bytes with no re-encoding. The Rust runner checks the starting `Finish` checkpoint, the exact input heights, and both terminal `MerkleExecute` and `Finish` checkpoints. For Early, pass a nonexistent datadir to initialize from genesis. The result includes wall/CPU, peak RSS, total gas from the corpus, and stage times summed across import chunks. The import may split large files into multiple chunks.
+`export-rlp.py` writes original wire bytes with no re-encoding. The Rust runner checks that all import stages are at the starting parent checkpoint, validates exact input heights, and checks both terminal `MerkleExecute` and `Finish` checkpoints. For Early, pass a nonexistent datadir to initialize from genesis. The result includes wall/CPU, peak RSS, total gas from the corpus, and stage times summed across import chunks. The import may split large files into multiple chunks.
 
 `tempo re-execute` is read-only and starts from historical parent state, but verifies gas/receipts and the resulting change sets rather than recomputing state roots. `tempo import --fail-on-invalid-block` runs the staged pipeline and checks the Merkle root at each import chunk’s terminal checkpoint, **not every block's root**. This follows goempo's Rust baseline and is a lower root-check workload than Clempo. Report that distinction alongside any comparison. Rust includes the import indexing stages; use the per-stage numbers to distinguish execution from full import wall time. Neither client’s metrics include provisioning the input corpus or parent state.
 
@@ -55,3 +55,24 @@ For the separate read-only Busy cross-check reported in `FRONTIER.md`:
 
 One task and one chunk ensure the entire measured range executes from the
 same historical parent state. Keep this result separate from staged import.
+
+### Active Busy baseline on the dev host
+
+The detached archive is `~/scratch/clempo/bench/rust-snapshot` (height
+50,050,994). The Busy working copy is `~/scratch/clempo/bench/rust-busy`.
+The restarted persistent runner was launched as PID **57382** (also recorded
+in `~/scratch/clempo/bench/busy-job.pid`). It first resumes
+`tempo stage unwind --datadir "$root/rust-busy" --chain mainnet --color never to-block 9889999`,
+appending to `"$root/busy-unwind.log"`. On success it runs:
+
+```sh
+root=~/scratch/clempo/bench
+python3 scripts/bench/rust-import.py --tempo ~/dev/tempo/target/release/tempo \
+  --datadir "$root/rust-busy" --from 9890000 --to 9909999 \
+  --rlp "$root/busy.rlp" --log "$root/busy.log" --out "$root/busy.json"
+```
+
+The wrapper's diagnostics are in `"$root/busy-job.log"`. If a rerun is
+necessary, verify the old process ended and use new log/result paths; the
+runner refuses to overwrite an existing import log or start from a wrong
+parent. No command uses the live node's datadir.
