@@ -3,7 +3,7 @@
   (:local-nicknames (#:json #:clempo.json) (#:trie #:clempo.trie) (#:forks #:clempo.forks))
   (:import-from #:clempo.keccak #:keccak256)
   (:import-from #:clempo.rlp #:rlp-encode)
-  (:export #:chain-spec #:load-chainspec #:chain-name #:chain-id #:chain-epoch-length
+  (:export #:chain-spec #:load-chainspec #:chain-name #:chain-id #:chain-epoch-length #:chain-config
            #:fork-activation #:fork-active-p #:fork-at
            #:genesis-gas-limit #:genesis-base-fee #:genesis-timestamp #:genesis-extra-data
            #:shared-gas-limit-at #:general-gas-limit-at #:tx-gas-limit-cap-at
@@ -71,6 +71,10 @@ CHAIN may be a pathname, namestring, or spec returned by an earlier call."
            (read-chainspec (pathname-name path) path)))
         (t (error "Unknown Tempo chain ~S (expected mainnet, moderato or a genesis pathname)" chain))))
 
+(defun chain-config (chain)
+  "Return the read-only genesis JSON config object."
+  (json:jget (chain-document (load-chainspec chain)) "config"))
+
 (defun fork-activation (fork chain)
   "Timestamp at which FORK activates; NIL when it is not scheduled."
   (cdr (assoc fork (chain-schedule (load-chainspec chain)))))
@@ -89,7 +93,7 @@ CHAIN may be a pathname, namestring, or spec returned by an earlier call."
   (field-quantity (chain-document (load-chainspec chain)) "gasLimit"))
 
 (defun genesis-fork-active-p (spec key at)
-  (let ((activation (field-quantity (json:jget (chain-document spec) "config") key nil)))
+  (let ((activation (field-quantity (chain-config spec) key nil)))
     (and activation (<= activation at))))
 
 (defun genesis-base-fee (chain)
