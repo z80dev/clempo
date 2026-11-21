@@ -409,7 +409,7 @@ builder read (Rust TempoTxResult / ResolvedFeeToken / key_expiry)."
             (*host* (ctx-host ,c)))
        ,@body)))
 
-(defun begin-block (db env &key block (open t))
+(defun begin-block (db env &key block (db-block t))
   "Open a block on DB for ENV (unless OPEN is NIL: the caller opened it) and apply the
 pre-execution system changes; returns the context APPLY-TRANSACTION and FINISH-BLOCK take."
   (let ((ctx (make-block-context
@@ -423,7 +423,7 @@ pre-execution system changes; returns the context APPLY-TRANSACTION and FINISH-B
                                                 :chain-id (block-env-chain-id env)))
               :non-shared-left (- (block-env-gas-limit env) (block-env-shared-gas-limit env))
               :non-payment-left (block-env-general-gas-limit env))))
-    (when open (store:db-begin-block db))
+    (when db-block (store:db-begin-block db))
     (with-block-context (ctx)
       (when (and block (blocks:block-withdrawals block)) (invalid "withdrawals are not permitted"))
       (apply-history-and-beacon-calls ctx :parent-beacon-block-root (block-env-parent-beacon-block-root env))

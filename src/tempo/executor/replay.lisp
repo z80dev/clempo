@@ -155,7 +155,7 @@ prestate diffs TRACES (the parsed debug_traceBlockByNumber result, a vector of {
 post}}), then the post-execution committee call. The system calls are not in the traces."
   (let* ((*chain* chain)
          (env (header-block-env (blocks:block-header block) :chain chain))
-         (ctx (begin-block db env :block block :open nil)))
+         (ctx (begin-block db env :block block :db-block nil)))
     (with-block-context (ctx)
       (write-changes db (state:drain-changes (ctx-world ctx))))
     (loop for trace across traces
