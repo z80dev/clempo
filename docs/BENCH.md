@@ -44,3 +44,14 @@ python3 scripts/bench/rust-import.py --tempo "$tempo" --datadir "$busy_work" \
 `export-rlp.py` writes original wire bytes with no re-encoding. The Rust runner checks the starting `Finish` checkpoint, the exact input heights, and both terminal `MerkleExecute` and `Finish` checkpoints. For Early, pass a nonexistent datadir to initialize from genesis. The result includes wall/CPU, peak RSS, total gas from the corpus, and stage times summed across import chunks. The import may split large files into multiple chunks.
 
 `tempo re-execute` is read-only and starts from historical parent state, but verifies gas/receipts and the resulting change sets rather than recomputing state roots. `tempo import --fail-on-invalid-block` runs the staged pipeline and checks the Merkle root at each import chunk’s terminal checkpoint, **not every block's root**. This follows goempo's Rust baseline and is a lower root-check workload than Clempo. Report that distinction alongside any comparison. Rust includes the import indexing stages; use the per-stage numbers to distinguish execution from full import wall time. Neither client’s metrics include provisioning the input corpus or parent state.
+
+For the separate read-only Busy cross-check reported in `FRONTIER.md`:
+
+```sh
+/usr/bin/time -l "$tempo" re-execute --datadir "$archive_copy" --chain mainnet \
+  --from 9890000 --to 9909999 --num-tasks 1 --blocks-per-chunk 20000 \
+  --color never --log.file.max-files 0
+```
+
+One task and one chunk ensure the entire measured range executes from the
+same historical parent state. Keep this result separate from staged import.

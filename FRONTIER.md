@@ -42,15 +42,29 @@ Fixture tests: votes and certificates signed/assembled with the Rust harness's s
 byte-identical to Rust's golden vectors; goempo's recorded mainnet finalizations verify under
 the outcomes of blocks 42098399/44085599/44107199 and across the 2041->2042 full-DKG boundary.
 
-R7 Rust reference baseline (Apple Silicon `Mac15,9`, Tempo 1.19.0-dev
-`568b4fb4258c`, release, one sample): Early 1..1,000,000 used
-`tempo import --fail-on-invalid-block` from genesis on canonical archive RLP.
-It imported all 1,000,000 blocks (135,315,780 gas) in **89.14 s wall**,
-**41.67 s CPU**, and **7.22 GB peak RSS**: **11,218 blocks/s**, **1.52 Mgas/s**;
-Execution + MerkleExecute took **17.35 s**. MerkleExecute checked the
-terminal state root for each import chunk, not every block’s root; Clempo
-checks every block. See [benchmark commands](docs/BENCH.md). R7 remains
-unscored.
+R7 Rust reference samples (Apple Silicon `Mac15,9`, Tempo 1.19.0-dev
+`568b4fb4258c`, release). Both imports read canonical RLP and completed
+`MerkleExecute` and `Finish` at the requested heights:
+
+| Range | Gas | Wall s | CPU s | Peak RSS GB | Blocks/s | Mgas/s | Execution + MerkleExecute s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Early: 1..1,000,000 | 135,315,780 | 89.14 | 41.67 | 7.22 | 11,218 | 1.52 | 17.35 |
+| Recent: 49,410,000..49,449,999 | 3,768,403,621 | 47.22 | 21.41 | 3.72 | 847 | 79.80 | 15.67 |
+
+`tempo import --fail-on-invalid-block` checks each import chunk's terminal
+state root, not every block’s root. Clempo checks every block. Recent began
+at the canonical parent obtained by unwinding a detached archive snapshot
+(height 50,050,994). Provisioning time is excluded. See [benchmark
+commands](docs/BENCH.md); R7 remains unscored.
+
+Busy historical execution cross-check, **not a root-checked import**:
+`tempo re-execute --from 9890000 --to 9909999 --num-tasks 1 --blocks-per-chunk 20000`
+on the detached archive used parent 9,889,999 and passed receipt/gas and
+change-set checks for all 20,000 blocks (31,499,321,696 gas). `/usr/bin/time -l`
+reported **49.37 s wall**, **20.08 s CPU**, **1.65 GB peak RSS**,
+**405 blocks/s** and **638.03 Mgas/s** end to end (Rust's internal interval:
+651.01 Mgas/s). The full staged Busy import requires a roughly 40M-block
+unwind of the detached archive to provision its exact parent.
 
 Keccak-256 (SBCL 2.6.8 release, Apple Silicon): the ARM SHA3 permutation and
 copy-free 32/64-byte paths reduced 64-byte hashes from **626 ns to 178 ns**
