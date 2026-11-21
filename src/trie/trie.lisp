@@ -6,6 +6,7 @@
   (:export #:trie #:make-trie #:make-secure-trie #:trie-clone
            #:trie-get #:trie-put #:trie-delete #:trie-root #:ordered-trie-root
            #:trie-proof #:verify-proof #:trie-node-at #:node-store-get #:node-store-put
+           #:node-store-write-through-p #:trie-map-memory-nodes
            #:call-with-trie-hashing #:trie-from-items
            #:trie-node-error #:encode-account #:decode-account
            #:+empty-trie-root+ #:+empty-code-hash+))
@@ -128,6 +129,18 @@ and parallel calls produce the same root."
 (defgeneric node-store-put (store hash bytes)
   (:documentation "Persist immutable BYTES by HASH. Writes must be idempotent; signal on failure."))
 
+(defgeneric node-store-write-through-p (store)
+  (:documentation "True (the default) when the trie hands every node it hashes to
+NODE-STORE-PUT. A store answering NIL collects nodes itself (TRIE-MAP-MEMORY-NODES): the trie
+then hashes exactly as with no store (scratch buffers, parallel subtrees) and calls the store
+only to open stored nodes, so its NODE-STORE-GET must not use the hashing workspace.")
+  (:method (store) (declare (ignore store)) t))
+
+(declaim (inline write-store))
+(defun write-store (store)
+  "STORE when the trie must write nodes to it, else NIL."
+  (and store (node-store-write-through-p store) store))
+
 (define-condition trie-node-error (error)
   ((reason :initarg :reason :reader trie-node-error-reason))
   (:report (lambda (c s) (format s "Trie node: ~A" (trie-node-error-reason c)))))
@@ -158,7 +171,7 @@ writes copy only shared paths. Do not edit a handle concurrently."
 
 (defun trie-key (trie key)
   (cond ((not (trie-secure-p trie)) key)
-        ((and *hash-workspace* (null (trie-store trie)))
+        ((and *hash-workspace* (null (write-store (trie-store trie))))
          ;; In-memory traversal cannot invoke a node-store method that reenters
          ;; the trie while this scratch key is still being read.
          (keccak256-into key 0 (length key) (hash-workspace-key-bytes *hash-workspace*) 0
@@ -588,7 +601,7 @@ and, in a plain trie, of one length. ITEM-FN may be called from several threads.
                  jobs)))))
 
 (defun compute-root (trie node)
-  (let ((store (trie-store trie)))
+  (let ((store (write-store (trie-store trie))))
     (when (and *parallel-map* (null store) (>= (trie-dirty-updates trie) *parallel-threshold*))
       (prehash-root-children node))
     (let ((ref (node-reference node store)))
@@ -624,6 +637,35 @@ Includes the root even if short; inline children travel inside their parents."
                     (push (if (= (length ref) 32) (encode-node node store) ref) proof))
                   (setf first nil))))
     (nreverse proof)))
+
+(defun trie-map-memory-nodes (trie fn)
+  "Hash TRIE, then call FN with (hash rlp-thunk) for each node it holds in memory (not
+opened from its store) that is referenced by hash, and for its root when the root is in
+memory whatever its size; RLP-THUNK returns the node's RLP. FN returns true to descend into
+the node's children; NIL skips them (a store that already holds the node holds what is below
+it). Stored nodes and everything below them are skipped."
+  (trie-root trie)
+  (labels ((walk (node root-p)
+             (when (and node (not (stored-node-p node)))
+               (let* ((ref (node-ref node))
+                      (hashed (= (length ref) 32))
+                      (descend
+                        (if (or hashed root-p)
+                            (funcall fn (if hashed ref (hash-octets ref (length ref)))
+                                     (lambda ()
+                                       (if hashed
+                                           (multiple-value-bind (bytes end) (encode-node node nil)
+                                             (if (= end (length bytes)) bytes (subseq bytes 0 end)))
+                                           ref)))
+                            t)))
+                 (when descend
+                   (etypecase node
+                     (short-node (unless (leaf-path-p (short-node-path node))
+                                   (walk (short-node-item node) nil)))
+                     (branch-node (loop for child across (branch-node-children node)
+                                        do (walk child nil)))))))))
+    (walk (trie-root-node trie) t))
+  trie)
 
 ;;; Node introspection (reth's TrieUpdates describe branch nodes by their nibble path).
 

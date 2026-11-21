@@ -324,15 +324,15 @@ bad record with valid ones after it signals STORE-CORRUPT-LOG."
           (store-wal-sink store) (make-sink stream))))
 
 (defun start-wal (store)
-  "Start a new, empty log after the flushed head and delete the older ones."
+  "Start a new, empty log after the flushed head. Returns the older logs, which the caller
+deletes once the flushed state is durable in the KV store."
   (let* ((dir (store-dir store))
          (first (1+ (db-number (store-db store))))
          (path (wal-path dir first)))
     (when (store-wal-stream store) (close (store-wal-stream store)))
     (write-durably path (lambda (out) (declare (ignore out))))
     (open-wal store path)
-    (dolist (f (wal-files dir))
-      (when (< (car f) first) (delete-file (cdr f))))))
+    (loop for (n . p) in (wal-files dir) when (< n first) collect p)))
 
 (defun normalize-dir (dir)
   (let ((p (pathname dir)))
@@ -452,11 +452,17 @@ its RAM and never reach DIR."
         (store-durable-number store) (store-logged-number store)))
 
 (defun flush-db (store)
-  "Write the database's unflushed state to the KV store and start a new log."
+  "Hand the database's unflushed state to the KV store and start a new log. The batch is
+written as a segment on a background thread while blocks go on; until then it is read from
+RAM, and the old logs, synced first, still hold its blocks (they are deleted once the
+segment is in MANIFEST)."
   (let ((db (store-db store)))
-    (kv-write (store-kv store) (db-flush-entries db))
-    (db-after-flush db)
-    (start-wal store)
+    (when (store-wal-stream store) (store-sync store))
+    (let ((batch (db-flush-entries db)))
+      (db-after-flush db)
+      (let ((old (start-wal store)))
+        (kv-write-async (store-kv store) batch
+                        (lambda () (dolist (p old) (when (probe-file p) (delete-file p)))))))
     (setf (store-logged-number store) (db-number db)
           (store-durable-number store) (db-number db)
           (store-synced-at store) (clempo.io:monotonic-ticks)
@@ -510,7 +516,7 @@ the interval or the cache limit says so."
   "Stream the checkpoint at PATH into KV's segments (no manifest). Returns its head record."
   (with-open-file (in path :element-type '(unsigned-byte 8))
     (let* ((src (make-source in))
-           (nodes (make-node-store kv))
+           (nodes (make-node-store kv t))   ; every node the import hashes is kept
            (entries (make-hash-table :size 65536))
            (leaves '())
            (head-db (make-statedb))
@@ -586,7 +592,7 @@ the interval or the cache limit says so."
                                  (error 'store-root-mismatch :number (block-diff-number diff)
                                                              :expected (block-diff-root diff) :actual actual))
                                (incf count))))
-      (kv-write kv (db-flush-entries db))
+      (kv-write kv (sorted-entries (db-flush-entries db)))
       (db-after-flush db))
     (kv-close kv)                       ; its merges finish before the store reopens DIR
     (funcall log "store: imported checkpoint ~D and ~D logged blocks" n count)

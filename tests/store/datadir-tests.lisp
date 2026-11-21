@@ -346,6 +346,8 @@ head root (through storage roots too)."
            (store (open-test-store dir :interval 2))
            (mirror (mirror-db)))
       (loop for n from 1 to 10 do (commit-random store rng n mirror))
+      ;; the owner's last flush (block 10) is a segment once its batch is written
+      (clempo.store::kv-wait-batch (clempo.store::store-kv store))
       (let ((snap (open-datadir-snapshot dir)))
         (is snap)
         (is= 10 (db-number snap))

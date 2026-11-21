@@ -5,7 +5,8 @@
   (:import-from #:clempo.trie #:make-secure-trie #:trie-clone #:trie-put #:trie-delete
                 #:trie-root #:trie-proof #:encode-account #:decode-account
                 #:+empty-trie-root+ #:+empty-code-hash+
-                #:trie-from-items #:node-store-get #:node-store-put)
+                #:trie-from-items #:node-store-get #:node-store-put
+                #:node-store-write-through-p #:trie-map-memory-nodes)
   (:documentation "The committed state database: accounts, storage slots and code keyed by
 integers, with the account and storage tries beside them so a block's state root costs only
 its dirty paths. A block's writes are applied between DB-BEGIN-BLOCK and DB-COMMIT-BLOCK (or
@@ -119,14 +120,23 @@ number of writes (accounts, slots and trie nodes) kept in RAM before the store f
   (slots (make-hash-table) :type hash-table))    ; slots written since
 
 (defun make-table (backed size)
-  (if backed (make-hash-table :size size :synchronized t) (make-hash-table :size size)))
+  (declare (ignore backed))
+  (make-hash-table :size size))
+
+;;; Caches and threads. Only the database's writer (the thread that last opened a block, or
+;;; opened the database) fills its caches; another thread reading a backed database reads
+;;; through to the store without inserting anything. Readers and the writer never run at
+;;; once (the RPC backend's lock), and concurrent readers of tables nobody changes are safe,
+;;; so the hot tables need no locks.
 
 (defstruct (statedb (:constructor %make-statedb
                         (backing nodes limits
                          &aux (accounts (make-table backing 4096))
                               (codes (make-table backing 1024))
-                              (trie (make-secure-trie :store nodes))))
+                              (trie (make-secure-trie :store nodes))
+                              (writer sb-thread:*current-thread*)))
                     (:conc-name db-))
+  (writer nil)                                             ; the thread that fills the caches
   (backing nil)                                            ; NIL in RAM, else the KV store
   (nodes nil)                                              ; the tries' node store (backed)
   (limits nil)
@@ -156,6 +166,11 @@ number of writes (accounts, slots and trie nodes) kept in RAM before the store f
   (dirty-weight 0 :type fixnum)                            ; writes since the flush
   (cached-slots 0 :type fixnum)                            ; slot entries cached since eviction
   (code-bytes 0 :type fixnum))                             ; bytes of cached code
+
+(declaim (inline filling-p))
+(defun filling-p (db)
+  "Whether this thread may insert into DB's caches."
+  (eq (db-writer db) sb-thread:*current-thread*))
 
 (defun make-statedb ()
   "An empty state database held in RAM."
@@ -199,11 +214,13 @@ number of writes (accounts, slots and trie nodes) kept in RAM before the store f
 ;;; Reads
 
 (defun load-account (db address)
-  "ADDRESS's account from the store (NIL when absent), cached."
+  "ADDRESS's account from the store (NIL when absent), cached when this thread fills."
   (let* ((v (kv-get (db-backing db) (key-account address)))
          (a (when v (decode-account-record db address v))))
-    (when a (setf (account-used a) t))
-    (setf (gethash address (db-accounts db)) a)))
+    (when (filling-p db)
+      (when a (setf (account-used a) t))
+      (setf (gethash address (db-accounts db)) a))
+    a))
 
 (declaim (inline db-account))
 (defun db-account (db address)
@@ -220,10 +237,11 @@ number of writes (accounts, slots and trie nodes) kept in RAM before the store f
             ((account-complete-p a) 0)
             (t (let* ((o (kv-get (db-backing db) (key-slot (account-address a) slot)))
                       (v (if o (octets->integer o) 0)))
-                 (setf (gethash slot (or (account-storage a)
-                                         (setf (account-storage a) (make-table t 16))))
-                       v)
-                 (incf (db-cached-slots db))
+                 (when (filling-p db)
+                   (setf (gethash slot (or (account-storage a)
+                                           (setf (account-storage a) (make-table t 16))))
+                         v)
+                   (incf (db-cached-slots db)))
                  v))))))
 
 (defun db-storage (db address slot)
@@ -237,8 +255,10 @@ number of writes (accounts, slots and trie nodes) kept in RAM before the store f
         (when (= key +empty-code-key+) (load-time-value (make-octets 0)))
         (let ((code (and (db-backing db) (kv-get (db-backing db) (key-code key)))))
           (when code
-            (incf (db-code-bytes db) (length code))
-            (setf (gethash key (db-codes db)) code)))
+            (when (filling-p db)
+              (incf (db-code-bytes db) (length code))
+              (setf (gethash key (db-codes db)) code))
+            code))
         (error "store: no code for hash ~X" key))))
 
 ;;; Iteration. A backed database iterates the store and overlays what RAM holds newer than
@@ -407,6 +427,7 @@ root is the empty root, which has no nodes)."
 
 (defun db-begin-block (db)
   (invariant (not (db-open-p db)) "a block is already open")
+  (setf (db-writer db) sb-thread:*current-thread*)
   ;; Clean tries make O(1) snapshots that are exactly the pre-block state.
   (db-state-root db)
   (setf (db-open-p db) t

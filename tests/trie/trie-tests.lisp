@@ -261,3 +261,55 @@
                                          (octets-of (1+ i))))
                      'simple-vector)
              nil "shared prefixes"))))
+
+;;; A store that does not write through: the trie hashes as with no store (scratch, parallel
+;;; subtrees) and never calls NODE-STORE-PUT; the store collects the new nodes itself with
+;;; TRIE-MAP-MEMORY-NODES and can reopen the trie from them.
+
+(defstruct (collecting-store (:include memory-store)))
+
+(defmethod node-store-write-through-p ((store collecting-store)) nil)
+
+(defun collect-memory-nodes (trie store)
+  "Add TRIE's in-memory nodes STORE lacks; returns how many."
+  (let ((added 0) (nodes (memory-store-nodes store)))
+    (trie-map-memory-nodes trie (lambda (hash rlp)
+                                  (unless (gethash hash nodes)
+                                    (setf (gethash hash nodes) (funcall rlp))
+                                    (incf added))))
+    added))
+
+(deftest collecting-stores-hash-without-writing-through ()
+  (let* ((rng (sb-ext:seed-random-state 61))
+         (store (make-collecting-store))
+         (trie (make-secure-trie :store store))
+         (plain (make-secure-trie))
+         (keys (loop repeat 600 collect (integer->octets (random (expt 2 256) rng) 32)))
+         (jobs 0))
+    (dolist (k keys) (trie-put trie k k) (trie-put plain k k))
+    (let ((root (call-with-trie-hashing (lambda () (trie-root trie)) :parallel-threshold 0
+                                        :parallel-map (lambda (fn js) (incf jobs (length js)) (mapc fn js)))))
+      (is-equalp (trie-root plain) root)
+      (is (plusp jobs) "hashing ran parallel subtrees")
+      (is= 0 (memory-store-writes store))
+      (let ((first (collect-memory-nodes trie store)))
+        (is (> first 600))
+        ;; reopened from the collected nodes, every key reads back
+        (let ((opened (make-secure-trie :store store :root root)))
+          (is (every (lambda (k) (octets= k (trie-get opened k))) keys))
+          ;; change a few keys on the reopened trie: only the new paths are collected
+          (loop for k in (subseq keys 0 5) do (trie-put opened k (octets-of 7)) (trie-put plain k (octets-of 7)))
+          (trie-delete opened (nth 5 keys)) (trie-delete plain (nth 5 keys))
+          (let ((root2 (trie-root opened)) (added (collect-memory-nodes opened store)))
+            (is-equalp (trie-root plain) root2)
+            (is (< 0 added 60) "~D nodes added" added)
+            (let ((again (make-secure-trie :store store :root root2)))
+              (is-equalp (octets-of 7) (trie-get again (first keys)))
+              (is (null (trie-get again (nth 5 keys))))
+              (is-equalp (nth 6 keys) (trie-get again (nth 6 keys))))))))
+    ;; a one-key trie: its root node is shorter than 32 bytes yet still collected
+    (let* ((tiny-store (make-collecting-store))
+           (tiny (make-trie :store tiny-store)))
+      (trie-put tiny (octets-of 1) (octets-of 2))
+      (is= 1 (collect-memory-nodes tiny tiny-store))
+      (is-equalp (octets-of 2) (trie-get (make-trie :store tiny-store :root (trie-root tiny)) (octets-of 1))))))

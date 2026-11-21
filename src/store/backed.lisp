@@ -15,11 +15,16 @@
 ;;; exactly the nodes of the state at its head, and a hot path rewritten in every block is
 ;;; written once per flush.
 
-(defstruct (node-store (:constructor make-node-store (kv)))
+(defstruct (node-store (:constructor make-node-store (kv &optional write-through)))
   kv
-  (pending (make-hash-table :synchronized t) :type hash-table) ; hash integer -> RLP, since the flush
+  ;; T: the tries hand every node they hash to NODE-STORE-PUT (an import). NIL: a state
+  ;; database's tries hash in RAM and a flush collects their new nodes (COLLECT-TRIE-NODES).
+  (write-through nil)
+  (pending (make-hash-table) :type hash-table) ; hash integer -> RLP, for the next flush (writer only)
   (pending-bytes 0 :type fixnum)
   (loads 0 :type fixnum))                                       ; nodes read from the store
+
+(defmethod node-store-write-through-p ((store node-store)) (node-store-write-through store))
 
 (defun node-value-split (value)
   "(values count rlp-start) of a stored node value."
@@ -51,6 +56,20 @@
     (unless (gethash key pending)
       (incf (node-store-pending-bytes store) (length bytes))
       (setf (gethash key pending) bytes))))
+
+(defun collect-trie-nodes (store trie)
+  "Add the nodes TRIE holds in memory that STORE does not hold to its pending nodes."
+  (let ((pending (node-store-pending store)) (kv (node-store-kv store)))
+    (trie-map-memory-nodes
+     trie
+     (lambda (hash rlp)
+       (let ((h (octets->integer hash)))
+         (cond ((gethash h pending) nil)
+               ((kv-get kv (key-node h)) nil)  ; stored: so is everything below it
+               (t (let ((bytes (funcall rlp)))
+                    (incf (node-store-pending-bytes store) (length bytes))
+                    (setf (gethash h pending) bytes))
+                  t)))))))
 
 (defun node-references (rlp account-p)
   "The stored nodes RLP names: ((hash-integer . account-trie-p) ...). In the account trie a
@@ -159,7 +178,8 @@ storage roots, which their accounts reference later)."
   (and (db-backing db) (not (db-open-p db)) (zerop (db-speculation-depth db))))
 
 (defun db-flush-entries (db)
-  "The batch that brings the store to DB's state: a vector of (key . value) in key order."
+  "The batch that brings the store to DB's state: a hash table key -> value (an empty value
+deletes)."
   (invariant (db-flush-ready-p db) "flush inside a block or a speculation")
   (let ((entries (make-hash-table :size (* 2 (+ 64 (db-dirty-weight db)))))
         (kv (db-backing db))
@@ -185,12 +205,18 @@ storage roots, which their accounts reference later)."
         (when code (setf (gethash (key-code k) entries) code))))
     (let ((old (db-flushed-root db)) (new (db-root-hash db)))
       (unless (octets= old new)
+        (collect-trie-nodes (db-nodes db) (db-trie db))
+        (maphash (lambda (address mark)
+                   (declare (ignore mark))
+                   (let ((a (db-account db address)))
+                     (when (and a (account-trie a)) (collect-trie-nodes (db-nodes db) (account-trie a)))))
+                 (db-flush-accounts db))
         (flet ((root (r) (unless (octets= r +empty-trie-root+) (list (cons (octets->integer r) t)))))
           (write-nodes (db-nodes db) entries :refs (root new) :unrefs (root old)))))
     (clrhash (node-store-pending (db-nodes db)))
     (setf (node-store-pending-bytes (db-nodes db)) 0)
     (setf (gethash (key-head) entries) (encode-head db))
-    (sorted-entries entries)))
+    entries))
 
 (defun sorted-entries (table)
   (let ((v (make-array (hash-table-count table))) (i 0))

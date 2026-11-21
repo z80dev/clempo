@@ -48,11 +48,7 @@
 (defun key-hash (key) (ldb (byte 256 160) key))
 
 (defun key-octets (key &optional (out (make-octets +key-bytes+)))
-  (declare (type octets out))
-  (loop for i from (1- +key-bytes+) downto 0
-        for k = key then (ash k -8)
-        do (setf (aref out i) (ldb (byte 8 0) k)))
-  out)
+  (integer-into-octets key out 0 +key-bytes+))
 
 ;;; Bloom filter hashes: FNV-1a over the key bytes, the second hash a SplitMix64 finish.
 
@@ -326,12 +322,14 @@ first time, against its checksum."
                                ((plusp cmp) (return nil)))
                          (incf pos vlen))))))))))
 
-;;; Cursors: one segment's records in key order from a start key.
+;;; Cursors: one source's records in key order from a start key. A source is a segment, or a
+;;; batch still being written (a hash table key -> value), read as its sorted entries.
 
 (defstruct (kcursor (:constructor make-kcursor (seg)))
   seg (block 0 :type fixnum) (pos 0 :type fixnum) (end 0 :type fixnum)
   (buf (make-octets +key-bytes+) :type octets)
   (first-p t)
+  (entries nil)                         ; a batch: simple-vector of (key . value), sorted
   key value)
 
 (defun kcursor-load-block (c i)
@@ -344,6 +342,14 @@ first time, against its checksum."
 
 (defun kcursor-next (c)
   "Step to the next record; its key and value in KCURSOR-KEY/VALUE, KEY NIL at the end."
+  (let ((entries (kcursor-entries c)))
+    (when entries
+      (let ((i (kcursor-pos c)))
+        (if (< i (length entries))
+            (setf (kcursor-key c) (car (svref entries i)) (kcursor-value c) (cdr (svref entries i))
+                  (kcursor-pos c) (1+ i))
+            (setf (kcursor-key c) nil))
+        (return-from kcursor-next (and (kcursor-key c) c)))))
   (let ((seg (kcursor-seg c)))
     (loop while (>= (kcursor-pos c) (kcursor-end c))
           do (unless (kcursor-load-block c (1+ (kcursor-block c))) (return-from kcursor-next nil)))
@@ -366,13 +372,23 @@ first time, against its checksum."
     (loop (unless (kcursor-next c) (return nil))
           (when (>= (kcursor-key c) lo) (return c)))))
 
-(defun merged-records (segments lo hi &key keep-tombstones)
-  "A generator over the records of SEGMENTS (newest first) with keys in [LO, HI) (HI NIL: no
-bound), merged in key order, the newest version of each key winning; tombstones are
-skipped unless KEEP-TOMBSTONES."
-  (let ((cursors (loop for s in segments
-                       for c = (kcursor-seek (make-kcursor s) lo)
-                       when c collect c)))
+(defun batch-cursor (table lo hi)
+  "A cursor over the entries of the batch TABLE with keys in [LO, HI), or NIL."
+  (let ((entries (loop for k being the hash-keys of table using (hash-value v)
+                       when (and (>= k lo) (or (null hi) (< k hi))) collect (cons k v))))
+    (when entries
+      (let ((c (make-kcursor nil)))
+        (setf (kcursor-entries c) (sort (coerce entries 'simple-vector) #'< :key #'car))
+        (kcursor-next c)))))
+
+(defun merged-records (segments lo hi &key keep-tombstones batches)
+  "A generator over the records of BATCHES and SEGMENTS (each newest first; batches are newer
+than segments) with keys in [LO, HI) (HI NIL: no bound), merged in key order, the newest
+version of each key winning; tombstones are skipped unless KEEP-TOMBSTONES."
+  (let ((cursors (append (loop for b in batches for c = (batch-cursor b lo hi) when c collect c)
+                         (loop for s in segments
+                               for c = (kcursor-seek (make-kcursor s) lo)
+                               when c collect c))))
     (lambda ()
       (loop
         (setf cursors (delete-if (lambda (c) (or (null (kcursor-key c))
@@ -380,7 +396,7 @@ skipped unless KEEP-TOMBSTONES."
                                  cursors))
         (when (null cursors) (return nil))
         (let ((best nil))
-          ;; CURSORS keep the segments' newest-first order: the first minimum is the newest
+          ;; CURSORS keep the sources' newest-first order: the first minimum is the newest
           (dolist (c cursors) (when (or (null best) (< (kcursor-key c) (kcursor-key best))) (setf best c)))
           (let ((key (kcursor-key best)) (value (kcursor-value best)))
             (dolist (c cursors) (when (eql (kcursor-key c) key) (kcursor-next c)))
@@ -399,8 +415,12 @@ skipped unless KEEP-TOMBSTONES."
   (lock (sb-thread:make-mutex :name "kv"))
   (merged (sb-thread:make-waitqueue :name "kv merge done"))
   (merger nil)                          ; the running merge thread
-  (merge-error nil)                     ; a merge's failure, signalled to the next writer
-  (background t))                       ; NIL: merge on the writer's thread
+  (merge-error nil)                     ; a merge's or batch write's failure, for the next writer
+  (background t)                        ; NIL: merge on the writer's thread
+  ;; Batches handed to KV-WRITE-ASYNC and not yet installed as segments (newest first), read
+  ;; before the segments; the thread writing the oldest of them.
+  (batches '() :type list)
+  (batch-writer nil))
 
 (defun kv-segment-name (n) (format nil "seg-~12,'0D.kv" n))
 
@@ -453,6 +473,13 @@ SB-POSIX:SYSCALL-ERROR (read again)."
 
 (defun kv-get (kv key)
   "The value of KEY, or NIL when absent or deleted. Safe from any thread."
+  ;; Batches first, then segments: an installed batch's segment is published before the
+  ;; batch leaves the list, so a reader never misses it.
+  (let ((batches (kv-batches kv)))
+    (sb-thread:barrier (:read))
+    (dolist (b batches)
+      (let ((v (gethash key b)))
+        (when v (return-from kv-get (if (plusp (length v)) v nil))))))
   (let ((kb (key-octets key)))
     (dolist (seg (kv-segments kv) nil)
       (let ((v (kseg-get seg key kb)))
@@ -460,10 +487,53 @@ SB-POSIX:SYSCALL-ERROR (read again)."
 
 (defun kv-map-range (kv lo hi fn)
   "Call FN with (key value) for every live key in [LO, HI), ascending."
-  (let ((next (merged-records (kv-segments kv) lo hi)))
+  (let* ((batches (kv-batches kv))
+         (segments (progn (sb-thread:barrier (:read)) (kv-segments kv)))
+         (next (merged-records segments lo hi :batches batches)))
     (loop (multiple-value-bind (key value) (funcall next)
             (unless key (return))
             (funcall fn key value)))))
+
+(defun kv-write-async (kv table after)
+  "Write the batch TABLE (key -> value, an empty value deletes) as the newest segment on a
+background thread, then call AFTER there. Reads see TABLE at once. Waits while an earlier
+batch is still being written (batches install in order)."
+  (kv-wait-batch kv)
+  (kv-check-merge kv)
+  (sb-thread:with-mutex ((kv-lock kv))
+    (setf (kv-batches kv) (cons table (kv-batches kv)))
+    (setf (kv-batch-writer kv)
+          (sb-thread:make-thread
+           (lambda ()
+             (handler-case
+                 (let* ((entries (sorted-entries table))
+                        (seq (sb-thread:with-mutex ((kv-lock kv)) (incf (kv-seq kv))))
+                        (path (dir-file (kv-dir kv) "~A" (kv-segment-name seq)))
+                        (i 0))
+                   (write-segment path
+                                  (lambda ()
+                                    (when (< i (length entries))
+                                      (let ((e (aref entries i)))
+                                        (incf i)
+                                        (values (car e) (cdr e)))))
+                                  (max 1 (length entries)))
+                   (let ((seg (open-kseg path)))
+                     (sb-thread:with-mutex ((kv-lock kv))
+                       (let ((segments (cons seg (kv-segments kv))))
+                         (write-kv-manifest kv (mapcar #'kseg-name segments))
+                         (setf (kv-segments kv) segments)
+                         (sb-thread:barrier (:write))
+                         (setf (kv-batches kv) (remove table (kv-batches kv))))))
+                   (funcall after)
+                   (kv-merge-tiers kv))
+               (error (e) (setf (kv-merge-error kv) e))))
+           :name "kv batch write")))
+  kv)
+
+(defun kv-wait-batch (kv)
+  "Wait until every handed-over batch is a segment."
+  (let ((thread (sb-thread:with-mutex ((kv-lock kv)) (kv-batch-writer kv))))
+    (when thread (sb-thread:join-thread thread :default nil))))
 
 (defun kv-segment-bytes (seg) (kseg-length seg))
 
@@ -562,7 +632,8 @@ adjacent while it merges: flushes only add segments at the front."
       (dolist (s group) (delete-file (kseg-path s))))))
 
 (defun kv-wait-merges (kv)
-  "Wait for the running merge, then signal its failure if it failed."
+  "Wait for the batch being written and the running merge, then signal a failure of either."
+  (kv-wait-batch kv)
   (let ((thread (sb-thread:with-mutex ((kv-lock kv)) (kv-merger kv))))
     (when thread (sb-thread:join-thread thread :default nil)))
   (kv-check-merge kv))
