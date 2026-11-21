@@ -372,3 +372,88 @@ python3 scripts/bench/rust-import.py --tempo ~/dev/tempo/target/release/tempo \
 The runner refuses to overwrite an existing import log or start from the
 wrong parent. To rerun, use a fresh working datadir at the parent and new log
 and result paths. Never use the live node's datadir.
+
+# RPC load (`clempo-dev rpc-load`)
+
+Both nodes serve **head 50,049,999** on the shared dev host: Clempo `rpc-serve`
+(release build of `9231bf6`, archive backend, history to 50,049,999) and the Rust
+reference `tempo node` (568b4fb4258c) on an APFS clone of the immutable snapshot,
+unwound to the same height, with networking off. The load generator runs in a third
+SBCL process on the same host, one keep-alive connection per client thread. The
+corpus is 400 seeded requests per method drawn from blocks 50,049,000..50,049,999
+(1,000 blocks, 566 transactions, 180 senders, 3 TIP-20 tokens): `eth_getBalance` and
+TIP-20 `balanceOf` `eth_call` of senders at the head, full `eth_getBlockByNumber`,
+10-block `eth_getLogs` of one token, `debug_traceTransaction` with `callTracer`, and
+`eth_getProof` (sender with no keys, or a token with one slot). Each cell is the
+median of 3 interleaved rounds of 400 requests, alternating which node goes first.
+
+**Answers:** all 2,400 requests compared first; **2,400 identical** (after
+`3640343` fixed absent-account `eth_getProof`, which differed on 43/400). No errors
+in any load run.
+
+| Method | Clients | Clempo req/s | Rust req/s | Clempo/Rust | Clempo p50/p99 ms | Rust p50/p99 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| `eth_getBalance` | 1 | 28,458 | 37,023 | 0.77 | 0.035/0.067 | 0.026/0.049 |
+| `eth_getBalance` | 16 | 140,007 | 119,546 | 1.17 | 0.108/0.143 | 0.133/0.162 |
+| `eth_getBalance` | 64 | 115,942 | 148,246 | 0.78 | 0.473/0.697 | 0.386/0.506 |
+| `eth_call` | 1 | 2,093 | 13,853 | 0.15 | 0.468/0.693 | 0.068/0.125 |
+| `eth_call` | 16 | 21,520 | 99,231 | 0.22 | 0.610/1.216 | 0.146/0.291 |
+| `eth_call` | 64 | 22,343 | 77,913 | 0.29 | 2.776/5.158 | 0.520/1.038 |
+| `eth_getBlockByNumber` | 1 | 16,034 | 32,903 | 0.49 | 0.051/0.176 | 0.026/0.074 |
+| `eth_getBlockByNumber` | 16 | 99,231 | 148,093 | 0.67 | 0.136/0.403 | 0.100/0.170 |
+| `eth_getBlockByNumber` | 64 | 104,478 | 137,045 | 0.76 | 0.498/0.829 | 0.374/0.642 |
+| `eth_getLogs` | 1 | 6,582 | 9,877 | 0.67 | 0.134/0.446 | 0.085/0.231 |
+| `eth_getLogs` | 16 | 19,045 | 70,834 | 0.27 | 0.811/1.406 | 0.189/0.511 |
+| `eth_getLogs` | 64 | 18,761 | 74,382 | 0.25 | 3.256/5.841 | 0.698/1.788 |
+| `debug_traceTransaction` | 1 | 594 | 1,781 | 0.33 | 1.162/5.702 | 0.417/1.601 |
+| `debug_traceTransaction` | 16 | 5,878 | 14,913 | 0.39 | 1.732/6.332 | 0.808/2.414 |
+| `debug_traceTransaction` | 64 | 4,794 | 15,487 | 0.31 | 6.926/29.665 | 3.780/5.671 |
+| `eth_getProof` | 1 | 9,150 | 7,744 | 1.18 | 0.113/0.202 | 0.135/0.225 |
+| `eth_getProof` | 16 | 83,247 | 25,324 | 3.29 | 0.172/0.326 | 0.603/1.763 |
+| `eth_getProof` | 64 | 77,002 | 22,653 | 3.40 | 0.729/1.735 | 2.233/7.639 |
+
+Clempo is faster than Rust only on `eth_getProof` and within 0.77–1.17x on `eth_getBalance`. goempo's
+published ratios (height 49,449,999, pinned cores, a Python client) are higher on
+every shared method: `eth_call` 1.28/0.64/0.57 at 1/16/64 clients, `eth_getLogs`
+2.01 at 1 client. An earlier run (`rpc-load-1`, while another agent's replay was still
+being paused) put every row on the same side of 1.0 except `eth_getBalance` at 16
+clients (0.82), but moved some ratios by up to 1.7x (`eth_getProof` at 16 clients
+1.99, `eth_getLogs` at 16 clients 0.38): the host is shared and unpinned, so read the
+direction and rough size of each row, not its exact value.
+
+The bottlenecks, from an all-thread `sb-sprof` CPU profile of the same build serving
+in-process under 16 clients (`profile-graph.txt`, `profile-trace-block.txt`):
+
+- `eth_getLogs`: 87% of samples are `PROBE-FILE` (`stat`/`getattrlist`) from the
+  archive backend's `BACKEND-BLOCK-RAW`, one file-system query per block per request.
+  It stops scaling past 16 clients.
+- `eth_call` and `debug_traceTransaction`: about 30% in `CLEMPO.HISTORY::SEGMENT-FLOOR`
+  (a varint scan per state read), plus `lseek`/`read` per lookup; the traces add about
+  12% mutex wait.
+- No global state lock: reads share the backend's reader count and `eth_getBalance`
+  and `eth_getProof` scale to 16 clients.
+
+Results, logs and profiles: `~/scratch/clempo/fuzzload/results/` on the measuring
+host (`rpc-load-{1,2}.{json,txt,log}`, `profile-*.txt`).
+
+### Reproduce
+
+```sh
+cp -cR "$rust_snapshot" "$rust_rpc"          # detached archive; never the live node
+"$tempo" stage unwind --datadir "$rust_rpc" --chain mainnet to-block 50049999
+CLEMPO_BUILD=release bin/clempo-dev rpc-serve -port 18546 -upstream http://127.0.0.1:18545 &
+"$tempo" node --chain mainnet --datadir "$rust_rpc" --follow ws://127.0.0.1:18546 \
+  --follow.nocertify --http --http.port 18545 --http.api eth,debug,trace,net,web3,rpc \
+  --ipcdisable --disable-dns-discovery --disable-discv4-discovery \
+  --disable-discv5-discovery --max-outbound-peers 0 --max-inbound-peers 0 \
+  --port 30399 --discovery.port 30399 --authrpc.port 18551 &
+bin/clempo-dev rpc-load -a http://127.0.0.1:18546 -b http://127.0.0.1:18545 \
+  -from 50049000 -to 50049999 -n 400 -total 400 -rounds 3 -concurrency 1,16,64 \
+  -result "$result"
+```
+
+The Rust node needs a `--follow` upstream that accepts a WebSocket; pointing it at the
+Clempo server at the same head keeps it idle. `-upstream` lets Clempo fill its
+receipts store (root-checked) on first use; the diff pass warms it before timing.
+`rpc-load` exits 1 when any answer differs; `-no-diff` and `-no-load` run one phase.
+Never point it at the live reference node: its rule is two threads at most.
