@@ -12,7 +12,8 @@
                (:file "server")
                (:file "render")
                (:file "eth")
-               (:file "logs")))
+               (:file "logs")
+               (:file "config")))
 
 (defsystem "clempo-rpc/tests"
   :depends-on ("clempo-rpc")

@@ -9,7 +9,7 @@
 | R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `b0b729d` | 2026-11-21 |
 | R3p Precompiles | - | | |
 | R4 Follow | - | | |
-| R5 RPC | - | | |
+| R5 RPC | 60/132 methods, 5,368/8,221 cases; 55/156 reference methods served (blocks 3,890/3,890, logs 366/366, envelope 50/50; state, calls and traces wait on the executor) | rpc slice 3 | 2026-11-21 |
 | R6 Validator | - | | |
 | R7 Speed | - | | |
 
