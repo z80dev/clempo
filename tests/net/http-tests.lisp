@@ -18,7 +18,8 @@
                               (funcall handler (sb-bsd-sockets:socket-make-stream
                                                 client :input t :output t :buffering :full
                                                        :element-type '(unsigned-byte 8))))
-                          (sb-bsd-sockets:socket-close client))))
+                          ;; The client may already have hung up: never flush on close.
+                          (ignore-errors (sb-bsd-sockets:socket-close client :abort t)))))
                     :name "http test server")))
       (unwind-protect (funcall function (format nil "http://127.0.0.1:~D/" port) port)
         (ignore-errors (sb-thread:terminate-thread thread))
