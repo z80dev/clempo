@@ -190,7 +190,8 @@ precompile-revert KeyAlreadyRevoked / KeyNotFound / KeyExpired / SignatureTypeMi
     (flet ((tip20-p ()
              (when (eq tip20 :unknown)
                (setf tip20 (fork-if (:before :t4)
-                             (clempo.tip20-factory:tip20-p target)
+                             ;; TIP20Factory::is_tip20, called late: that file loads after this one
+                             (funcall 'clempo.tip20-factory:tip20-p target)
                              (tip20-address-p target))))
              tip20))
       (when (and sort-selectors (has-duplicates-metered (mapcar #'first rules)))

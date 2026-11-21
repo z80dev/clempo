@@ -23,4 +23,5 @@
                (:file "precompiles-tests")
                (:file "validator-tests")
                (:file "tip20-tests")
-               (:file "fee-manager-tests")))
+               (:file "fee-manager-tests")
+               (:file "keychain-tests")))
