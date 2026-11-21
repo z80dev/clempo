@@ -18,7 +18,8 @@
   (spec :genesis :type keyword)
   (general-gas-limit 0 :type (unsigned-byte 64))
   (shared-gas-limit 0 :type (unsigned-byte 64))
-  (proposer nil))
+  (proposer nil)
+  (parent-beacon-block-root (make-octets 32) :type octets))
 
 (defun header-block-env (header &key (chain *chain*))
   (let* ((inner (headers:header-inner header))
@@ -37,7 +38,9 @@
                     :spec (chainspec:fork-at timestamp chain)
                     :general-gas-limit (headers:header-general-gas-limit header)
                     :shared-gas-limit (headers:header-shared-gas-limit header)
-                    :proposer (when context (headers:consensus-context-proposer context)))))
+                    :proposer (when context (headers:consensus-context-proposer context))
+                    :parent-beacon-block-root (or (headers:ethereum-header-parent-beacon-block-root inner)
+                                                  (make-octets 32)))))
 
 (defstruct block-result
   (number 0 :type integer)
@@ -108,14 +111,8 @@ their fork is active (once; an account that already has code is left alone).")
 
 (defun apply-pre-execution-changes (db env block)
   (let ((spec (block-env-spec env)))
-    (when (blocks:block-withdrawals block)
+    (when (and block (blocks:block-withdrawals block))
       (fail-tx 'invalid-transaction nil "withdrawals are not permitted"))
-    ;; deploy_zone_factory_at_boundary: a factory that already has code (genesis allocation
-    ;; or a completed installation) is left alone.
-    (when (and (forks:fork>= spec :t10)
-               (let ((a (store:db-account db #x5AF2000000000000000000000000000000000000)))
-                 (not (and a (not (octets= (store:account-code-hash a) clempo.trie:+empty-code-hash+))))))
-      (fail-tx 'unsupported-transaction nil "T10 zone factory installation is not implemented"))
     (dolist (m *fork-markers*)
       (when (forks:fork>= spec (car m)) (deploy-marker db (cdr m))))))
 

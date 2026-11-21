@@ -10,16 +10,9 @@
 (define-constant +key-auth-extra-event-buffer+ 1500)
 (define-constant +expiring-nonce-gas+ (+ (* 2 2100) 100 (* 3 2900)))
 
-(defun types-fn (name)
-  "A clempo.transactions / clempo.signatures helper TypesAgent is adding, by name."
-  (let ((s (or (find-symbol name "CLEMPO.TRANSACTIONS") (find-symbol name "CLEMPO.SIGNATURES"))))
-    (if (and s (fboundp s))
-        (symbol-function s)
-        (fail-tx 'unsupported-transaction *tx-index* "types helper ~A is not available" name))))
-
 (defun signature-gas (signature)
   "signature_gas.rs tempo_signature_verification_gas."
-  (funcall (types-fn "TEMPO-SIGNATURE-VERIFICATION-GAS") signature))
+  (tx:tempo-signature-verification-gas signature))
 
 (defun keychain-signature-p (signature)
   (member (clempo.signatures:signature-kind signature) '(:keychain-v1 :keychain-v2)))
@@ -182,16 +175,16 @@
                                         (:secp256k1 0) (:p256 1) (:webauthn 2))))
                      (key (handler-case
                               (with-protocol-storage ()
-                                (prog1 (pcall "CLEMPO.KEYCHAIN" "VALIDATE-KEYCHAIN-AUTHORIZATION"
-                                              user access-key (block-env-timestamp (ctx-env *ctx*)) expected-type)
-                                  (pcall "CLEMPO.KEYCHAIN" "SET-TRANSACTION-KEY" access-key)))
+                                (prog1 (clempo.keychain:validate-keychain-authorization
+                                        user access-key (block-env-timestamp (ctx-env *ctx*)) expected-type)
+                                  (clempo.keychain:set-transaction-key access-key)))
                             (contract:precompile-condition (c) (invalid "keychain validation failed: ~A" c)))))
-                (when (and auth (not (pcall "CLEMPO.KEYCHAIN" "AUTHORIZED-KEY-IS-ADMIN" key)))
+                (when (and auth (not (clempo.keychain:authorized-key-is-admin key)))
                   (invalid "access key cannot authorize other keys"))
                 (when (forks:spec>= :t6) (fail-tx 'unsupported-transaction *tx-index* "T6 admin key authorizations"))
-                (setf (ctx-key-expiry *ctx*) (pcall "CLEMPO.KEYCHAIN" "AUTHORIZED-KEY-EXPIRY" key))
+                (setf (ctx-key-expiry *ctx*) (clempo.keychain:authorized-key-expiry key))
                 (make-keychain-state :access-key access-key
-                                     :fee-key (when (pcall "CLEMPO.KEYCHAIN" "AUTHORIZED-KEY-ENFORCE-LIMITS" key)
+                                     :fee-key (when (clempo.keychain:authorized-key-enforce-limits key)
                                                 access-key))))))))
 
 (defun apply-key-authorization (v fee kc)
@@ -203,16 +196,38 @@
       (when (forks:spec>= :t6) (fail-tx 'unsupported-transaction *tx-index* "T6 admin key authorizations"))
       (handler-case
           (with-protocol-storage ()
-            (pcall "CLEMPO.KEYCHAIN" "AUTHORIZE-KEY" (txv-sender v) auth))
+            (let* ((limits (clempo.signatures:key-authorization-limits auth))
+                   (calls (clempo.signatures:key-authorization-allowed-calls auth))
+                   (expiry (clempo.signatures:key-authorization-expiry auth)))
+              (clempo.keychain:authorize-key
+               (txv-sender v) (clempo.signatures:key-authorization-key-id auth)
+               (clempo.signatures:key-authorization-key-type auth)
+               (or expiry +max-u64+)
+               (not (eq limits :absent))
+               (if (eq limits :absent) '()
+                   (mapcar (lambda (l) (list (clempo.signatures:key-authorization-limit-token l)
+                                             (clempo.signatures:key-authorization-limit-amount l)
+                                             (clempo.signatures:key-authorization-limit-period l)))
+                           limits))
+               (eq calls :absent)
+               (if (eq calls :absent) '()
+                   (mapcar (lambda (s)
+                             (list (clempo.signatures:key-authorization-call-scope-target s)
+                                   (mapcar (lambda (r)
+                                             (list (clempo.signatures:key-authorization-selector-rule-selector r)
+                                                   (clempo.signatures:key-authorization-selector-rule-recipients r)))
+                                           (clempo.signatures:key-authorization-call-scope-selector-rules s))))
+                           calls))
+               (clempo.signatures:key-authorization-witness auth))))
         (contract:precompile-condition (c) (invalid "keychain precompile: ~A" c)))
       (let ((expiry (clempo.signatures:key-authorization-expiry auth)))
         (setf (ctx-key-expiry *ctx*) expiry))
       (when (kc-same-tx-p kc)
         (handler-case
             (with-protocol-storage ()
-              (pcall "CLEMPO.KEYCHAIN" "SET-TRANSACTION-KEY" (clempo.signatures:key-authorization-key-id auth))
+              (clempo.keychain:set-transaction-key (clempo.signatures:key-authorization-key-id auth))
               (unless (zerop (fee-collected fee))
-                (pcall "CLEMPO.KEYCHAIN" "AUTHORIZE-TRANSFER" (fee-payer fee) (fee-token fee) (fee-collected fee))))
+                (clempo.keychain:authorize-transfer (fee-payer fee) (fee-token fee) (fee-collected fee))))
           (contract:precompile-condition (c) (invalid "fee authorization: ~A" c))))))
   0)
 
@@ -229,8 +244,7 @@
         (handler-case
             (let ((contract:*storage* storage))
               (dolist (call (txv-calls v))
-                (pcall "CLEMPO.KEYCHAIN" "VALIDATE-CALL-SCOPE-FOR-TRANSACTION"
-                       caller access-key (first call) (third call)))
+                (clempo.keychain:validate-call-scope caller access-key (first call) (third call)))
               (setf remaining (- remaining (contract:metered-storage-spent storage))))
           (contract:precompile-revert ()
             (state:rollback world cp)
@@ -318,6 +332,7 @@
                  (create-nonce (apply-aa-nonce v))
                  (kc (prepare-keychain v fee)))
             (collect-fee ctx fee (when (= (fee-payer fee) caller) (kc-fee-key kc)))
+            (when (ctx-validate-only ctx) (return-from execute-aa-transaction (validated-outcome fee)))
             (apply-key-authorization v fee kc)
             (let ((auth-refund (if (txv-authorizations v)
                                    (apply-tempo-authorizations (txv-authorizations v)

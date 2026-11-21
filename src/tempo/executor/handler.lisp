@@ -22,7 +22,8 @@
   (non-shared-left 0) (non-payment-left 0)
   (cumulative 0) (block-gas 0) (receipts '()) (index 0)
   skip-nonce-check skip-valid-after-check skip-base-fee-check skip-liquidity-check
-  key-expiry)                           ; access-key expiry resolved for the running tx
+  key-expiry                            ; access-key expiry resolved for the running tx
+  validate-only)                        ; stop after fee collection (pool admission)
 
 (defvar *tx-index* nil "Index of the transaction being executed, for conditions.")
 (defvar *ctx* nil "The block context of the running transaction.")
@@ -160,7 +161,7 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
 (defun valid-fee-token-p (token)
   (and (tip20-address-p token)
        (with-protocol-storage (:static t)
-         (let ((currency (pcall "CLEMPO.TIP20" "CURRENCY" token)))
+         (let ((currency (clempo.tip20:currency token)))
            (string= currency "USD")))))
 
 (defun resolve-fee-token (v fee-payer max-fee)
@@ -171,7 +172,7 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
       (when (and (not aa) (= fee-payer sender) (eql kind +fee-manager-address+)
                  (>= (length input) 36) (= (octets->integer input :end 4) #xe7898ae0)) ; setUserToken(address)
         (return-from resolve-fee-token (values (octets->integer input :start 16 :end 36) nil)))
-      (let ((user (with-protocol-storage (:static t) (pcall "CLEMPO.FEE-MANAGER" "USER-TOKEN" fee-payer))))
+      (let ((user (with-protocol-storage (:static t) (clempo.fee-manager:user-token fee-payer))))
         (unless (zerop user) (return-from resolve-fee-token (values user nil))))
       (when (and (integerp kind)
                  (not (and aa (/= fee-payer sender)))
@@ -193,7 +194,7 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
             (dolist (token (pc:fallback-fee-tokens forks:*spec*)
                            (invalid "insufficient fee token balance: ~D < ~D in ~X" highest max-fee richest))
               (let ((balance (with-protocol-storage (:static t)
-                               (pcall "CLEMPO.TIP20" "BALANCE-OF" token fee-payer))))
+                               (clempo.tip20:balance-of token fee-payer))))
                 (when (>= balance max-fee) (return (values token t)))
                 (when (> balance highest) (setf richest token highest balance)))))))))
 
@@ -204,16 +205,19 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
          (max-fee (calc-gas-balance-spending (txv-gas-limit v) (txv-max-fee-per-gas v))))
     (setf *non-creditable* nil)
     (with-protocol-storage ()
-      (pcall "CLEMPO.KEYCHAIN" "SET-TX-ORIGIN" (txv-sender v))
+      (clempo.keychain:set-tx-origin (txv-sender v))
       (when (forks:spec>= :t14)
         (fail-tx 'unsupported-transaction *tx-index* "T14 upgrade-authority seeding"))
-      (pcall "CLEMPO.CHANNEL-RESERVE" "SET-CHANNEL-OPEN-CONTEXT-HASH"
-             (octets->integer (tx:transaction-unique-identifier (txv-tx v) (txv-sender v)))))
+      ;; A transient write only TIP20ChannelReserve (T5) reads, inside this transaction: before
+      ;; T5 nothing can observe it.
+      (when (forks:spec>= :t5)
+        (pcall "CLEMPO.CHANNEL-RESERVE" "SET-CHANNEL-OPEN-CONTEXT-HASH"
+               (octets->integer (tx:transaction-unique-identifier (txv-tx v) (txv-sender v))))))
     (multiple-value-bind (token fallback-p) (resolve-fee-token v fee-payer max-fee)
       (unless (tip20-address-p token) (invalid "fee token ~X is not TIP-20" token))
       (unless (zerop max-fee)
         (unless (valid-fee-token-p token) (invalid "fee token ~X is not USD" token)))
-      (let ((balance (with-protocol-storage (:static t) (pcall "CLEMPO.TIP20" "BALANCE-OF" token fee-payer))))
+      (let ((balance (with-protocol-storage (:static t) (clempo.tip20:balance-of token fee-payer))))
         (when (< balance max-fee)
           (invalid "insufficient fee token balance: ~D < ~D" balance max-fee)))
       (make-fee-context :payer fee-payer :token token :collected collected :max-fee max-fee
@@ -226,7 +230,7 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
     (let ((cp (state:checkpoint evm:*world*)))
       (handler-case
           (with-protocol-storage ()
-            (pcall "CLEMPO.FEE-MANAGER" "COLLECT-FEE-PRE-TX" (fee-payer fee) (fee-token fee)
+            (clempo.fee-manager:collect-fee-pre-tx (fee-payer fee) (fee-token fee)
                    (fee-collected fee) (block-env-beneficiary (ctx-env ctx)) (ctx-skip-liquidity-check ctx)))
         (contract:precompile-condition (c)
           (state:rollback evm:*world* cp)
@@ -280,7 +284,7 @@ builder read (Rust TempoTxResult / ResolvedFeeToken / key_expiry)."
       (unless (and (zerop actual) (zerop (- collected actual)))
         (setf validator-fee
               (with-protocol-storage ()
-                (pcall "CLEMPO.FEE-MANAGER" "COLLECT-FEE-POST-TX" (fee-payer fee) actual (- collected actual)
+                (clempo.fee-manager:collect-fee-post-tx (fee-payer fee) actual (- collected actual)
                        (fee-token fee) (block-env-beneficiary (ctx-env ctx)))))))
     (values used validator-fee)))
 
@@ -364,6 +368,7 @@ builder read (Rust TempoTxResult / ResolvedFeeToken / key_expiry)."
           ;; before_execution: fee context and collection
           (let ((fee (resolve-fee-context ctx v (txv-sender v))))
             (collect-fee ctx fee nil)
+            (when (ctx-validate-only ctx) (return-from execute-ethereum-transaction (validated-outcome fee)))
             (let ((evm:*tx-env* (evm:make-tx-env :origin sender :gas-price price)))
               (multiple-value-bind (status gas-left)
                   (run-initial-frame sender sender-nonce (txv-to v) (txv-input v) 0 (- gas-limit intrinsic))
@@ -404,9 +409,9 @@ APPLY-TRANSACTION and FINISH-BLOCK take."
     (store:db-begin-block db)
     (with-block-context (ctx)
       (when (and block (blocks:block-withdrawals block)) (invalid "withdrawals are not permitted"))
+      (apply-history-and-beacon-calls ctx :parent-beacon-block-root (block-env-parent-beacon-block-root env))
       (apply-pre-execution-changes db env block)
-      (when (forks:spec>= :t13)
-        (fail-tx 'unsupported-transaction nil "T13 EIP-2935 system call")))
+      (apply-zone-factory ctx))
     ctx))
 
 (defun next-section (ctx system-p payment-p gas)
@@ -423,6 +428,7 @@ APPLY-TRANSACTION and FINISH-BLOCK take."
   "Execute TX in CTX's block and append its receipt; returns a TX-OUTCOME, or signals
 INVALID-TRANSACTION with the block as it was before TX."
   (let* ((*tx-index* (ctx-index ctx))
+         (*ctx* ctx)
          (system-p (system-transaction-p tx)))
     (with-block-context (ctx)
       (let ((outcome
@@ -459,10 +465,7 @@ INVALID-TRANSACTION with the block as it was before TX."
   "Run the post-execution system calls, write the block's changes into the state database and
 return the BLOCK-RESULT (the db block stays open for the caller to commit or revert)."
   (with-block-context (ctx)
-    (when (and (forks:spec>= :t8)
-               (zerop (mod (1+ (block-env-number (ctx-env ctx)))
-                           (chainspec:chain-epoch-length (chainspec:load-chainspec *chain*)))))
-      (fail-tx 'unsupported-transaction nil "T8 current-committee system call"))
+    (apply-committee-call ctx)
     (write-changes (ctx-db ctx) (state:drain-changes (ctx-world ctx))))
   (let ((receipts (reverse (ctx-receipts ctx))))
     (make-block-result :number (block-env-number (ctx-env ctx))
@@ -492,14 +495,22 @@ tokens, TIP-20 balances, keychain keys) can be called. Writes signal; nothing re
             (contract:*storage* (contract:make-metered-storage *host* :static t :tip1060 nil)))
        ,@body)))
 
+(defun validated-outcome (fee)
+  "The outcome of a validation-only run: everything up to fee collection passed."
+  (make-tx-outcome t 0 0 '() :fee-token (fee-token fee) :fallback-fee-token-p (fee-fallback-p fee)
+                             :fee-payer (fee-payer fee) :key-expiry (ctx-key-expiry *ctx*)))
+
 (defun check-transaction (db env tx sender &key skip-nonce-check skip-valid-after-check
-                                               skip-base-fee-check skip-liquidity-check)
-  "Validate and execute TX on DB as the first transaction after ENV's pre-execution changes,
-then undo everything. Returns the TX-OUTCOME or signals INVALID-TRANSACTION."
+                                               skip-base-fee-check skip-liquidity-check execute)
+  "Validate TX on DB as the first transaction after ENV's pre-execution changes: every check
+the handler makes through nonce, keychain and fee collection, without running its calls
+(with EXECUTE, run it too). Everything is undone. Returns the TX-OUTCOME (gas 0 unless
+EXECUTE) or signals INVALID-TRANSACTION."
   (let ((ctx (begin-block db env)))
     (setf (ctx-skip-nonce-check ctx) skip-nonce-check
           (ctx-skip-valid-after-check ctx) skip-valid-after-check
           (ctx-skip-base-fee-check ctx) skip-base-fee-check
-          (ctx-skip-liquidity-check ctx) skip-liquidity-check)
+          (ctx-skip-liquidity-check ctx) skip-liquidity-check
+          (ctx-validate-only ctx) (not execute))
     (unwind-protect (apply-transaction ctx tx sender)
       (store:db-revert-block db))))

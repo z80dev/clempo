@@ -14,6 +14,7 @@
                (:file "lanes")
                (:file "handler")
                (:file "aa")
+               (:file "system-calls")
                (:file "replay")))
 
 (defsystem "clempo-tempo-executor/tests"

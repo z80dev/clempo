@@ -106,12 +106,15 @@ so the state is genesis (every header through 3210 carries the genesis state roo
          (traces (clempo.json:parse-json
                   (clempo.io:read-file-string (merge-pathnames "prestate-diff-3211.json" *data*))))
          (seen nil)
-         (result (handler-bind ((block-mismatch
+         ;; Any error in a block (here one injected before execution) offers the restarts.
+         (result (handler-bind ((error
                                   (lambda (c)
-                                    (setf seen (block-mismatch-field c))
+                                    (setf seen c)
                                     (invoke-restart 'heal-from-reference))))
                    (replay-blocks db 3211 3211
                                   :block-fn (lambda (n) (declare (ignore n)) b3211)
+                                  :senders-fn (lambda (block) (declare (ignore block))
+                                                (error "injected failure"))
                                   :heal-fn (lambda (db n block)
                                              (declare (ignore n))
                                              (clempo.executor::heal-block db block traces :chain :mainnet))))))
