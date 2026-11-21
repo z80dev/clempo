@@ -11,7 +11,7 @@
 | R4 Follow | partial: certificates 20,001/20,001 consecutive mainnet finalizations across epochs 2314/2315; live `follow -certify` 91/91 at zero lag; public devp2p follow 3,350 finalized blocks byte-identical at zero lag; node binary with RPC and REPL. The executed one-hour run waits for R3 to reach the tip | `bba3dfe`, `37a9c7a`, `3ab8073` | 2026-11-21 |
 | R5 RPC | 145/154 methods, 14,147/14,287 cases (99.0%) with full history coverage 0..50,049,999: blocks 5,126/5,126, calls 853/853, consensus 9/9, envelope 50/50, logs 508/508, static 119/119, tempo-params 101/101, txs 1,027/1,027, state 3,539/3,542, traces 2,801/2,927, success 14/25; 152/156 reference methods served. Left: head-state methods at "latest", debug_intermediateRoots, debug_traceBlock (raw RLP), reference-side timeouts recorded in the corpus | `7980399` | 2026-11-21 |
 | R6 Validator | Sims: 4, 5 and 7 validators, three epochs each, every reshare concluded through per-node DKG managers. Live Rust devnet: one Clempo signer necessary through two reshares, two Clempo signers necessary through three | `b680aaf`, `dbe14d1` | 2026-11-21 |
-| R7 Speed | Busy 9,890,000..9,909,999 (20k blocks, 659,246 txs, 31.5 Ggas, every root, gas, receipt and bloom checked): clempo **24.5 s wall / 57.8 s CPU** vs Rust tempo root-checked import of the same range on this host 36.0 s wall / 43.2 s CPU: 1.47x faster wall, 1.34x more CPU (paired back-to-back runs; history 201.7 -> 83.9 -> 24.5 s). Early and Recent ranges not yet measured. Also: EVM bytecode compiled through `compile` 7.7x on small-word arithmetic; keccak 799 MB/s and SHA-256 2.7 GB/s via arm64 VOPs; ecrecover 45 µs zero-alloc; BLS MinSig verify 2.7 ms | `d3aace8`, `40521c1`, `217b0c1` | 2026-11-21 |
+| R7 Speed | Clempo vs Rust, wall / CPU seconds: **Early** 1..1,000,000 **9.01 / 12.73 vs 58.22 / 37.25** (paired, 6.46× wall throughput); **Busy** 9,890,000..9,909,999 **24.52–24.73 / 57.75–57.81 vs 36.00 / 43.22** (historical, unpaired between clients, 1.46–1.47×); **Recent** 49,410,000..49,449,999 **36.41 / 37.34 vs 47.22 / 21.41** (unpaired, 1.30× timed wall throughput, 1.74× CPU). Clempo checks every root; Rust checks import-chunk terminal roots. [RSS, GC, commands, and profiles](docs/BENCH.md#results-on-the-shared-dev-host). | `40521c1`, `15c118d` | 2026-11-21 |
 
 ## Evidence
 
@@ -135,9 +135,10 @@ Busy replay-thread work (paired, alternating, root-checked on all 20,000 blocks,
 `40521c1`), back to back: **58.14 s wall / 105.63 s CPU / 97.5 GB consed** ->
 **24.52 / 24.73 s wall, 57.75 / 57.81 s CPU, 22.2 GB consed, GC 2.37 -> 1.25 s**
 (an earlier, busier-host `e55a532` run took 79.18 s / 123.93 s CPU). Peak RSS
-3.1 GB. Rust's root-checked staged import of the same range on this host:
-36.00 s wall, 43.22 s CPU (`~/scratch/clempo/bench/busy.json`; Execution stage
-15.89 s). Per step, each paired A/B on the previous step:
+3.1 GB. Separately, Rust's staged import of the same range on this host took
+36.00 s wall and 43.22 s CPU (`~/scratch/clempo/bench/busy.json`; Execution
+stage 15.89 s). The Rust run was not paired with these Clempo A/B runs.
+Per step, each paired Clempo A/B on the previous step:
 
 | Step | A wall s | B wall s |
 |---|---:|---:|
@@ -158,20 +159,16 @@ profile now (`-profile-threads main`): TIP-20 transfer and fee pre/post paths ~3
 SLOAD path ~20% (bignum-keyed hash lookups ~15%), state root ~12%, expiring-nonce ring
 ~10%, receipts root and bloom ~6%, synchronous EVM JIT compiles ~2%.
 
-R7 Rust reference samples (Apple Silicon `Mac15,9`, Tempo 1.19.0-dev
-`568b4fb4258c`, release). Both imports read canonical RLP and completed
-`MerkleExecute` and `Finish` at the requested heights:
-
-| Range | Gas | Wall s | CPU s | Peak RSS GB | Blocks/s | Mgas/s | Execution + MerkleExecute s |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Early: 1..1,000,000 | 135,315,780 | 89.14 | 41.67 | 7.22 | 11,218 | 1.52 | 17.35 |
-| Recent: 49,410,000..49,449,999 | 3,768,403,621 | 47.22 | 21.41 | 3.72 | 847 | 79.80 | 15.67 |
-
-`tempo import --fail-on-invalid-block` checks each import chunk's terminal
-state root, not every block’s root. Clempo checks every block. Recent began
-at the canonical parent obtained by unwinding a detached archive snapshot
-(height 50,050,994). Provisioning time is excluded. See [benchmark
-commands](docs/BENCH.md); R7 remains unscored.
+R7 Early and Recent (`15c118d`): the Early pair repeated from genesis after the
+certified follower reached steady state, Rust then Clempo, with no overlapping
+benchmarks. The historical Rust Early import (89.14 s wall / 41.67 s CPU,
+`~/scratch/clempo/bench/early.log`) is not used for the paired comparison.
+For Recent, a copy of the 49,000,000 R3 checkpoint replayed all 409,999
+intervening blocks to the exact parent 49,409,999 without heals or skips,
+off the clock. The Recent timed replay used 1.74× Rust's historical CPU;
+the CPU profile sampled Nitro P-384 verification (31.4% inclusive),
+pipeline wakeups (28.4% in Darwin `__ulock_wake`), and lazy storage-trie
+hydration (23.8% inclusive). See [the comparisons and call paths](docs/BENCH.md#results-on-the-shared-dev-host).
 
 Busy historical execution cross-check, **not a root-checked import**:
 `tempo re-execute --from 9890000 --to 9909999 --num-tasks 1 --blocks-per-chunk 20000`

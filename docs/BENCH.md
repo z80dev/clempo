@@ -10,6 +10,59 @@ These inclusive ranges use mainnet raw blocks from the same `CLBK` archive on bo
 
 Busy is goempo's published Busy workload. Recent starts 1,084 blocks later than its historical recent trial, so compare only the measurements on the range above.
 
+## Results on the shared dev host
+
+Apple Silicon `Mac15,9`, SBCL 2.6.8 release, Tempo 1.19.0-dev release
+(`568b4fb4258c`). Clempo uses persistent WAL, eight sender-recovery participants,
+and checks every block's gas, receipts root, bloom, and state root. Rust checks
+the terminal state root of each import chunk and runs additional import/indexing
+stages. The timings compare these two workflows, not isolated executors.
+
+| Range | Clempo wall / CPU s | Clempo peak RSS GB / GC s | Rust wall / CPU s | Rust peak RSS GB | Clempo / Rust blocks/s | Comparison |
+|---|---:|---:|---:|---:|---:|---|
+| Early | 9.01 / 12.73 | 2.33 / 0.083 | 58.22 / 37.25 | 7.22 | 110,986 / 17,176 | 6.46× wall throughput, paired |
+| Busy | 24.52–24.73 / 57.75–57.81 | 3.12 / 1.25 | 36.00 / 43.22 | 3.89 | 809–816 / 556 | 1.46–1.47× wall throughput, historical and unpaired between clients |
+| Recent | 36.41 / 37.34 | 5.45 / 2.68 | 47.22 / 21.41 | 3.72 | 1,098 / 847 | 1.30× wall throughput, historical Rust baseline (unpaired) |
+
+RSS is in decimal GB; the Rust runner has no GC metric. No other benchmark ran
+during the new scored trials. The reference node and the certified Clempo
+follower remained up; independent RPC probes saw the latter within three
+blocks of tip throughout. Busy and Recent's Rust reference timings were not
+taken under the same controlled load as the Clempo samples.
+
+- **Early** (`15c118d`): Rust then Clempo back-to-back, both starting from
+  genesis. The freshly exported RLP is byte-identical to the recorded corpus.
+  Both reached block 1,000,000 (1,000,635 transactions, 135,315,780 gas).
+  A first pair overlapped the follower's final catch-up to the moving tip and
+  is excluded. The older, unpaired Rust baseline was 89.14 s wall / 41.67 s
+  CPU; in the scored pair, Rust spent 35.30 s in Bodies and 11.45 s in Execution.
+  Evidence: `~/scratch/clempo/bench/r7-early-recent/early-steady/{rust,clempo}.json`.
+- **Busy** (`40521c1` equivalent): two Clempo samples, each with 659,246
+  transactions and 31,499,321,696 gas. The Clempo A/Bs were paired with each
+  other, not with Rust. See [Busy evidence](../FRONTIER.md#evidence) for the
+  earlier samples and replay-thread profile.
+- **Recent** (`15c118d`): copy the immutable R3 checkpoint at 49,000,000 and
+  replay 409,999 blocks without healing or skipping to obtain the exact parent
+  outside the timer. The scored range checked 40,000 blocks (18,733 transactions,
+  3,768,403,621 gas). The full Clempo command took **50.71 s wall / 51.61 s CPU**
+  including parent copy/open and startup, versus **36.41 s / 37.34 s** in the
+  timed replay. Evidence: `~/scratch/clempo/bench/r7-early-recent/recent-{prepare,clempo}.json`
+  and `~/scratch/clempo/bench/recent.json`.
+
+### Recent CPU profile
+
+Recent used **1.74×** Rust's historical CPU time despite faster timed replay.
+A separate full-range `-profile-mode cpu` run captured 5,731 samples:
+
+| Samples | Call path |
+|---:|---|
+| 31.4% inclusive | AA execution → EVM `CALL` → ZoneVerifier `VERIFY-WITH-POLICY` → `NITRO-VERIFY-PARSED` → `P384-VERIFY` (certificate chain and attestation signature) → `P384-JOINT` → point doubling/mixed addition → bignum division |
+| 28.4% self | `PIPELINE-TAKE`/producer handoff → `CONDITION-NOTIFY` → Darwin `__ulock_wake`; 25.3% came through the consumer. This identifies the sampled synchronization site, not its isolated CPU cost. |
+| 23.8% inclusive | `FINISH-BLOCK` → `WRITE-CHANGES` → `DB-SET-STORAGE` → `ENSURE-STORAGE-TRIE`, split between building and hashing storage tries on first write after checkpoint load |
+
+Source: `~/scratch/clempo/bench/r7-early-recent/recent-profile.txt`.
+Early was faster in both wall and CPU and needed no diagnostic profile.
+
 ## Clempo
 
 Create an exact parent (once R3 reaches it) and stop all writers before using it:
@@ -23,6 +76,29 @@ CLEMPO_BUILD=release bin/clempo-dev bench -range busy -parent "$parent" \
 
 `-datadir` must not exist. The command copies `-parent` before opening it, preserving the original including any WAL tail. It checks the loaded height, block hash and root against the archive before the clock starts. If the parent is genesis, omit `-parent`; pass `-datadir` for the same WAL mode as Busy/Recent, or leave it out for an in-memory run. No healing, skipping or RPC is used during the measured replay. Every block is checked by the R3 executor; a mismatch records a partial result and exits nonzero. A partial result is never a throughput result for the whole range.
 
+Early and Recent use the same persistent `bench` path:
+
+```sh
+CLEMPO_BUILD=release bin/clempo-dev bench -range early \
+  -datadir "$early_work" -result "$early_result"
+
+# Capture only the immutable checkpoint; never copy R3's live WAL.
+mkdir "$recent_parent"
+cp "$r3_dd/checkpoint-000049000000.state" "$recent_parent/"
+cp "$r3_dd/replay.sexp" "$recent_parent/"
+printf 'clempo-store 1 49000000\n' > "$recent_parent/MANIFEST"
+CLEMPO_BUILD=release bin/clempo-dev replay -to 49409999 -datadir "$recent_parent" \
+  -checkpoint 49409999 -result "$recent_prepare"
+jq -e '.last == 49409999 and .r3_height == 49409999 and .stop == null
+       and .heals == [] and .skips == []' "$recent_prepare"
+CLEMPO_BUILD=release bin/clempo-dev bench -range recent -parent "$recent_parent" \
+  -datadir "$recent_work" -result "$recent_result"
+```
+
+Capture the R3 checkpoint while its manifest names 49,000,000. R3 replaces
+the old checkpoint at the next interval. The replay command advances the
+copy to the exact parent and writes a checkpoint there outside the timed run.
+
 The measured interval includes archive reads, decoding, replay, and (in persistent mode) WAL writes and final fsync. It excludes startup, copying and opening the store, and writing the result. CPU and GC are deltas over the interval; peak RSS is for the whole process (including initialization). Always compare the same persistence mode. Repeat with fresh workdirs and interleave clients rather than reporting one best sample.
 
 `replay`, `bench` and `history-build` default to eight sender-recovery
@@ -32,9 +108,9 @@ overlaps execution. Transaction execution stays serial and ordered. Use
 `-sender-threads 1` to measure serial, unpipelined sender recovery. The replay
 commands raise SBCL's allocation between collections to min(2 GiB, heap/8).
 
-For a separate profiling trial, add `-profile "$profile_report"` to a Busy
-run. This uses 5 ms SBCL `sb-sprof` sampling with a flat profile and call
-graph. `-profile-mode alloc` samples allocation instead of CPU, and
+For a separate profiling trial, add `-profile "$profile_report" -profile-mode cpu`
+to a fresh run. This uses 5 ms SBCL `sb-sprof` sampling with a flat profile and
+call graph. `-profile-mode alloc` samples allocation instead of CPU, and
 `-profile-threads main` samples only the replay thread, which is the
 critical path once recovery is pipelined. Darwin's profiling timer fires on
 process CPU time, so absolute sample counts overstate a single thread's time;
@@ -94,7 +170,21 @@ python3 scripts/bench/rust-import.py --tempo "$tempo" --datadir "$busy_work" \
   --from 9890000 --to 9909999 --rlp "$busy_rlp" --log "$log" --out "$result"
 ```
 
-`export-rlp.py` writes original wire bytes with no re-encoding. The Rust runner checks that all import stages are at the starting parent checkpoint, validates exact input heights, and checks both terminal `MerkleExecute` and `Finish` checkpoints. For Early, pass a nonexistent datadir to initialize from genesis. The result includes wall/CPU, peak RSS, total gas from the corpus, and stage times summed across import chunks. The import may split large files into multiple chunks.
+`export-rlp.py` writes original wire bytes with no re-encoding. The Rust runner
+checks the starting stage checkpoints and exact input heights before timing the
+import process, including its startup and shutdown. It requires both terminal
+`MerkleExecute` and `Finish` checkpoints at the requested height. The result
+includes wall/CPU, peak RSS, gas from the corpus, and stage times summed across
+import chunks. The import may split large files into multiple chunks.
+
+For Early, export from the same archive and initialize a fresh Rust datadir from genesis:
+
+```sh
+python3 scripts/bench/export-rlp.py --from 1 --to 1000000 --out "$early_rlp"
+python3 scripts/bench/rust-import.py --tempo "$tempo" \
+  --datadir "$early_rust_work" --from 1 --to 1000000 \
+  --rlp "$early_rlp" --log "$early_rust_log" --out "$early_rust_result"
+```
 
 `tempo re-execute` is read-only and starts from historical parent state, but verifies gas/receipts and the resulting change sets rather than recomputing state roots. `tempo import --fail-on-invalid-block` runs the staged pipeline and checks the Merkle root at each import chunk’s terminal checkpoint, **not every block's root**. This follows goempo's Rust baseline and is a lower root-check workload than Clempo. Report that distinction alongside any comparison. Rust includes the import indexing stages; use the per-stage numbers to distinguish execution from full import wall time. Neither client’s metrics include provisioning the input corpus or parent state.
 
@@ -109,23 +199,22 @@ For the separate read-only Busy cross-check reported in `FRONTIER.md`:
 One task and one chunk ensure the entire measured range executes from the
 same historical parent state. Keep this result separate from staged import.
 
-### Active Busy baseline on the dev host
+### Recorded Busy and Recent baselines
 
 The detached archive is `~/scratch/clempo/bench/rust-snapshot` (height
-50,050,994). The Busy working copy is `~/scratch/clempo/bench/rust-busy`.
-The restarted persistent runner was launched as PID **57382** (also recorded
-in `~/scratch/clempo/bench/busy-job.pid`). It first resumes
-`tempo stage unwind --datadir "$root/rust-busy" --chain mainnet --color never to-block 9889999`,
-appending to `"$root/busy-unwind.log"`. On success it runs:
+50,050,994). The Busy and Recent working copies were unwound to 9,889,999
+and 49,409,999 respectively, then imported with:
 
 ```sh
 root=~/scratch/clempo/bench
 python3 scripts/bench/rust-import.py --tempo ~/dev/tempo/target/release/tempo \
   --datadir "$root/rust-busy" --from 9890000 --to 9909999 \
   --rlp "$root/busy.rlp" --log "$root/busy.log" --out "$root/busy.json"
+python3 scripts/bench/rust-import.py --tempo ~/dev/tempo/target/release/tempo \
+  --datadir "$root/rust-recent" --from 49410000 --to 49449999 \
+  --rlp "$root/recent.rlp" --log "$root/recent.log" --out "$root/recent.json"
 ```
 
-The wrapper's diagnostics are in `"$root/busy-job.log"`. If a rerun is
-necessary, verify the old process ended and use new log/result paths; the
-runner refuses to overwrite an existing import log or start from a wrong
-parent. No command uses the live node's datadir.
+The runner refuses to overwrite an existing import log or start from the
+wrong parent. To rerun, use a fresh working datadir at the parent and new log
+and result paths. Never use the live node's datadir.
