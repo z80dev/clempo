@@ -14,6 +14,7 @@
   (balance 0 :type u256)
   (%code nil :type (or null octets))
   (code-hash +empty-code-hash+ :type octets)
+  (commitment 0 :type u256)             ; T14 configuration commitment (TIP-1108), 0 if none
   (present nil :type (or null hash-table))
   (original nil :type (or null hash-table))
   (pending nil :type (or null hash-table))
@@ -76,13 +77,14 @@ OBSERVER, when set, is called as (observer account nil nil) on every access."
                      (or (gethash address accounts)
                          (setf (gethash address accounts)
                                (let ((a (%make-account address)))
-                                 (multiple-value-bind (found nonce balance code-hash)
+                                 (multiple-value-bind (found nonce balance code-hash commitment)
                                      (backend-account (world-backend world) address)
                                    (when found
                                      (setf (account-exists a) t
                                            (account-in-backend a) t
                                            (account-nonce a) nonce
                                            (account-balance a) balance
+                                           (account-commitment a) (or commitment 0)
                                            (account-code-hash a)
                                            (if (octets= code-hash +empty-code-hash+)
                                                +empty-code-hash+
@@ -163,6 +165,8 @@ the field, mark the account existing and touched."
 
 (define-account-setter set-balance account-balance () "Set the balance.")
 (define-account-setter set-nonce account-nonce () "Set the nonce.")
+(define-account-setter set-commitment account-commitment ()
+  "Set the T14 configuration commitment (TIP-1108).")
 
 (defun get-balance (world address) (account-balance (get-account world address)))
 (defun get-nonce (world address) (account-nonce (get-account world address)))
@@ -407,6 +411,7 @@ unless SKIP-COLD, when it stays cold and SKIPPED-P is true."
   (setf (account-exists account) nil
         (account-nonce account) 0
         (account-balance account) 0
+        (account-commitment account) 0
         (account-%code account) +empty-code+
         (account-code-hash account) +empty-code-hash+
         (account-code-changed account) nil)
@@ -462,7 +467,7 @@ access lists, transient storage, refund counter and logs."
 
 (defstruct (account-change (:constructor make-account-change
                                (address deleted-p storage-wiped-p nonce balance code-hash code
-                                storage)))
+                                storage &optional (commitment 0))))
   (address 0 :type u160)
   (deleted-p nil)
   (storage-wiped-p nil)
@@ -470,7 +475,8 @@ access lists, transient storage, refund counter and logs."
   (balance 0)
   (code-hash +empty-code-hash+)
   (code nil)
-  (storage '() :type list))
+  (storage '() :type list)
+  (commitment 0))
 
 (defun drain-changes (world)
   "The net changes of the finished transactions since the last drain, one ACCOUNT-CHANGE
@@ -490,7 +496,8 @@ when STORAGE-WIPED-P, apply the wipe before the slots."
                          (let ((pending (account-pending account)))
                            (when pending
                              (loop for k being the hash-keys of pending using (hash-value v)
-                                   collect (cons k v)))))
+                                   collect (cons k v))))
+                         (account-commitment account))
                       (setf (account-dirty account) nil
                             (account-in-backend account) (account-exists account)
                             (account-wiped account) nil
@@ -513,7 +520,8 @@ when STORAGE-WIPED-P, apply the wipe before the slots."
                           (setf (gethash address (memory-backend-accounts b)) (make-mem-account)))))
                (setf (mem-account-nonce a) (account-change-nonce c)
                      (mem-account-balance a) (account-change-balance c)
-                     (mem-account-code-hash a) (account-change-code-hash c))
+                     (mem-account-code-hash a) (account-change-code-hash c)
+                     (mem-account-commitment a) (account-change-commitment c))
                (let ((code (account-change-code c)))
                  (when (and code (plusp (length code)))
                    (setf (gethash (octets->integer (account-change-code-hash c))

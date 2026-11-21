@@ -18,7 +18,7 @@ writes them down.")
    #:memory-backend #:make-memory-backend #:memory-backend-accounts
    #:memory-backend-put-account #:memory-backend-put-storage #:apply-changes
    #:mem-account #:mem-account-nonce #:mem-account-balance #:mem-account-code-hash
-   #:mem-account-storage
+   #:mem-account-storage #:mem-account-commitment
    #:+empty-code-hash+ #:+empty-code+ #:code-hash
    ;; accounts
    #:account #:account-address #:account-nonce #:account-balance #:account-exists
@@ -28,6 +28,7 @@ writes them down.")
    #:account-exists-p #:account-alive-p
    #:get-balance #:set-balance #:add-balance #:sub-balance
    #:get-nonce #:set-nonce #:increment-nonce
+   #:account-commitment #:set-commitment
    #:get-code #:get-code-hash #:set-code #:code-size
    #:touch-account #:mark-created #:created-p #:mark-destructed #:destructed-p
    #:storage-nonempty-p #:wipe-storage
@@ -46,6 +47,7 @@ writes them down.")
    #:account-change #:account-change-address #:account-change-deleted-p
    #:account-change-storage-wiped-p #:account-change-nonce #:account-change-balance
    #:account-change-code-hash #:account-change-code #:account-change-storage
+   #:account-change-commitment
    #:drain-changes #:backend-state-root #:storage-root
    ;; EIP-7702
    #:delegation-target #:delegation-designator))
