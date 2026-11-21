@@ -14,7 +14,7 @@ cell becomes available. Times are monotonic integer nanoseconds (MONOTONIC-NS)."
 
 (defun monotonic-ns ()
   "A monotonic clock in integer nanoseconds."
-  (floor (* (get-internal-real-time) +ns-per-second+) internal-time-units-per-second))
+  (floor (* (clempo.io:monotonic-ticks) +ns-per-second+) internal-time-units-per-second))
 
 (defun quota-per-second (rate &optional (burst rate))
   "Quota::per_second(RATE): one cell every 1/RATE s, BURST (default RATE) at once.

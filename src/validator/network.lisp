@@ -108,9 +108,9 @@ private devnets; CALL-WITH-VALIDATOR-NETWORK defaults are Tempo's production val
 (defun queues-take (queues limit timeout)
   "Remove up to LIMIT values, waiting up to TIMEOUT seconds while all rings are empty."
   (let ((mutex (queues-mutex queues))
-        (deadline (+ (get-internal-real-time) (ceiling (* timeout internal-time-units-per-second)))))
+        (deadline (+ (io:monotonic-ticks) (ceiling (* timeout internal-time-units-per-second)))))
     (thr:with-mutex (mutex)
-      (loop for remaining = (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)
+      (loop for remaining = (/ (- deadline (io:monotonic-ticks)) internal-time-units-per-second)
             while (and (zerop (queues-count queues)) (plusp remaining))
             do (thr:condition-wait (queues-ready queues) mutex :timeout remaining))
       (loop repeat limit
@@ -604,8 +604,8 @@ the shutdown wakes blocked I/O); its reader releases the peer. Safe from any thr
                   do (unless (spawn-locked network "validator dial" (lambda () (run-dial network record)))
                        (release network record))
                      (return))))
-      (loop with end = (+ (get-internal-real-time) (ceiling (* frequency internal-time-units-per-second)))
-            while (and (< (get-internal-real-time) end) (not (network-stopping-p network)))
+      (loop with end = (+ (io:monotonic-ticks) (ceiling (* frequency internal-time-units-per-second)))
+            while (and (< (io:monotonic-ticks) end) (not (network-stopping-p network)))
             do (sleep (min 0.05 frequency))))))
 
 ;;; Entry points.
