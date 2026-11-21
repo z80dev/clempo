@@ -11,7 +11,8 @@ senders and receipts, which are filled in on first use.")
            #:cblock-tx-raw #:cblock-timestamp #:cblock-base-fee #:cblock-inner
            #:make-cblock #:cblock-senders
            #:header-json #:block-json #:tx-json #:receipt-json #:receipt-jsons #:log-json
-           #:block-logs #:q #:hex32 #:addr #:hexbytes #:effective-gas-price #:tx-to))
+           #:block-logs #:q #:hex32 #:addr #:hexbytes #:effective-gas-price #:tx-to
+           #:primitive-header-json #:primitive-tx-json #:primitive-block-json))
 
 (in-package #:clempo.rpc.render)
 
@@ -129,13 +130,15 @@ senders and receipts, which are filled in on first use.")
                             (coerce (loop for i from 0 below (length (cblock-txs b)) collect (tx-json b i)) 'simple-vector)
                             (map 'simple-vector #'hex32 (cblock-tx-hashes b)))))
             (when (clempo.blocks:block-withdrawals-present-p blk)
-              (list (cons "withdrawals"
-                          (map 'simple-vector
-                               (lambda (w) (json:jobject "index" (q (item-int (first w)))
-                                                         "validatorIndex" (q (item-int (second w)))
-                                                         "address" (item-addr (third w))
-                                                         "amount" (q (item-int (fourth w)))))
-                               (clempo.blocks:block-withdrawals blk))))))))
+              (list (cons "withdrawals" (withdrawals-json blk)))))))
+
+(defun withdrawals-json (blk)
+  (map 'simple-vector
+       (lambda (w) (json:jobject "index" (q (item-int (first w)))
+                                 "validatorIndex" (q (item-int (second w)))
+                                 "address" (item-addr (third w))
+                                 "amount" (q (item-int (fourth w)))))
+       (clempo.blocks:block-withdrawals blk)))
 
 ;;; Transactions
 
@@ -312,6 +315,39 @@ senders and receipts, which are filled in on first use.")
                              "transactionIndex" (q i)
                              "from" (addr sender))
                        (list "blockTimestamp" (q (cblock-timestamp b)))))))))
+
+;;; Primitive (consensus) serde forms: tempo_primitives' Block, TempoHeader and
+;;; TempoTxEnvelope as serde writes them, which the consensus namespace and
+;;; eth_fillTransaction return. They are the RPC forms without what the RPC wrappers add.
+
+(defun drop-keys (object keys)
+  (cons :object (remove-if (lambda (cell) (member (car cell) keys :test #'string=)) (cdr object))))
+
+(defun primitive-header-json (header)
+  "TempoHeader: the RPC header without its hash and timestampMillis."
+  (drop-keys (header-json header) '("hash" "timestampMillis")))
+
+(defun primitive-tx-json (b i)
+  "Transaction I of B as a TempoTxEnvelope: the RPC transaction without its block position,
+sender and effective gas price (a legacy or EIP-2930 gasPrice is the transaction's own)."
+  (drop-keys (tx-json b i)
+             (append '("blockHash" "blockNumber" "blockTimestamp" "transactionIndex" "from")
+                     (unless (member (tx:transaction-type (svref (cblock-txs b) i)) '(0 1))
+                       '("gasPrice")))))
+
+(defun primitive-block-json (b)
+  "tempo_primitives Block {header, body {transactions, ommers, withdrawals}}."
+  (let ((blk (clempo.blocks:decode-block (cblock-raw b))))
+    (json:jobject "header" (primitive-header-json (cblock-header b))
+                  "body" (json:jobject
+                          "transactions" (coerce (loop for i from 0 below (length (cblock-txs b))
+                                                       collect (primitive-tx-json b i))
+                                                 'simple-vector)
+                          "ommers" (map 'simple-vector #'primitive-header-json
+                                        (clempo.blocks:block-ommers blk))
+                          "withdrawals" (if (clempo.blocks:block-withdrawals-present-p blk)
+                                            (withdrawals-json blk)
+                                            :null)))))
 
 ;;; Receipts and logs
 

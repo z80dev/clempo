@@ -338,12 +338,14 @@ quantity."
   (let ((code (if (octets= hash trie:+empty-code-hash+)
                   (progn (state-block block) (make-octets 0))
                   ;; Codes are never removed: the history's code table answers for any block.
+                  ;; A code it lacks may have been deployed after the blocks it covers, so
+                  ;; without a state for the block that is not an answer of null.
                   (let* ((n (state-block block))
                          (h (and (typep chain:*backend* 'chain:archive-backend)
                                  (chain:backend-history chain:*backend*)))
                          (state (chain:backend-state chain:*backend* n)))
                     (cond (state (code-by-hash state hash))
-                          (h (history:history-code-by-hash h hash))
+                          ((and h (history:history-code-by-hash h hash)))
                           (t (code-by-hash (state-at block) hash)))))))
     (if code (hexbytes code) :null)))
 

@@ -12,6 +12,7 @@ representation.")
            #:serde-fail #:serde-fail-here #:serde-fail-at
            #:skip-ws #:peek #:peek-kind #:at-end-p #:expect-end
            #:read-string #:read-bool #:read-number #:read-null-p #:skip-value #:read-value
+           #:read-enum
            #:read-raw-value #:invalid-type #:do-object #:do-array #:unexpected-text
            #:*key-end* #:serde-fail-after-key
            #:rust-debug-string #:rust-float #:number-unexpected #:parse-serde-number
@@ -331,3 +332,37 @@ consume the value. A non-object fails with invalid type against EXPECTED."
 
 (defun expect-end (src)
   (unless (at-end-p src) (serde-fail-here src "trailing characters")))
+
+(defun read-enum (src variants &key newtype)
+  "serde_json's deserialize_enum for an externally tagged enum read directly (not from a
+buffered Content): a string names a unit variant, a single-key map a variant with its value.
+VARIANTS are the variant names; NEWTYPE is an alist (name . reader) of the newtype variants,
+the others are unit variants whose map value must be null. Returns (values name value)."
+  (labels ((expected ()
+             (if (= (length variants) 2)
+                 (format nil "`~A` or `~A`" (first variants) (second variants))
+                 (format nil "one of ~{`~A`~^, ~}" variants)))
+           (variant (name)
+             (unless (member name variants :test #'string=)
+               (serde-fail-here src "unknown variant `~A`, expected ~A" name (expected)))
+             (assoc name newtype :test #'string=))
+           (expected-value-peeked ()
+             (advance src 1)
+             (serde-fail-here src "expected value")))
+    (case (peek-kind src)
+      (:string (let ((name (read-string src)))
+                 (when (variant name) (serde-fail "invalid type: unit variant, expected newtype variant"))
+                 (values name nil)))
+      (:object
+       (advance src 1)
+       (unless (eq (peek-kind src) :string) (expected-value-peeked))
+       (let* ((name (read-string src))
+              (reader (cdr (variant name))))
+         (peek src) (advance src 1)        ; the colon
+         (let ((value (cond (reader (funcall reader src))
+                            ((read-null-p src) nil)
+                            (t (invalid-type src "unit")))))
+           (unless (eql (peek src) #\}) (serde-fail-here src "expected value"))
+           (advance src 1)
+           (values name value))))
+      (t (peek src) (expected-value-peeked)))))

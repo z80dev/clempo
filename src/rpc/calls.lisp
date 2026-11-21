@@ -26,7 +26,12 @@ missing piece.")
            #:request-input #:aa-request-p #:request-type #:request-plist #:request-gas
            #:call-env #:block-hash-fn #:apply-state-overrides #:check-state-overrides #:replay-tx
            #:run-request #:call-result #:revert-reason #:invalid-request-error #:error-text
-           #:+invalid-transaction-errors+ #:*rpc-gas-cap* #:header-base-fee))
+           #:+invalid-transaction-errors+ #:*rpc-gas-cap* #:header-base-fee
+           ;; for src/rpc/filter.lisp and fill.lisp
+           #:defobject #:defvec #:q64 #:plain-u64 #:block-traces #:parity-maker #:parity-localized
+           #:estimate-request-gas #:copy-call-request #:req-valid-before #:req-valid-after
+           #:req-fee-payer-signature #:req-tempo-authorizations #:req-key-authorization
+           #:req-account-simulation #:req-key-authorization-simulation #:req-key-type))
 
 (in-package #:clempo.rpc.calls)
 
@@ -641,9 +646,8 @@ CallManyBudget): a call gets at most what is left, and runs out of it with an er
          (let ((world (state:make-world state)))
            (zerop (state:code-size world to))))))
 
-(defrpc "eth_estimateGas" ((request tx-request) (block block-id :optional t)
-                           (state-overrides state-override :optional t) (block-overrides block-overrides :optional t))
-  "binary-search the gas a call needs"
+(defun estimate-request-gas (request block &key state-overrides block-overrides)
+  "reth estimate_gas_at: the gas REQUEST needs on the state after BLOCK, as an integer."
   (multiple-value-bind (b state)
       (prepare-call request block "eth_estimateGas" :state-overrides state-overrides :block-overrides block-overrides)
     (multiple-value-bind (run price env)
@@ -653,10 +657,10 @@ CallManyBudget): a call gets at most what is left, and runs out of it with an er
         (internal-error "eth_estimateGas: the caller's fee token allowance for priced requests is not implemented yet"))
       (let ((max-gas (min (or (tx-gas-cap env) +u64-max+) (executor:block-env-gas-limit env) *rpc-gas-cap*)))
         (handler-case
-            (quantity->hex (executor:estimate-gas run :max-gas-limit max-gas :request-gas (req-gas request)
-                                                 :price-p (or (req-gas-price request) (req-max-fee request))
-                                                 :basic-transfer-p (and (null state-overrides)
-                                                                        (basic-transfer-p request state))))
+            (executor:estimate-gas run :max-gas-limit max-gas :request-gas (req-gas request)
+                                       :price-p (or (req-gas-price request) (req-max-fee request))
+                                       :basic-transfer-p (and (null state-overrides)
+                                                              (basic-transfer-p request state)))
           (executor:invalid-transaction (e) (fail-invalid e nil))
           (executor:estimate-failure (e)
             (let ((gas (executor:estimate-failure-gas-limit e))
@@ -667,6 +671,12 @@ CallManyBudget): a call gets at most what is left, and runs out of it with an er
                 (:basic-out-of-gas
                  (rpc-fail -32003 (format nil "out of gas: gas required exceeds: ~D" gas)))
                 ((:revert :halt) (call-result outcome gas "eth_estimateGas"))))))))))
+
+(defrpc "eth_estimateGas" ((request tx-request) (block block-id :optional t)
+                           (state-overrides state-override :optional t) (block-overrides block-overrides :optional t))
+  "binary-search the gas a call needs"
+  (quantity->hex (estimate-request-gas request block :state-overrides state-overrides
+                                                     :block-overrides block-overrides)))
 
 (defrpc "eth_createAccessList" ((request tx-request) (block block-id :optional t)
                                 (state-overrides state-override :optional t))
