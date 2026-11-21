@@ -139,7 +139,7 @@
 (defun run-oracle-lines (case-lines expected-lines &key (filter (constantly t)))
   "Run the cases of CASE-LINES (JSON strings) against EXPECTED-LINES. Returns
 (values passed total failures) where FAILURES is a list of (name spec diff). A Lisp error
-in a case counts as a failure. FILTER selects case names."
+in a case counts as a failure. FILTER is called with the name and the parsed case."
   (let ((passed 0) (total 0) (failures '()))
     (loop for cl in case-lines
           for el in expected-lines
@@ -147,7 +147,7 @@ in a case counts as a failure. FILTER selects case names."
                     (expected (clempo.json:parse-json el))
                     (name (jget case "name")))
                (invariant (string= name (jget expected "name")) "case order ~A" name)
-               (when (funcall filter name)
+               (when (funcall filter name case)
                  (incf total)
                  (let ((diff (handler-case (run-oracle-case case expected)
                                (error (e) (format nil "lisp error: ~A" e)))))

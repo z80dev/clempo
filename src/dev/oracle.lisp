@@ -24,16 +24,23 @@
                                                           (concatenate 'string set "expected.jsonl"))))))
     (values cases expected)))
 
-(defun run-oracle (&key filter)
+(defun run-oracle (&key filter target spec)
+  "Run the corpus; FILTER is a name substring, TARGET a prefix of the called code address
+\(e.g. \"0xdec0\"), SPEC a fork name."
   (multiple-value-bind (cases expected) (oracle-corpus)
-    (clempo.oracle:run-oracle-lines cases expected
-                                    :filter (if filter
-                                                (lambda (name) (search filter name))
-                                                (constantly t)))))
+    (clempo.oracle:run-oracle-lines
+     cases expected
+     :filter (lambda (name case)
+               (and (or (null filter) (search filter name))
+                    (or (null target)
+                        (eql 0 (search (string-downcase target)
+                                       (string-downcase (clempo.json:jget* case "call" "code_address")))))
+                    (or (null spec) (string-equal spec (clempo.json:jget case "spec"))))))))
 
 (defcommand "oracle" (args)
-  "R3p precompile oracle: oracle [-filter substring] [-max 40] [-group] [-names]"
-  (multiple-value-bind (passed total failures) (run-oracle :filter (arg args :filter))
+  "R3p oracle: oracle [-filter name-substring] [-target 0xdec0] [-spec T11] [-max 40] [-group] [-names]"
+  (multiple-value-bind (passed total failures)
+      (run-oracle :filter (arg args :filter) :target (arg args :target) :spec (arg args :spec))
     (cond
       ((arg-flag args :names)
        (dolist (f failures) (write-line (first f))))
