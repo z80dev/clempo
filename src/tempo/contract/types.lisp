@@ -107,15 +107,18 @@
 ;;; Word conversions (FromWord / StorageKey).
 
 (defun word->value (word-kind w)
+  (declare (type unsigned-byte w))
+  ;; INTEGER-LENGTH bounds compare without building 2^bits for each load
   (ecase (first word-kind)
     (:uint (let ((bits (second word-kind)))
-             (if (and (< bits 256) (>= w (ash 1 bits))) (panic +panic-under-overflow+) w)))
+             (if (> (integer-length w) bits) (panic +panic-under-overflow+) w)))
     (:int (let ((bits (second word-kind)))
-            (when (and (< bits 256) (>= w (ash 1 bits))) (panic +panic-under-overflow+))
+            (when (> (integer-length w) bits) (panic +panic-under-overflow+))
             (if (logbitp (1- bits) w) (- w (ash 1 bits)) w)))
     (:bool (/= w 0))
-    (:address (ldb (byte 160 0) w))
-    (:fixed (ldb (byte (* 8 (second word-kind)) 0) w))
+    (:address (if (<= (integer-length w) 160) w (ldb (byte 160 0) w)))
+    (:fixed (let ((bits (* 8 (second word-kind))))
+              (if (<= (integer-length w) bits) w (ldb (byte bits 0) w))))
     (:enum (when (> w 255) (panic +panic-under-overflow+))
      (if (< w (second word-kind)) w (panic +panic-enum-conversion+)))))
 
@@ -133,23 +136,56 @@
       (:int (ldb (byte (second word) 0) key))
       (:bool (if key 1 0)))))
 
-(defun mapping-slot (key-word base-slot)
-  "keccak256(be32(KEY-WORD) || be32(BASE-SLOT)) as an integer. The buffer is per call
-\(stack-allocated), so concurrent callers (parallel eth_calls) never share it."
+(defun compute-mapping-slot (key-word base-slot)
+  "keccak256(be32(KEY-WORD) || be32(BASE-SLOT)) as an integer. The buffers are per call
+\(stack-allocated), so concurrent callers (parallel eth_calls) never share them."
   (declare (type (unsigned-byte 256) key-word base-slot))
-  (let ((buf (make-array 64 :element-type '(unsigned-byte 8))))
-    (declare (dynamic-extent buf))
-    (loop for i from 0 below 32
-          do (setf (aref buf (- 31 i)) (ldb (byte 8 (* 8 i)) key-word)
-                   (aref buf (- 63 i)) (ldb (byte 8 (* 8 i)) base-slot)))
-    (clempo.keccak:keccak256-integer buf)))
+  (let ((buf (make-array 64 :element-type '(unsigned-byte 8)))
+        (out (make-array 32 :element-type '(unsigned-byte 8))))
+    (declare (dynamic-extent buf out))
+    (integer-into-octets key-word buf 0 32)
+    (integer-into-octets base-slot buf 32 64)
+    (clempo.keccak:keccak256-into buf 0 64 out 0)
+    (octets->integer out)))
+
+;;; A mapping slot is a pure function of its key and base, and the same few (a fee payer's
+;;; balance, a token's policy) are hashed several times per transaction and again in later
+;;; blocks. A thread executing blocks binds a cache it alone uses; RPC threads leave it NIL.
+
+(defconstant +mapping-slot-cache-limit+ 1000000 "Entries kept before the cache starts over.")
+
+(defstruct (mapping-slot-cache (:constructor make-mapping-slot-cache ()))
+  (bases (make-hash-table) :type hash-table)  ; base slot -> (key word -> slot)
+  (count 0 :type fixnum))
+
+(defvar *mapping-slot-cache* nil
+  "NIL, or a MAPPING-SLOT-CACHE owned by the current thread that MAPPING-SLOT fills.")
+
+(defun mapping-slot (key-word base-slot)
+  "keccak256(be32(KEY-WORD) || be32(BASE-SLOT)) as an integer."
+  (declare (type (unsigned-byte 256) key-word base-slot))
+  (let ((cache *mapping-slot-cache*))
+    (if (null cache)
+        (compute-mapping-slot key-word base-slot)
+        (let* ((bases (mapping-slot-cache-bases cache))
+               (keys (gethash base-slot bases)))
+          (or (and keys (gethash key-word keys))
+              (let ((slot (compute-mapping-slot key-word base-slot)))
+                (when (>= (mapping-slot-cache-count cache) +mapping-slot-cache-limit+)
+                  (clrhash bases)
+                  (setf (mapping-slot-cache-count cache) 0 keys nil))
+                (unless keys (setf keys (setf (gethash base-slot bases) (make-hash-table))))
+                (incf (mapping-slot-cache-count cache))
+                (setf (gethash key-word keys) slot)))))))
 
 (defun data-slot (slot)
   "keccak256(be32(SLOT)): where a dynamic value's data starts."
   (clempo.keccak:keccak256-integer (integer->octets slot 32)))
 
 (declaim (inline slot+))
-(defun slot+ (slot n) (ldb (byte 256 0) (+ slot n)))
+(defun slot+ (slot n)
+  (let ((s (+ slot n)))
+    (if (<= 0 s +u256-max+) s (ldb (byte 256 0) s))))
 
 ;;; Places: a typed location (Rust's handlers). LOCATION-free accessors build them; only the
 ;;; verbs below touch storage.
@@ -177,7 +213,24 @@
 ;;; Packing (storage/packing.rs).
 
 (defun extract-word (slot-value offset bytes)
-  (ldb (byte (* 8 bytes) (* 8 offset)) slot-value))
+  "The BYTES-byte field at byte OFFSET of SLOT-VALUE; fields of up to 62 bits are read from
+the bignum's digits without consing."
+  (declare (type unsigned-byte slot-value) (type (integer 0 31) offset) (type (integer 1 32) bytes))
+  (let ((pos (* 8 offset)) (size (* 8 bytes)))
+    (cond ((typep slot-value 'fixnum)
+           (let ((v (ash slot-value (- pos))))
+             (if (< size 62) (logand v (1- (ash 1 size))) v)))
+          ((< size 62)
+           (multiple-value-bind (k r) (floor pos 64)
+             (let* ((len (sb-bignum:%bignum-length slot-value))
+                    (lo (if (< k len) (sb-bignum:%bignum-ref slot-value k) 0))
+                    (w (ash lo (- r))))
+               (declare (type (unsigned-byte 64) lo w))
+               (when (and (> (+ r size) 64) (< (1+ k) len))
+                 (setf w (logior w (ldb (byte 64 0) (ash (sb-bignum:%bignum-ref slot-value (1+ k))
+                                                          (- 64 r))))))
+               (logand w (1- (ash 1 size))))))
+          (t (ldb (byte size pos) slot-value)))))
 
 (defun insert-word (current field-word offset bytes)
   (dpb (ldb (byte (* 8 bytes) 0) field-word) (byte (* 8 bytes) (* 8 offset)) current))
@@ -289,24 +342,23 @@ treats as indirect (precompiles-macros/src/storable.rs)."
 
 (defun load-struct (st address slot)
   (let* ((layout (stype-struct st))
-         (fields (direct-fields layout))
          (cached 0)
-         (loaded '()))
-    (loop for idx from 0 below (length fields)
-          for f = (aref fields idx)
-          for fst = (sfield-stype f)
-          for at = (slot+ slot (sfield-slot f))
-          do (push (cons f (cond ((not (stype-packable fst))
-                                  (load-value fst address at nil))
-                                 (t
-                                  (unless (and (> idx 0) (= (sfield-slot f) (sfield-slot (aref fields (1- idx)))))
-                                    (setf cached (%load address at)))
-                                  (word->value (stype-word fst)
-                                               (extract-word cached (sfield-offset f) (stype-bytes fst))))))
-                   loaded))
-    ;; mapping fields have no value of their own (Default in Rust)
+         (prev nil))                    ; the previous direct field
+    ;; Direct fields are loaded in declaration order; a mapping field has no value of its
+    ;; own (Default in Rust).
     (apply (struct-layout-constructor layout)
-           (map 'list (lambda (f) (cdr (assoc f loaded))) (struct-layout-fields layout)))))
+           (loop for f across (struct-layout-fields layout)
+                 for fst = (sfield-stype f)
+                 collect (unless (eq (stype-kind fst) :mapping)
+                           (prog1
+                               (cond ((not (stype-packable fst))
+                                      (load-value fst address (slot+ slot (sfield-slot f)) nil))
+                                     (t
+                                      (unless (and prev (= (sfield-slot f) (sfield-slot prev)))
+                                        (setf cached (%load address (slot+ slot (sfield-slot f)))))
+                                      (word->value (stype-word fst)
+                                                   (extract-word cached (sfield-offset f) (stype-bytes fst)))))
+                             (setf prev f)))))))
 
 (defun store-struct (st address slot value init)
   (let* ((layout (stype-struct st))

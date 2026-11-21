@@ -66,7 +66,8 @@ storage/evm.rs over an abstract HOST), HASHMAP-STORAGE, RECORDING-STORAGE.")
    #:read #:write #:delete #:t-read #:t-write #:t-delete #:sinc #:sdec
    #:at #:field #:vec-length #:vec-push #:vec-pop #:vec-at #:vec-element
    #:set-contains #:set-insert #:set-remove #:set-length #:set-at #:set-range
-   #:mapping-slot #:mapping-key-word #:type-slots #:type-bytes #:type-packable-p
+   #:mapping-slot #:*mapping-slot-cache* #:make-mapping-slot-cache
+   #:mapping-key-word #:type-slots #:type-bytes #:type-packable-p
    #:type-dynamic-p #:string-length
    ;; layouts
    #:defstorable #:defenum #:defcontract #:layout-of #:layout-fields #:layout-field

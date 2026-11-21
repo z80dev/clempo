@@ -145,6 +145,9 @@ so)."
   "Execute BLOCK on DB (opening a block on it) and return a BLOCK-RESULT. SENDERS, when
 given, is the list of recovered senders in transaction order."
   (let* ((*chain* chain)
+         ;; a replay binds one cache for its whole range
+         (contract:*mapping-slot-cache* (or contract:*mapping-slot-cache*
+                                            (contract:make-mapping-slot-cache)))
          (env (header-block-env (blocks:block-header block) :chain chain))
          (txs (blocks:block-transactions block))
          (senders (or senders (mapcar #'tx:transaction-sender txs)))

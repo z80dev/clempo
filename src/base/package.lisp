@@ -11,7 +11,7 @@ octet vectors, hex, 256-bit integer helpers and the test harness.")
    #:octet #:octets #:make-octets #:octets-of #:octets-concat #:octets=
    #:copy-octets #:octets-slice
    #:hex->octets #:octets->hex #:hex->integer #:integer->hex #:quantity->hex
-   #:integer->octets #:octets->integer #:integer->octets-minimal
+   #:integer->octets #:octets->integer #:integer->octets-minimal #:integer-into-octets
    #:string->octets #:octets->string
    ;; u256
    #:u256 #:u160 #:u64 #:+u256-max+ #:+u256-modulus+ #:+u64-max+

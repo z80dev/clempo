@@ -34,6 +34,8 @@ Returns a REPLAY-RESULT."
   (invariant (= (store:db-number db) (1- from)) "replay from ~D needs state at ~D, have ~D"
              from (1- from) (store:db-number db))
   (let ((result (make-replay-result :from from :to to :last (1- from) :matched-through (1- from)))
+        (contract:*mapping-slot-cache* (or contract:*mapping-slot-cache*
+                                           (contract:make-mapping-slot-cache)))
         (contiguous t)
         (executed nil)                  ; the current block ran to its end
         (n from))
