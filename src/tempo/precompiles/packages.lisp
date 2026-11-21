@@ -202,13 +202,15 @@ and transaction-local modes/budgets. Callback scopes return the value and credit
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
   (:shadowing-import-from #:clempo.contract #:read #:write #:delete)
   (:documentation "ZoneFactory (zone-factory.lisp), T10.")
-  (:export #:zone-factory))
+  (:export #:zone-factory #:zone-portal #:owner #:next-zone-id #:zone #:is-zone-portal
+           #:transfer-ownership #:create-zone #:portal-address #:+portal-runtime+))
 
 (defpackage #:clempo.zone-verifier
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
   (:shadowing-import-from #:clempo.contract #:read #:write #:delete)
   (:documentation "ZoneVerifier (zone-verifier*.lisp), T13: Nitro attestations.")
-  (:export #:zone-verifier))
+  (:export #:zone-verifier #:verify #:batch-commitment #:verify-with-policy
+           #:parse-pcrs #:parse-pcr-policy #:approved-pcrs))
 
 (defpackage #:clempo.oracle
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
