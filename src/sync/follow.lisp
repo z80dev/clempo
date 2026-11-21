@@ -42,7 +42,7 @@
       (make-head :number height :hash hash :state-root root))))
 
 (defgeneric apply-follow-block (executor block)
-  (:documentation "Execute and durably commit a verified BLOCK or signal before advancing the follower."))
+  (:documentation "Execute and commit a verified BLOCK or signal before advancing the follower."))
 
 (defgeneric certify-follow-batch (certifier blocks previous-hash)
   (:documentation "Verify a consecutive prefix of BLOCKS (decoded block vector) and return its length.
@@ -73,7 +73,7 @@ may be omitted. Invalid certificates or transport failures must signal."))
   "Anchor a new follower at HEAD. Without an EXECUTOR verify linkage and body roots only."
   (check-type batch-size (integer 1 *))
   (check-type head head)
-  (check-type (head-hash head) (simple-array (unsigned-byte 8) (32)))
+  (let ((hash (head-hash head))) (check-type hash (simple-array (unsigned-byte 8) (32))))
   (%make-follower head rpc-url executor certifier
                   (namestring (uiop:ensure-directory-pathname archive-dir))
                   use-archive write-archive batch-size))
@@ -107,19 +107,19 @@ may be omitted. Invalid certificates or transport failures must signal."))
     (dotimes (i count)
       (let* ((height (+ from i))
              (block (blocks:decode-block (svref raw i)))
-             (header (headers:header-inner (blocks:block-header block))))
-        (unless (= height (headers:ethereum-header-number header))
-          (reject-block height :block-number (headers:ethereum-header-number header)))
-        (unless (octets= parent (headers:ethereum-header-parent-hash header))
+             (header (blocks:block-header block)))
+        (unless (= height (headers:header-number header))
+          (reject-block height :block-number (headers:header-number header)))
+        (unless (octets= parent (headers:header-parent-hash header))
           (reject-block height :parent-hash
                         (list (octets->hex parent :prefix t)
-                              (octets->hex (headers:ethereum-header-parent-hash header) :prefix t))))
+                              (octets->hex (headers:header-parent-hash header) :prefix t))))
         (let ((mismatches (blocks:block-body-mismatches block)))
           (when mismatches (reject-block height :body-root mismatches)))
         (setf parent (blocks:block-hash block)
               (svref blocks i) block
               (svref heads i) (make-head :number height :hash parent
-                                         :state-root (headers:ethereum-header-state-root header)))))
+                                         :state-root (headers:header-state-root header)))))
     (unless (octets= (head-hash expected) parent)
       (reject-block (head-number expected) :canonical-hash
                     (list (octets->hex (head-hash expected) :prefix t)
