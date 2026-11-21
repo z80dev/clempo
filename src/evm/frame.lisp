@@ -105,7 +105,22 @@
 ;;; Stacks are 1024-slot simple-vectors reused by depth.
 
 (defvar *stacks* (make-array 1026 :initial-element nil)
-  "Stack per call depth; rebind per thread.")
+  "Stack per call depth; per thread (see WITH-EVM-THREAD).")
+
+(defvar *keccak-scratch* (clempo.keccak:make-keccak)
+  "Reusable Keccak state for KECCAK256; per thread (see WITH-EVM-THREAD).")
+(defvar *keccak-out* (make-octets 32)
+  "Reusable digest buffer for KECCAK256; per thread.")
+
+(defmacro with-evm-thread (&body body)
+  "Run BODY with this thread's own interpreter scratch: operand stacks, the code-analysis
+cache and Keccak buffers. Every thread that executes EVM code besides the main one must
+run inside this."
+  `(let ((*stacks* (make-array 1026 :initial-element nil))
+         (*analysis-cache* (make-hash-table :test 'eq :weakness :key))
+         (*keccak-scratch* (clempo.keccak:make-keccak))
+         (*keccak-out* (make-octets 32)))
+     ,@body))
 
 (declaim (inline acquire-stack))
 (defun acquire-stack (depth)

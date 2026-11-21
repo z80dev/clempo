@@ -28,7 +28,7 @@ Context lives in special variables: *WORLD* *SPEC* *BLOCK* *TX-ENV* *TRACER*.")
    #:frame-input #:frame-gas #:frame-depth #:frame-static-p #:frame-memory #:frame-mem-size
    #:frame-return-data #:frame-account #:frame-kind
    #:run-frame #:call-message #:create-message #:create-address #:create2-address
-   #:success-p #:collision-p
+   #:success-p #:collision-p #:with-evm-thread
    ;; precompiles
    #:precompile #:make-precompile #:precompile-name #:precompile-address #:precompile-fn
    #:find-precompile #:precompile-addresses #:ethereum-precompiles #:defprecompile

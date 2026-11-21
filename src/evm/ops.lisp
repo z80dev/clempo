@@ -55,9 +55,10 @@
 (defop #x20 keccak256 (offset size) (:gas (gas-params-keccak gp) :pushes 1)
   (mem-ensure offset size)
   (charge (* (gas-params-keccak-word gp) (ceiling size 32)))
-  (push-word (octets->integer
-              (keccak256 (frame-memory frame) :start (if (zerop size) 0 offset)
-                                              :end (if (zerop size) 0 (+ offset size))))))
+  (let ((out *keccak-out*)
+        (start (if (zerop size) 0 offset)))
+    (clempo.keccak:keccak256-into (frame-memory frame) start (+ start size) out 0 *keccak-scratch*)
+    (push-word (read-word out 0))))
 
 ;;; 0x30s: environment
 

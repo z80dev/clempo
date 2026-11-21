@@ -241,9 +241,8 @@ description of the first difference."
         (lock (sb-thread:make-mutex :name "statetest"))
         (all '()))
     (flet ((worker ()
-             (let ((clempo.evm::*analysis-cache* (make-hash-table :test 'eq :weakness :key))
-                   (*trace-check* trace-check)
-                   (clempo.evm::*stacks* (make-array 1026 :initial-element nil)))
+             (clempo.evm:with-evm-thread
+              (let ((*trace-check* trace-check))
                (loop
                  (let ((file (sb-thread:with-mutex (lock) (pop queue))))
                    (unless file (return))
@@ -253,7 +252,7 @@ description of the first difference."
                                                        :ok nil :reason (format nil "file error: ~A" e)))))))
                      (sb-thread:with-mutex (lock)
                        (when on-result (funcall on-result file rs))
-                       (setf all (nconc rs all)))))))))
+                       (setf all (nconc rs all))))))))))
       (mapc #'sb-thread:join-thread
             (loop repeat (max 1 threads) collect (sb-thread:make-thread #'worker :name "statetest"))))
     all))
