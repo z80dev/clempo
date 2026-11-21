@@ -74,6 +74,29 @@ Synchronous `F_FULLFSYNC` is a plausible contributor to the Recent
 wall/CPU gap; `fcntl` appeared in the sample, but it did not identify
 the command or quantify the cost of syncing.
 
+### Recent store read-ahead
+
+Separate from the three-range sweep: paired Recent runs on the same Mac,
+from the exact parent at 49,409,999, with all 40,000 roots checked by
+both clients. Cold runs read a 145 GiB eviction file before each command;
+warm runs read the entire prepared parent before each command. Conditioning
+is outside the timed interval. Each cell lists the two process wall / CPU
+times from `/usr/bin/time -l`; CPU is user plus system time.
+
+| Clempo revision | Cache | Clempo wall / CPU s | goempo `92e996c` wall / CPU s |
+|---|---|---:|---:|
+| `af18223`, before read-ahead | cold | 13.67 / 8.49; 17.42 / 8.69 | 10.43 / 8.87; 10.80 / 9.04 |
+| `c190f13`, with read-ahead | cold | 7.75 / 8.10; 7.42 / 8.27 | 10.77 / 8.97; 11.46 / 8.98 |
+| `af18223`, before read-ahead | warm | 6.61 / 7.93; 6.61 / 7.93 | 6.42 / 8.42; 6.56 / 8.50 |
+| `c190f13`, with read-ahead | warm | 6.52 / 7.95; 6.55 / 7.96 | 6.54 / 8.46; 6.30 / 8.39 |
+
+Read-ahead reduced clempo's cold wall time in both pairs, while warm wall
+times were similar across both clients. Cold clempo page faults reported
+by Darwin's `time -l` rose from 69,626–69,643 to 139,982–140,084; goempo
+reported 458–480. The fault count does not measure how long replay spent
+waiting: the new version asks the kernel to read mapped segments
+sequentially in the background instead of relying on demand reads alone.
+
 ### Earlier standalone comparison (`91ab4d2`)
 
 Same Mac, executable build, exact parents, persistence settings and

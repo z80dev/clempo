@@ -57,12 +57,12 @@ CLEMPO_HEAP=8192 CLEMPO_BUILD=release bin/clempo-dev replay \
 **Store read-ahead** (`c190f13`): opening a datadir asks the kernel to
 read segments sequentially on a background thread (`madvise(WILLNEED)`),
 newest first, with a default target of one quarter of physical RAM,
-rounded to whole segments. This targets cold random reads: the Mac SSD
-took 60–80 µs per read, and Recent measurements at `af18223` from APFS
-clones incurred about 69,600 page-ins for clempo versus about 460 for
-goempo. These observations motivated read-ahead; they do not measure its
-speedup. An earlier, separate lookup change (`9a80d5b`) reduced Recent
-replay CPU from 8.99–9.24 s to 7.85–8.05 s in paired runs.
+rounded to whole segments. In [cache-conditioned Recent runs](docs/BENCH.md#recent-store-read-ahead),
+whole-command cold wall time fell from 13.67–17.42 s before read-ahead
+to 7.42–7.75 s with it; goempo took 10.43–11.46 s. Warm runs took
+6.30–6.61 s across both clients. An earlier, separate lookup change
+(`9a80d5b`) reduced Recent replay CPU from 8.99–9.24 s to 7.85–8.05 s
+in paired runs.
 
 T14/T15 reference devnet (2026-11-21): `scripts/devnet/devnet.sh --root NET provision
 --tempo ~/dev/tempo/target/release/tempo --hardfork t15 --base-port 24000` (tempo
