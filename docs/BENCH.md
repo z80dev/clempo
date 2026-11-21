@@ -24,11 +24,12 @@ vendored build, `GOMAXPROCS=16` as detected on the host), and Rust Tempo
 | Range | Clempo replay | Clempo whole command | goempo whole command | Rust whole import |
 |---|---:|---:|---:|---:|
 | Early | 8.830868 / 9.646726 | 27.15 / 25.51 (cold compile) | 3.38 / 10.19 | 58.714867 / 36.406385 |
-| Busy | 22.748234 / 58.196338 | 23.75 / 59.10 | not measured | 35.929221 / 45.764508 |
+| Busy | 22.748234 / 58.196338 | 23.75 / 59.10 | 27.28 / 71.45 | 35.929221 / 45.764508 |
 | Recent | 19.971085 / 23.816374 | 34.87 / 38.48 | not measured | 57.125123 / 24.420341 |
 
 Run order was Rust → Clempo for Early, Clempo → Rust for Busy, Rust →
 Clempo for Recent, then goempo Early in the same exclusive benchmark slot.
+Go Busy ran in a later exclusive slot after the exact parent was ready.
 Clempo's Early command rebuilt the release fasls in a new checkout; its
 replay-only timing shows the warm-code interval, not a second run. Clempo
 and goempo checked gas, receipts root, bloom and state root at every block,
@@ -39,7 +40,7 @@ benchmarks. No Go timings from another host are substituted for missing
 samples.
 
 Raw local results: `logs/r7-parity/{clempo,rust}-{early,busy,recent}.{json,log}`
-and `logs/r7-parity/go-early.{json,log}`. For Clempo use the commands below
+and `logs/r7-parity/go-{early,busy}.{json,log}`. For Clempo use the commands below
 with `/usr/bin/time -l` before `bin/clempo-dev`; for Rust use the documented
 import harness with fresh working copies of the exact parents. The Rust
 Busy and Recent working parents were APFS clones of previously completed
@@ -50,10 +51,17 @@ Early completed 1,000,000 blocks, 1,000,635 transactions and 135,315,780
 gas. Go's scored input compared byte for byte against the Rust import's
 1,200,376,462-byte export (`sha256`
 `4c4236f4db6ea38916a0b2c5ccd56598888560b6b42a6209d22a3d7312198145`).
-Go's own replay interval was 3.326632 s wall / 10.206818 s CPU; process
+Go reported 3.326632 s replay wall and 10.206818 s lifetime CPU at sampling.
 `time -l` recorded 3.38 real, 8.75 user and 1.44 sys. Busy completed
-20,000 blocks, 659,246 transactions and 31,499,321,696 gas; Recent
-completed 40,000 blocks, 18,733 transactions and 3,768,403,621 gas.
+20,000 blocks, 659,246 transactions and 31,499,321,696 gas. The Go Busy
+preparation replay advanced its Early datadir another 8,889,999 checked
+blocks in 161.497949 s replay wall to parent 9,889,999, outside the scored
+run. The scored Go input compared byte for byte to the Rust export
+(`sha256` `45c1f8b946f9ca7c9268111bc8848e369a31040fb9028c5b5e76c015c1df23c1`).
+Go reported 26.508838 s replay wall; `time -l` recorded 27.28 real, 68.56
+user and 2.89 sys. Go used less peak RSS on Busy (1.78 GB vs. 3.34 GB
+Clempo and 3.55 GB Rust); Clempo used less CPU than Go but more than Rust.
+Recent completed 40,000 blocks, 18,733 transactions and 3,768,403,621 gas.
 
 ### Earlier measurements
 
