@@ -349,7 +349,8 @@ refund-applied)."
 ;;; The top-level frame (evm2 prepare_initial_frame + execute_initial_frame).
 
 (defun run-initial-frame (caller nonce to input value gas)
-  "Run a top-level call or creation. Returns (values status gas-left output)."
+  "Run a top-level call or creation. Returns (values status gas-left output); a call straight
+into a precompile that runs out of gas ends :PRECOMPILE-OUT-OF-GAS (evm2 PrecompileOutOfGas)."
   (let ((world evm:*world*))
     (if (null to)
         (let ((address (evm:create-address caller nonce)))
@@ -362,8 +363,15 @@ refund-applied)."
           (when target
             (state:warm-address world target)
             (setf code (state:get-code world target)))
-          (evm:call-message :call caller to (or target to) value input gas 0 nil
-                            :code code :disable-precompiles (and target t))))))
+          (multiple-value-bind (status gas-left output)
+              (evm:call-message :call caller to (or target to) value input gas 0 nil
+                                :code code :disable-precompiles (and target t))
+            (values (if (and (eq status :out-of-gas) (not target)
+                             (or (pc:precompile-address-p to forks:*spec*)
+                                 (member to (evm:precompile-addresses (evm:spec-precompiles evm:*spec*)))))
+                        :precompile-out-of-gas
+                        status)
+                    gas-left output))))))
 
 (defun tx-logs ()
   (mapcar (lambda (e) (receipts:make-event-log :address (state:log-entry-address e)
