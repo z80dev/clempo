@@ -16,6 +16,51 @@ Busy is goempo's published Busy workload. Recent starts 1,084 blocks later than 
 
 ## Results on the shared dev host
 
+### Current main comparison (`3c43b9e`)
+
+Two back-to-back sequences per range on the Mac15,9: Clempo → goempo →
+Rust, then Rust → goempo → Clempo. Same byte-identical block inputs and
+exact canonical parents as below. Clempo used a standalone SBCL 2.6.8
+release executable, the disk-backed store, and eight sender-recovery participants;
+goempo `92e996c` used Go 1.27.1, vendored dependencies and 16 Go
+processors; Rust was `568b4fb4258c` release.
+
+| Range / sample | Clempo replay wall / CPU s | goempo replay wall s | Clempo process wall / CPU s | goempo process wall / CPU s | Rust import wall / CPU s |
+|---|---:|---:|---:|---:|---:|
+| Early 1 | 2.720 / 6.801 | 3.028 | 2.79 / 6.85 | 3.05 / 9.66 | 57.893 / 36.711 |
+| Early 2 | 2.621 / 6.388 | 3.054 | 2.69 / 6.42 | 3.08 / 9.74 | 61.427 / 36.957 |
+| Busy 1 | 21.867 / 57.723 | 25.135 | 22.44 / 58.27 | 25.18 / 68.61 | 32.977 / 45.734 |
+| Busy 2 | 25.597 / 60.160 | 26.728 | 26.23 / 60.77 | 26.80 / 70.41 | 34.733 / 45.645 |
+| Recent 1 | 8.109 / 9.319 | 11.224 | 9.77 / 10.59 | 11.35 / 9.11 | 42.232 / 25.178 |
+| Recent 2 | 9.354 / 9.071 | 10.278 | 10.91 / 10.21 | 10.40 / 8.77 | 42.741 / 25.199 |
+
+For Clempo and goempo the replay clock starts after opening the state
+and includes block input, decode, execution, every block's root checks,
+and a final persistence operation. Clempo syncs the WAL at the end;
+goempo used `-checkpoint "$last"` so its final database flush falls
+inside the timer. These are not identical storage operations. Go's JSON
+CPU is sampled process lifetime CPU, not a replay interval, so only the
+process CPU columns are directly comparable. Whole-command timings use
+`/usr/bin/time -l` and include startup/shutdown; Clempo also copies its
+working parent inside the command. The Rust harness times the whole
+staged import (not an isolated execution stage); it checks chunk-terminal
+state roots, not every block root.
+
+Build the standalone executable with `scripts/build-dev.sh "$clempo_dev"`;
+substitute it for `bin/clempo-dev` in the commands below. Use disk-backed
+exact parents (import format-1 seeds once outside the timer), Go
+`-checkpoint "$last"` for scored runs only, and fresh working datadirs for
+every sample. Raw results:
+`logs/r7-parity/executable-3c43b9e/{clempo,go,rust}-{early,busy,recent}-{1,2}.{json,log}`.
+All samples reached the exact end height without mismatch; gas totals
+agreed. Clempo won replay wall time in both samples on all ranges and
+whole-command wall time in five of six. Go used less CPU on Recent.
+A separate all-thread Recent replay profile (not scored) sampled
+`SAP-BE` called by `KSEG-BLOCK` at 541/1,674 samples (32.3% self):
+`logs/r7-parity/current-3c43b9e/profile-recent.txt`.
+
+### Original three-client comparison (`4940311`)
+
 Same Mac (`Mac15,9`), Clempo `4940311` (SBCL 2.6.8 release, persistent
 WAL, eight sender-recovery participants), goempo `92e996c` (Go 1.27.1,
 vendored build, `GOMAXPROCS=16` as detected on the host), and Rust Tempo
