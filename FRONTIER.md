@@ -118,6 +118,34 @@ threads) attributes **55.7%** inclusive to secp256k1 recovery, **5.5%** to
 state-root update, **3.2%** to trie hashing, **0.5%** to block decoding and
 **0.4%** to EVM bytecode execution. Inclusive costs overlap.
 
+Busy replay-thread work (paired, alternating, root-checked on all 20,000 blocks,
+`~/scratch/clempo/busy/es/`). Original `e55a532` vs `d3aace8 + 217b0c1` (= pushed
+`40521c1`), back to back: **58.14 s wall / 105.63 s CPU / 97.5 GB consed** ->
+**24.52 / 24.73 s wall, 57.75 / 57.81 s CPU, 22.2 GB consed, GC 2.37 -> 1.25 s**
+(an earlier, busier-host `e55a532` run took 79.18 s / 123.93 s CPU). Peak RSS
+3.1 GB. Rust's root-checked staged import of the same range on this host:
+36.00 s wall, 43.22 s CPU (`~/scratch/clempo/bench/busy.json`; Execution stage
+15.89 s). Per step, each paired A/B on the previous step:
+
+| Step | A wall s | B wall s |
+|---|---:|---:|
+| word-wise `octets->integer` (14% of the replay thread was `CONTRACT:AT` -> bignum shifts) | 79.18 | 49.35 |
+| pipelined sender recovery (producer + 7 workers overlap execution) | 49.35 | 47.84 |
+| cached mapping slots, digit-wise packed fields, consing-free gas checks | 47.84 | 36.51 |
+| account/warm-slot memos, one-pass slot access, blooms once | 28.11 / 28.52 | 27.35 / 27.49 |
+| metered storage as a structure | 27.24 / 27.56 | 26.60 / 26.88 |
+| 2 GiB nursery (GC 1.78 -> 1.19 s) | 26.53 / 26.73 / 27.24 | 26.24 / 26.37 |
+| memoized struct fields, last warm address | 26.41 / 26.47 | 25.45 / 25.68 |
+| 0x76 unique ids on recovery threads | 25.77 / 25.70 | 24.92 / 24.74 |
+| CurvesAgent `217b0c1` (CPU 79.4 -> 57.8 s) | 24.81 / 24.71 | 24.53 / 24.73 |
+
+The first three rows are single runs taken while the host load was changing. Parallel
+storage-trie hashing (`7075d08`) was reverted: paired runs with 1 vs 4 state-root
+participants were equal (27.20/27.50/27.68 vs 27.17/27.88/27.70 s). Replay-thread
+profile now (`-profile-threads main`): TIP-20 transfer and fee pre/post paths ~35%, metered
+SLOAD path ~20% (bignum-keyed hash lookups ~15%), state root ~12%, expiring-nonce ring
+~10%, receipts root and bloom ~6%, synchronous EVM JIT compiles ~2%.
+
 R7 Rust reference samples (Apple Silicon `Mac15,9`, Tempo 1.19.0-dev
 `568b4fb4258c`, release). Both imports read canonical RLP and completed
 `MerkleExecute` and `Finish` at the requested heights:

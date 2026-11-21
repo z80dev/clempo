@@ -25,16 +25,26 @@ CLEMPO_BUILD=release bin/clempo-dev bench -range busy -parent "$parent" \
 
 The measured interval includes archive reads, decoding, replay, and (in persistent mode) WAL writes and final fsync. It excludes startup, copying and opening the store, and writing the result. CPU and GC are deltas over the interval; peak RSS is for the whole process (including initialization). Always compare the same persistence mode. Repeat with fresh workdirs and interleave clients rather than reporting one best sample.
 
-Both `replay` and `bench` default to eight sender-recovery participants,
-including the replay thread. They share a worker pool for the run and keep
-transaction execution serial and ordered. Use `-sender-threads 1` to measure
-serial sender recovery.
+`replay`, `bench` and `history-build` default to eight sender-recovery
+participants. A producer thread reads blocks up to four ahead of the replay
+thread and recovers their senders on itself plus seven workers, so recovery
+overlaps execution. Transaction execution stays serial and ordered. Use
+`-sender-threads 1` to measure serial, unpipelined sender recovery. The replay
+commands raise SBCL's allocation between collections to min(2 GiB, heap/8).
 
 For a separate profiling trial, add `-profile "$profile_report"` to a Busy
-run. This uses 5 ms SBCL `sb-sprof` CPU sampling with a flat profile and call
-graph. Darwin's sampling signals may underrepresent some workers; compare
-with a serial profile if needed. The JSON marks profiled runs; do not use
+run. This uses 5 ms SBCL `sb-sprof` sampling with a flat profile and call
+graph. `-profile-mode alloc` samples allocation instead of CPU, and
+`-profile-threads main` samples only the replay thread, which is the
+critical path once recovery is pipelined. Darwin's profiling timer fires on
+process CPU time, so absolute sample counts overstate a single thread's time;
+compare shares within one profile. The JSON marks profiled runs; do not use
 them as baseline timing.
+
+Measure changes with paired A/B runs from separate checkouts: alternate the
+order, and never edit a checkout while a run is using it (`bin/clempo-dev`
+recompiles changed files at startup). Never run two benchmarks at once on the
+shared host.
 
 ## Rust reference
 
