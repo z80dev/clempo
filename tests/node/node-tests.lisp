@@ -184,3 +184,27 @@ those requests fail, as during an upstream outage."
            (clempo.node::forward forwarder (clempo.transactions:encode-transaction tx) hash)
            (clempo.node::stop-forwarder forwarder))))
       (is= 0 (clempo.pool-service:pool-service-count service)))))
+
+(deftest followed-hashes-survive-restart ()
+  ;; Hashes of followed blocks resolve after a restart without --index-dir, from the
+  ;; datadir's followed.log; entries past the restored head (a crash) are ignored.
+  (let ((raws (recorded-blocks)))
+    (with-temp-dirs (index)
+      (let ((node (make-instance 'clempo.node::node-backend)))
+        (clempo.node::open-hash-log node index 0)
+        (loop for n from 1 to 20
+              do (clempo.node::log-block-hashes node (blocks:decode-block (svref raws n)) n))
+        (close (clempo.node::node-hash-log node)))
+      (let ((node (make-instance 'clempo.node::node-backend))
+            (block-7 (blocks:decode-block (svref raws 7)))
+            (block-15 (blocks:decode-block (svref raws 15))))
+        (clempo.node::open-hash-log node index 12)
+        (unwind-protect
+             (progn
+               (is= 7 (gethash (blocks:block-hash block-7) (clempo.node::node-followed-blocks node)))
+               (is-equalp '(7 . 0)
+                          (gethash (clempo.transactions:transaction-hash
+                                    (first (blocks:block-transactions block-7)))
+                                   (clempo.node::node-followed-txs node)))
+               (is (null (gethash (blocks:block-hash block-15) (clempo.node::node-followed-blocks node)))))
+          (close (clempo.node::node-hash-log node)))))))

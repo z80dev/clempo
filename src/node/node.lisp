@@ -61,7 +61,63 @@
    (forwarder :initform nil :accessor node-forwarder)
    (status :initform (list :tip nil :retries 0 :last-error nil) :accessor node-status)
    (follower :initform nil :accessor node-follower)
+   (hash-log :initform nil :accessor node-hash-log)
+   (followed-blocks :initform (make-hash-table :test 'equalp :synchronized t) :reader node-followed-blocks)
+   (followed-txs :initform (make-hash-table :test 'equalp :synchronized t) :reader node-followed-txs)
    (started :initform (clempo.io:now-seconds) :reader node-started)))
+
+;;; The datadir's hash index. blocks.idx/txs.idx (CLEMPO.RPC.CHAIN's format) are seeded from
+;;; the archive when the datadir is created; every block the node follows after that is
+;;; appended to index/followed.log (records: kind 0 block / 1 tx, 32-octet hash, u64 value with
+;;; a tx's value block << 20 | index) and loaded back at start, so a hash anywhere in the
+;;; followed chain resolves locally.
+
+(define-constant +hash-record+ 41)
+
+(defun seed-hash-index (dir archive-dir head)
+  "Build DIR's blocks.idx/txs.idx from the archive's complete chunks up to HEAD when absent."
+  (let ((to (min head (archive:archive-contiguous-height archive-dir))))
+    (when (and (not (probe-file (merge-pathnames "blocks.idx" dir))) (>= to 0))
+      (let ((start (clempo.io:monotonic-ticks)))
+        (log-node "node: building the hash index ~A from the archive, blocks 0..~D" dir to)
+        (backend:build-index :dir (namestring dir) :archive-dir archive-dir :to to :threads 4 :log nil)
+        (log-node "node: hash index built in ~,1F s"
+                  (/ (- (clempo.io:monotonic-ticks) start) internal-time-units-per-second))))))
+
+(defun note-hash (node kind hash value)
+  (setf (gethash hash (if (zerop kind) (node-followed-blocks node) (node-followed-txs node)))
+        (if (zerop kind) value (cons (ash value -20) (ldb (byte 20 0) value)))))
+
+(defun open-hash-log (node dir head)
+  "Load DIR/followed.log entries up to HEAD (a crash may leave later ones) and append to it."
+  (let ((path (merge-pathnames "followed.log" dir)) (loaded 0))
+    (ensure-directories-exist path)
+    (when (probe-file path)
+      (with-open-file (in path :element-type '(unsigned-byte 8))
+        (let ((record (make-octets +hash-record+)))
+          (loop while (= +hash-record+ (read-sequence record in))
+                do (let* ((kind (aref record 0))
+                          (value (octets->integer record :start 33 :end 41))
+                          (number (if (zerop kind) value (ash value -20))))
+                     (when (<= number head)
+                       (note-hash node kind (subseq record 1 33) value)
+                       (incf loaded)))))))
+    (when (plusp loaded) (log-node "node: ~D followed hashes loaded from ~A" loaded path))
+    (setf (node-hash-log node)
+          (open path :direction :output :element-type '(unsigned-byte 8)
+                     :if-exists :append :if-does-not-exist :create))))
+
+(defun log-block-hashes (node block number)
+  (let ((out (node-hash-log node)))
+    (when out
+      (flet ((put (kind hash value)
+               (write-byte kind out) (write-sequence hash out)
+               (write-sequence (integer->octets value 8) out)
+               (note-hash node kind hash value)))
+        (put 0 (blocks:block-hash block) number)
+        (loop for tx in (blocks:block-transactions block) for j from 0
+              do (put 1 (transactions:transaction-hash tx) (logior (ash number 20) j))))
+      (finish-output out))))
 
 (defun node-db (node) (store:store-db (node-store node)))
 
@@ -99,12 +155,15 @@
     (or (loop for n downfrom head to (max 0 (- head (1- +recent-count+)))
               for h = (store:db-block-hash db n)
               when (and h (octets= h hash)) return n)
+        (gethash hash (node-followed-blocks node))
         (call-next-method))))
 
 (defmethod backend:backend-tx-location ((node node-backend) hash)
   (loop for entry across (node-recent node)
         for index = (and entry (position hash (recent-block-transaction-hashes entry) :test #'octets=))
         when index do (return-from backend:backend-tx-location (values (recent-block-number entry) index)))
+  (let ((loc (gethash hash (node-followed-txs node))))
+    (when loc (return-from backend:backend-tx-location (values (car loc) (cdr loc)))))
   (call-next-method))
 
 (defmethod backend:backend-state ((node node-backend) number)
@@ -136,6 +195,7 @@
                ;; Receipts are root-checked above (BLOCK-MISMATCHES), so they are kept.
                (backend:backend-record-receipts node number (recent-block-receipts entry))
                (note-recent node entry)
+               (log-block-hashes node block number)
                (setf (backend:archive-backend-head node) number)
                (pools:pool-service-block (node-pool node) db header)))
         (when (store:db-block-open-p db) (store:db-revert-block db))))
@@ -508,15 +568,19 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
                                                   (log-node "node: empty datadir; loading the ~A genesis" name)
                                                   (executor:load-genesis db :chain chain))))))
            (rpc-server nil) (repl-server nil) (metrics-server nil) (jit-worker nil)
-           (forwarder nil) (history-writer nil))
+           (forwarder nil) (history-writer nil) (node-ref nil) (own-index (null index-dir)))
       (unwind-protect
            (let* ((db (store:store-db datastore))
                   (head (validate-head db upstream))
                   (pool (pools:make-pool-service :chain chain))
+                  (index-dir (or index-dir
+                                 (let ((own (ensure-directories-exist (datadir-subdir dir "index"))))
+                                   (seed-hash-index own archive-dir (follow:head-number head))
+                                   own)))
                   (node (backend:make-archive-backend
                          :class 'node-backend :store datastore :chain chain :pool pool
                          :head (follow:head-number head) :archive-dir archive-dir :upstream upstream
-                         :index-dir (or index-dir (datadir-subdir dir "index"))
+                         :index-dir index-dir
                          :receipts-dir (or receipts-dir (datadir-subdir dir "receipts"))
                          :history-dir (or history-dir (ensure-directories-exist (datadir-subdir dir "history")))
                          :finalization-dir (or finalization-dir (datadir-subdir dir "finalizations"))))
@@ -535,7 +599,8 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
                   (started nil) (next-report 0) (max-lag 0) (live-base nil))
              (note-recent node (recent-entry block nil nil))
              (pools:pool-service-block pool db (blocks:block-header block))
-             (setf (node-follower node) follower)
+             (setf (node-follower node) follower node-ref node)
+             (when own-index (open-hash-log node index-dir (follow:head-number head)))
              (metrics:metric-set *m-head* initial-number)
              (metrics:metric-set *m-accounts* (store:db-account-count db))
              (when certifier
@@ -621,6 +686,7 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
          (lambda () (when rpc-server (server:stop-server rpc-server)))
          (lambda () (when metrics-server (metrics:stop-metrics-server metrics-server)))
          (lambda () (when forwarder (stop-forwarder forwarder)))
+         (lambda () (when (and node-ref (node-hash-log node-ref)) (close (node-hash-log node-ref))))
          (lambda () (when jit-worker (stop-jit-worker jit-worker)))
          (lambda () (when history-writer
                       (history:history-flush history-writer :db (store:store-db datastore))))
