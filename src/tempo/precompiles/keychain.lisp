@@ -98,6 +98,12 @@
     (replace data (integer->octets key-id 20) :start1 20)
     (clempo.keccak:keccak256-integer data)))
 
+(defun spending-limit-remaining-slot (account key-id token)
+  "The slot of spending_limits[spending_limit_key(ACCOUNT, KEY-ID)][TOKEN].remaining
+(storage_credits NonCreditableSlots::keychain_limit_slot). Touches no storage."
+  (place-slot (field (spending-limits +self+ (spending-limit-key account key-id) token)
+                     'remaining)))
+
 (defun t3-spending-limit-cap (limit)
   (when (> limit u128-max) (revert 'invalid-spending-limit))
   limit)

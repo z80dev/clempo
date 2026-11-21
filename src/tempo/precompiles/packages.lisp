@@ -128,7 +128,7 @@ rewards, permits, memos, transfer policies, virtual addresses.")
   (:export #:account-keychain #:authorize-key #:authorize-admin-key #:revoke-key #:get-key
            #:authorize-transfer #:authorize-approve #:refund-spending-limit
            #:validate-keychain-authorization #:validate-call-scope
-           #:set-transaction-key #:set-tx-origin #:update-spending-limit
+           #:set-transaction-key #:set-tx-origin #:update-spending-limit #:spending-limit-remaining-slot
            #:authorized-key #:authorized-key-signature-type #:authorized-key-expiry
            #:authorized-key-enforce-limits #:authorized-key-is-revoked #:authorized-key-is-admin))
 

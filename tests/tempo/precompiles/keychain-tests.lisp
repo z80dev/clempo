@@ -78,3 +78,12 @@
     (is (eq :duplicate-owner (err 1 '((2 1) (1 1) (2 1)))))
     (is (eq :owners-not-ascending (err 1 '((2 1) (1 1)))))
     (is (eq :threshold-exceeds-weight (err 3 '((1 1) (2 1)))))))
+
+(deftest keychain-spending-limit-slot ()
+  ;; remaining is the first slot of the row: the slot a write of it touches
+  (with-keychain (:t7)
+    (let ((account #xa11ce) (key #xbeef) (token (tip20-address 1)))
+      (set-tx-origin account)
+      (authorize-key account key 0 5000 t (list (list token 100 0)) t '() nil)
+      (is= 100 (sload +account-keychain-address+
+                      (spending-limit-remaining-slot account key token))))))
