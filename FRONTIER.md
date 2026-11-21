@@ -94,6 +94,30 @@ Fixture tests: votes and certificates signed/assembled with the Rust harness's s
 byte-identical to Rust's golden vectors; goempo's recorded mainnet finalizations verify under
 the outcomes of blocks 42098399/44085599/44107199 and across the 2041->2042 full-DKG boundary.
 
+Public devp2p follower (`f9ab7d3`): `CLEMPO_BUILD=release bin/clempo-dev
+follow -source devp2p -peers FILE -last 10 -batch 5 -once -no-archive -json`
+verified 10 blocks through 50,069,812 (0 lag, 330 ms), using a working public
+peer and trusted RPC headers. This checks body transport, not execution or R4.
+
+Clempo release Busy: blocks 9,890,000–9,909,999 from the canonical parent
+9,889,999, with a fresh persisted copy and no heals/skips in the range.
+Every block's gas, receipts, bloom, and state root matched (659,246
+transactions and 31,499,321,696 gas).
+
+| Revision / path | Wall s | CPU s | Mgas/s | Peak RSS GB |
+|---|---:|---:|---:|---:|
+| `648e0a5` serial `bench` | 201.729 | 195.935 | 156.146 | 1.563 |
+| `3d99e1b` persistent 8-participant `bench` | 127.429 | 145.884 | 247.191 | 1.612 |
+
+See [commands](docs/BENCH.md). These are single observations under active
+development workloads, not a paired comparison or an R7 score. An interim
+per-block thread implementation (`1e291bd`, `replay`) took 88.218 s; it was
+not timed under the same conditions as the persistent pool.
+The separate CPU profile (`92ec1f3`, 23,706 samples including worker
+threads) attributes **55.7%** inclusive to secp256k1 recovery, **5.5%** to
+state-root update, **3.2%** to trie hashing, **0.5%** to block decoding and
+**0.4%** to EVM bytecode execution. Inclusive costs overlap.
+
 R7 Rust reference samples (Apple Silicon `Mac15,9`, Tempo 1.19.0-dev
 `568b4fb4258c`, release). Both imports read canonical RLP and completed
 `MerkleExecute` and `Finish` at the requested heights:
