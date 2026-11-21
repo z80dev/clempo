@@ -68,7 +68,9 @@ frame; block hashes, fork times, receipts roots of identical receipts and
 the EVM spec are memoized; blooms and `octets=` work a word at a time;
 keccak contexts live on the stack. Busy in the same build: 36.2 / 36.8 s
 against 37.3 / 36.9 s with `3327105` reverted (paired), so the Early work
-costs Busy nothing; Busy's rise from ~23 s is the store change's (reported).
+costs Busy nothing; Busy's rise from ~23 s was `f5f79c5`'s store path, fixed by
+`6354034`: on `2cef7a8` one unpaired sample gives Busy 23.91 s (64.4 s CPU, 3.6 GB)
+and Early 3.00 s (load average ~13).
 
 Raw local results: `logs/r7-parity/{clempo,rust}-{early,busy,recent}.{json,log}`
 and `logs/r7-parity/go-{early,busy}.{json,log}`. For Clempo use the commands below
