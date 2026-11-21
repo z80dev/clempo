@@ -13,6 +13,7 @@ These measurements are revision-specific. Paths under `logs/` describe local art
 | R4 Follow | No: 74,779 mainnet blocks executed and certified through 50,124,778; 3,783.9 s independently sampled, peak lag 4, p95 1, no incorrect responses. The longest gap between valid samples was 20.0195 s (limit 20 s). | `6763415` | 2026-11-21 |
 | R5 RPC | See the RPC evidence below. The legacy aggregate included negative-test labels, shape-only cases and reference timeouts; it does not establish value parity. | `4c2db4d` (legacy report) | 2026-11-21 |
 | R6 Validator | Sims: 4, 5 and 7 validators, three epochs each. Mixed devnet: one clempo signer necessary through two reshares, two clempo signers necessary through three. | `b680aaf`, `dbe14d1` | 2026-11-21 |
+| R6a–R6e Validator on the Rust devnet | `bin/clempo validator` with Tempo's flags: a) clempo signers necessary for quorum (1 of 3: 260 heights, 4 reshares; 2 of 3: 480 heights, 7 reshares); b) restart mid-run resumes from its datadir and signs; c) restart ~2,100 blocks / 35 epochs behind catches up by marshal backfill in under 90 s and proposes again; d) a fifth, clempo, validator registered with `clempo keys add-validator --send` joins the next DKG (5 players) and signs; e) clempo proposals with transactions finalized by Rust. Every node's chain matches Rust at every height. | `179e3db` | 2026-11-21 |
 | R7 Speed | Same Mac, clempo vs Rust timed wall / CPU seconds: Early **8.83 / 9.65 vs 58.71 / 36.41**; Busy **22.75 / 58.20 vs 35.93 / 45.76**; Recent **19.97 / 23.82 vs 57.13 / 24.42**. Goempo replay wall: **3.33 s** Early, **26.51 s** Busy. Early after `3327105` (paired with goempo, median of 3): **2.77 s vs goempo 3.29 s** (1.19×; 21.2× Rust), [evidence](docs/BENCH.md#early-after-the-per-block-work-3327105-measured-on-f5f79c5). See the [benchmark methodology](docs/BENCH.md#results-on-the-shared-dev-host); root checks differ and clempo's run predates the disk-backed store migration. | clempo `4940311`, goempo `92e996c`, Rust `568b4fb4258c` | 2026-11-21 |
 | R7-RPC | clempo/Rust req/s at 1/16 clients (head 50,049,999, all answers identical, medians of 5, load avg 10-12): `eth_call` **1.40 / 1.49** (goempo 1.28 at 1), `eth_getLogs` **2.59 / 2.14** (goempo 2.01 at 1), `debug_traceTransaction` **1.88 / 1.91**, `eth_getProof` 2.42 / 3.65, `eth_getBlockByNumber` 1.06 / 0.99, `eth_getBalance` 0.98 / 0.91; at 64 clients HTTP-only methods 0.81-0.90 (thread per connection). [evidence](docs/BENCH.md#with-lean-tracing-3877df7) | `3877df7` | 2026-11-21 |
 
@@ -115,6 +116,38 @@ from dealer logs and replayed Rust raw blocks 0–130 with matching execution
 commitments. The separate zero-vote probe authenticated three Rust peers and
 received 156 votes, 156 certificates, 23 broadcast blocks and 69 DKG messages
 in 15 seconds.
+
+R6a–R6e (`179e3db`, main; `scripts/verify.sh` 796 passed on macOS and newphy Linux,
+0 layer violations). Each root was provisioned with `scripts/devnet/devnet.sh --root
+"$NET" provision --tempo ~/dev/tempo/target/release/tempo --base-port $PORT` (T13,
+epochs of 60); clempo slots run `bin/clempo validator` (docs/DEVNET.md).
+
+- **R6a quorum** (code identical to `179e3db` apart from the layer policy), roots
+  `~/cache/clempo/devnet-vf-q1` (port 27000, `C=3`) and `devnet-vf-q2` (28000, `C=2,3`):
+  `start --slots 0,2,3 --clempo $C`, `capture --slots 0,2,3 --clempo $C --quorum --seconds 150
+  --stall 30 --report $NET/mixed-proof.jsonl`. One clempo signer: 260 heights matched, 4
+  boundary outcomes, 82 clempo proposals finalized, 4 reshares. Two: 480 heights, 8
+  boundaries, 163 and 167 proposals, 7 reshares each. Slot 1 never launched, so every
+  clempo vote was needed.
+- **R6b, R6d, R6e** on the final code, root `~/cache/clempo/devnet-vf-final` (port 29000),
+  slots 0,1 Rust and 2,3 clempo: `start --clempo 2,3`; after 120 s `stop --slots 3`, 20 s
+  later `start --slots 3 --clempo 3 --ready started`; `join`; `send --clempo 2,3 --seconds
+  150` (210 transactions); `audit --clempo 2,3 --joiner --report $NET/audit.jsonl`.
+  All five nodes matched Rust's block hash at every height 0–1214.
+  b) slot 3 stopped at 268 and resumed from its datadir, signing epochs 4–20; 196 of
+  its proposals finalized by Rust, the first at 315.
+  d) `addValidator` (key `0x00a1ec56…`) executed in block 306; the joiner, started
+  without a share, became a player in epoch 7's DKG (5 players), signed epochs 7–20 and
+  authored 148 finalized blocks.
+  e) Rust finalized 31 slot-2 proposals carrying 58 transactions and 25 slot-3
+  proposals carrying 47.
+- **R6c far behind**, root `~/cache/clempo/devnet-vf-main` (port 26000, the final engine
+  code for the restart): slot 3 stopped at 1329 and restarted with Rust at 3446 (2,117
+  blocks, 35 epochs). It backfilled finalized blocks over marshal, verifying each under its
+  epoch's identity and resharing epoch by epoch (holding a share in epochs 22–67), reached
+  the tip in under 90 s, and had 68 proposals finalized from 3662 on;
+  `audit-1.jsonl` there matched all five nodes at every height 0–4019. The same root
+  recorded an earlier R6b/R6d/R6e (registration in block 831, joiner signing from epoch 15).
 
 R6f Moderato readiness (read-only): `CLEMPO_BUILD=release bin/clempo-dev
 moderato-readiness -last 3000 -timeout 8` verified 3,000 finalized blocks
