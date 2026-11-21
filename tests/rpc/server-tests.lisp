@@ -34,7 +34,8 @@
             socket)))
 
 (defun send (stream data)
-  (write-sequence (if (stringp data) (string->octets data) data) stream)
+  ;; each character is one byte, so a test can send bytes that are not UTF-8
+  (write-sequence (if (stringp data) (map 'octets #'char-code data) data) stream)
   (force-output stream))
 
 (defun read-all (stream)
@@ -107,6 +108,13 @@
     (is= 400 (status-of (exchange port (crlf "GARBAGE" ""))))
     ;; an endless run of blank lines is refused after +HEADER-LINES-MAX+ of them
     (is= 400 (status-of (exchange port (make-string 100000 :initial-element #\Newline))))
+    ;; bodies that are not UTF-8: a parse error, as the reference answers (recorded 2026-11-21)
+    (let ((a (exchange port (post (concatenate 'string "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[\""
+                                               (string (code-char #xFF)) "\"]}")))))
+      (is= 200 (status-of a))
+      (is= "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}" (body-of a)))
+    ;; a body nested past the control stack costs at most its own connection
+    (exchange port (post (make-string 200000 :initial-element #\[)))
     (is (answers-p port) "the server survives every hostile request")))
 
 (deftest response-limit ()

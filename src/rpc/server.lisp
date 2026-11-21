@@ -270,9 +270,17 @@ Signals BAD-REQUEST for a malformed request line or header, or one over the limi
        (let ((main (string-trim " " (subseq value 0 (or (position #\; value) (length value))))))
          (string-equal main "application/json"))))
 
-(defun run-body (text)
-  "Answer one JSON-RPC body: (values status response), inside the backend's read lock."
-  (let ((backend (and *server* (server-backend *server*))))
+(defun run-body (octets)
+  "Answer one JSON-RPC body: (values status response), inside the backend's read lock. A body
+that is not UTF-8 is a parse error, as the reference answers it (400 unless it starts as an
+object or array)."
+  (let ((text (handler-case (octets->string octets)
+                (error ()
+                  (let ((first (find-if-not (lambda (b) (member b '(32 9 10 13))) octets)))
+                    (return-from run-body
+                      (values (if (member first '(123 91)) 200 400)
+                              "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}"))))))
+        (backend (and *server* (server-backend *server*))))
     (if backend
         (chain:with-backend-read (backend) (rpc:handle-body text))
         (rpc:handle-body text))))
@@ -294,7 +302,7 @@ must arrive within *REQUEST-SECONDS*."
   (let ((keep (not (string-equal (or (header headers "connection") "") "close"))))
     (cond ((string-equal method "POST")
            (if (json-content-type-p (header headers "content-type"))
-               (multiple-value-bind (status response) (run-body (octets->string body))
+               (multiple-value-bind (status response) (run-body body)
                  (write-http-response stream status (reason status) "application/json; charset=utf-8" response))
                (write-http-response stream 415 (reason 415) "text/plain"
                                     "Supplied content type is not allowed. Content-Type: application/json is required")))
@@ -344,7 +352,7 @@ must arrive within *REQUEST-SECONDS*."
                  (return))
                 (t
                  (let ((rpc:*connection* connection) (*after-response* '()))
-                   (multiple-value-bind (status response) (run-body (octets->string payload))
+                   (multiple-value-bind (status response) (run-body payload)
                      (declare (ignore status))
                      (unless (string= response "null") (send-text connection response)))
                    (mapc #'funcall *after-response*)))))))))
@@ -384,7 +392,7 @@ the next head is sent."
                      ((or stream-error sb-bsd-sockets:socket-error connection-timeout) ()
                        (close-connection connection)
                        (return))
-                     (error (e) (log-event "notifications for block ~D failed: ~A" number e)))))))))
+                     (serious-condition (e) (log-event "notifications for block ~D failed: ~A" number e)))))))))
 
 (defun queue-head (connection number certificate seen)
   "Queue head NUMBER for CONNECTION's subscriptions; returns the number of heads it skipped
@@ -430,7 +438,9 @@ so far when this one pushed the oldest out, else NIL."
                      (progn (serve-websocket connection headers stream) (return))
                      (unless (serve-http-request method headers body stream) (return)))))
            ;; A broken, closed, slow or hostile connection ends its thread, never the process.
-           (error () nil))
+           ;; SERIOUS-CONDITION: stack or heap exhaustion is not an ERROR, and must end only
+           ;; this connection.
+           (serious-condition () nil))
       (close-connection connection)
       (let ((writer (connection-writer connection)))
         (when writer (sb-thread:join-thread writer :default nil :timeout 10)))
