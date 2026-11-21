@@ -700,3 +700,24 @@ request against Rust's 2.2. That is the JSON-RPC envelope: handle-body's validat
 parse-json pass and then handle-request-object, about 3 µs. The HTTP layer accounts for
 about 0.5 µs. Next lever: a single-pass envelope that keeps the reference's
 error choice for malformed bodies.
+
+### Envelope validation without a parse tree (`9a36e2a`)
+
+A single-object body is now checked by `json-valid-p` before dispatch. It applies
+parse-json's grammar without building values, and a seeded mutation test checks that the
+two accept and reject the same inputs. rpcdiff gives envelope 50/50 and static 102/102,
+and the byte-for-byte HTTP comparison shows 0 differences. The HTTP-bound methods were
+re-run with `-total 40000 -rounds 7`, same pinning, 800 of 800 answers identical on each
+host:
+
+| Method | newphy pinned 1 | 16 | 64 | Mac 1 | 16 | 64 |
+|---|---:|---:|---:|---:|---:|---:|
+| `eth_getBalance` | 0.90 | **1.01** | 0.94 | **1.05** | 0.99 | 0.98 |
+| `eth_getBlockByNumber` | **1.30** | **1.08** | **1.41** | **1.30** | **1.05** | **1.07** |
+
+- Load average on newphy was 4.0-4.3 (`rpc-load-pinned-2`) and on the Mac 10-22 (`rpc-load-6`).
+- `eth_getBalance` is still 6-10% behind Rust at 1 and 64 clients on newphy. On the Mac at
+  16 and 64 clients both servers sit at the load client's ceiling of about 155k req/s, so
+  0.98-0.99 there is noise.
+- The answer is constant, so the gap is per-request user CPU: the method's history lookup
+  and response rendering. The envelope pass this change removed was not the whole of it.
