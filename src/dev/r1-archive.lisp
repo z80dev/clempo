@@ -55,7 +55,7 @@ checkpoint counters and elapsed processing time exclude uncommitted trailing wor
          (total (make-r1-archive-counts))
          (prior-seconds 0d0) (prior-cpu 0d0) (prior-bytes 0)
          (lock (sb-thread:make-mutex :name "R1 archive results"))
-         (started (get-internal-real-time)) (cpu-start (get-internal-run-time))
+         (started (clempo.io:monotonic-ticks)) (cpu-start (clempo.io:process-cpu-ticks))
          (bytes-start (sb-ext:get-bytes-consed))
          (failures-path (concatenate 'string result-path ".failures.jsonl"))
          (chunks-path (concatenate 'string result-path ".chunks.jsonl"))
@@ -96,7 +96,7 @@ checkpoint counters and elapsed processing time exclude uncommitted trailing wor
         (labels
             ((summary (finished)
                (let* ((seconds (+ prior-seconds
-                                  (float (/ (- (get-internal-real-time) started)
+                                  (float (/ (- (clempo.io:monotonic-ticks) started)
                                             internal-time-units-per-second) 1d0)))
                       (n (r1-archive-counts-blocks total))
                       (bad (r1-archive-counts-failed total))
@@ -113,7 +113,7 @@ checkpoint counters and elapsed processing time exclude uncommitted trailing wor
                   "cryptographicRecoveries" recovered "rawBytes" (r1-archive-counts-bytes total)
                   "chunksCompleted" chunks "chunksTotal" chunk-total "chunkErrors" chunk-errors
                   "threads" threads "batch" batch "seconds" seconds
-                  "cpuSeconds" (+ prior-cpu (float (/ (- (get-internal-run-time) cpu-start)
+                  "cpuSeconds" (+ prior-cpu (float (/ (- (clempo.io:process-cpu-ticks) cpu-start)
                                                         internal-time-units-per-second) 1d0))
                   "bytesAllocated" (+ prior-bytes (- (sb-ext:get-bytes-consed) bytes-start))
                   "blocksPerSecond" (/ n (max seconds 0.000001d0))

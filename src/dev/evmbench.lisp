@@ -37,9 +37,9 @@
         (when (or (null only) (string= only name))
           (let ((code (program body n)))
             (run-program code 100000000)        ; warm up
-            (let ((start (get-internal-real-time)))
+            (let ((start (clempo.io:monotonic-ticks)))
               (multiple-value-bind (status used) (run-program code most-positive-fixnum)
-                (let ((secs (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
+                (let ((secs (/ (- (clempo.io:monotonic-ticks) start) internal-time-units-per-second)))
                   (format t "~8A ~A: ~,1F Mgas/s (~:D gas in ~,3F s, ~A) - ~A~%"
                           name status (/ used secs 1d6) used (float secs) status doc))))))))
     (when jit (clempo.dev.evm-compile:jit-summary))

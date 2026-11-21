@@ -18,7 +18,7 @@
   (/ ticks (float internal-time-units-per-second 1d0)))
 
 (defun bench-run (db store from to profile sender-threads &key (profile-mode :cpu) (profile-threads :all))
-  (let* ((wall (get-internal-real-time)) (cpu (get-internal-run-time))
+  (let* ((wall (clempo.io:monotonic-ticks)) (cpu (clempo.io:process-cpu-ticks))
          (gc sb-ext:*gc-run-time*) (bytes (sb-ext:get-bytes-consed))
          (result nil))
     (when profile
@@ -39,8 +39,8 @@
                          sender-threads))
            (when store (clempo.store:store-sync store)))
       (when profile (sb-sprof:stop-profiling)))
-    (let ((secs (max (bench-seconds (- (get-internal-real-time) wall)) 1d-6))
-          (cpu-secs (bench-seconds (- (get-internal-run-time) cpu)))
+    (let ((secs (max (bench-seconds (- (clempo.io:monotonic-ticks) wall)) 1d-6))
+          (cpu-secs (bench-seconds (- (clempo.io:process-cpu-ticks) cpu)))
           (gc-secs (bench-seconds (- sb-ext:*gc-run-time* gc)))
           (consed (- (sb-ext:get-bytes-consed) bytes))
           (rss (bench-peak-rss)))

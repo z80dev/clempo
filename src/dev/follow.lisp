@@ -7,7 +7,7 @@
          (once (arg-flag args :once))
          (seconds (arg-int args :seconds))
          (archive (arg args :archive (clempo.archive:archive-dir)))
-         (start (get-internal-real-time)))
+         (start (clempo.io:monotonic-ticks)))
     (check-type distance (integer 0 *))
     (when (and once seconds) (error "Choose either -once or -seconds"))
     (let* ((number (max 0 (- (clempo.follow:head-number tip) distance)))
@@ -33,7 +33,7 @@
                                (let* ((local (clempo.follow:follower-head f))
                                       (lag (- (clempo.follow:head-number remote)
                                               (clempo.follow:head-number local)))
-                                      (clock (get-internal-real-time)))
+                                      (clock (clempo.io:monotonic-ticks)))
                                  (when (zerop lag) (setf caught-up t))
                                  (when caught-up (setf max-lag (max max-lag lag)))
                                  (when (>= clock next-report)
@@ -41,7 +41,7 @@
                                              (clempo.follow:head-number local) lag
                                              (clempo.follow:follower-blocks f))
                                    (setf next-report (+ clock (* 30 internal-time-units-per-second))))))))
-             (elapsed (round (* 1000 (- (get-internal-real-time) start))
+             (elapsed (round (* 1000 (- (clempo.io:monotonic-ticks) start))
                              internal-time-units-per-second)))
         (if (arg-flag args :json)
             (write-line

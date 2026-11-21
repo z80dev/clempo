@@ -125,7 +125,7 @@
 
 (defun r1-score-chain (chain)
   (let ((path (r1-cache-path chain)) (total 0) (passed 0) (failures nil)
-        (forks (make-hash-table :test 'equal)) (start (get-internal-real-time)))
+        (forks (make-hash-table :test 'equal)) (start (clempo.io:monotonic-ticks)))
     (when (probe-file path)
       (with-open-file (in path)
         (loop for line = (read-line in nil) while line
@@ -138,15 +138,21 @@
                                                 "error" (princ-to-string condition)) failures))))))
     (clempo.json:jobject "chain" chain "score" (format nil "~D/~D" passed total)
                         "passed" passed "sampled" total
-                        "seconds" (float (/ (- (get-internal-real-time) start) internal-time-units-per-second) 1d0)
+                        "seconds" (float (/ (- (clempo.io:monotonic-ticks) start) internal-time-units-per-second) 1d0)
                         "forks" (cons :object (sort (loop for k being the hash-keys of forks using (hash-value v) collect (cons k v)) #'string< :key #'car))
                         "failures" (coerce (nreverse failures) 'vector))))
 
 (defrung "R1" (args)
-  "raw block, transaction signatures, trie roots and receipt bloom parity across forks"
+  "check sampled blocks across forks; populate inputs with fetch-r1 [-chain mainnet|moderato|all]"
   (let* ((chain (arg args :chain "all"))
          (chains (if (string= chain "all") '("mainnet" "moderato") (list chain)))
-         (results (mapcar #'r1-score-chain chains))
+         (results (mapcar (lambda (chain)
+                            (let ((result (r1-score-chain chain)))
+                              (when (zerop (clempo.json:jget result "sampled"))
+                                (score-input-error "No samples in ~A; run bin/clempo-dev fetch-r1 -chain ~A."
+                                                   (r1-cache-path chain) chain))
+                              result))
+                          chains))
          (passed (loop for result in results sum (clempo.json:jget result "passed")))
          (total (loop for result in results sum (clempo.json:jget result "sampled"))))
     (clempo.json:jobject "score" (format nil "~D/~D" passed total) "chains" (coerce results 'vector))))
@@ -159,12 +165,12 @@
                  (loop for line = (read-line in nil) while line
                        collect (hex->octets (clempo.json:jget (clempo.json:parse-json line) "raw"))))))
     (invariant (plusp repeats) "repeat count must be positive")
-    (let ((cpu (get-internal-run-time)) (wall (get-internal-real-time))
+    (let ((cpu (clempo.io:process-cpu-ticks)) (wall (clempo.io:monotonic-ticks))
           (bytes (sb-ext:get-bytes-consed)))
       (dotimes (i repeats)
         (dolist (raw raws) (clempo.blocks:encode-block (clempo.blocks:decode-block raw))))
-      (let ((cpu-seconds (float (/ (- (get-internal-run-time) cpu) internal-time-units-per-second) 1d0))
-            (wall-seconds (float (/ (- (get-internal-real-time) wall) internal-time-units-per-second) 1d0))
+      (let ((cpu-seconds (float (/ (- (clempo.io:process-cpu-ticks) cpu) internal-time-units-per-second) 1d0))
+            (wall-seconds (float (/ (- (clempo.io:monotonic-ticks) wall) internal-time-units-per-second) 1d0))
             (allocated (- (sb-ext:get-bytes-consed) bytes)))
         (write-line
          (clempo.json:to-json-string

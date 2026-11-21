@@ -4,13 +4,13 @@
 
 (defun sim-run-json (name)
   "Run scenario NAME and certify its chain; a JSON object with the result."
-  (let* ((t0 (get-internal-real-time))
+  (let* ((t0 (clempo.io:monotonic-ticks))
          (r (clempo.sim:run-scenario name))
          (c (handler-case (clempo.sim:verify-sim-chain r)
               (clempo.consensus:certificate-error (e)
                 (log-line "sim ~A: certificate verifier rejected the chain: ~A" name e)
                 nil)))
-         (secs (/ (- (get-internal-real-time) t0) (float internal-time-units-per-second)))
+         (secs (/ (- (clempo.io:monotonic-ticks) t0) (float internal-time-units-per-second)))
          (ceremonies (clempo.sim:sim-result-ceremonies r))
          (concluded (count-if #'cdr ceremonies))
          ;; a pass needs 3 epochs, a certified chain and every reshare concluded

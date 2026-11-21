@@ -7,8 +7,8 @@
     (clempo.validator:call-with-validator-network
      manifest slot
      (lambda (network)
-       (let ((deadline (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
-         (loop for remaining = (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)
+       (let ((deadline (+ (clempo.io:monotonic-ticks) (* seconds internal-time-units-per-second))))
+         (loop for remaining = (/ (- deadline (clempo.io:monotonic-ticks)) internal-time-units-per-second)
                while (plusp remaining)
                for event = (clempo.validator:network-receive network :timeout (min remaining 1))
                when event do
@@ -88,8 +88,11 @@
         summary))))
 
 (defrung "R6-devnet" (args)
-  "verify mixed-run evidence: -one REPORT.jsonl -two REPORT.jsonl"
-  (let ((one (mixed-devnet-proof (arg args :one) 1))
-        (two (mixed-devnet-proof (arg args :two) 2)))
+  "validate mixed-validator evidence (not a live run): -one REPORT.jsonl and/or -two REPORT.jsonl from scripts/devnet; see docs/DEVNET.md"
+  (unless (or (arg args :one) (arg args :two))
+    (score-input-error "Produce mixed-validator reports with scripts/devnet (docs/DEVNET.md), then supply -one REPORT.jsonl and/or -two REPORT.jsonl."))
+  (let* ((usage "Use -one REPORT.jsonl for one clempo signer or -two REPORT.jsonl for two.")
+         (one (when (arg args :one) (mixed-devnet-proof (required-score-option args :one usage) 1)))
+         (two (when (arg args :two) (mixed-devnet-proof (required-score-option args :two usage) 2))))
     (clempo.json:jobject "score" (+ (if one 1 0) (if two 1 0))
                          "one" (or one :null) "two" (or two :null))))

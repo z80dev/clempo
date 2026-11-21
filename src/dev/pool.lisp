@@ -10,7 +10,7 @@
       (log-line "-iterations must be a positive integer")
       (return-from command 2))
     (let ((accepted 0) (rejected 0) (selected 0)
-          (start (get-internal-real-time)) (bytes (sb-ext:get-bytes-consed)))
+          (start (clempo.io:monotonic-ticks)) (bytes (sb-ext:get-bytes-consed)))
       (handler-case
           (dotimes (i iterations)
             (multiple-value-bind (a r s) (funcall run)
@@ -18,7 +18,7 @@
         (error (condition)
           (log-line "pool fixture validation failed: ~A" condition)
           (return-from command 1)))
-      (let* ((elapsed (/ (- (get-internal-real-time) start)
+      (let* ((elapsed (/ (- (clempo.io:monotonic-ticks) start)
                          (float internal-time-units-per-second 1d0)))
              (allocated (- (sb-ext:get-bytes-consed) bytes))
              (report (clempo.json:jobject

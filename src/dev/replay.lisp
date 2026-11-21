@@ -12,8 +12,8 @@
 ;;; SKIP-BLOCK and ABORT-REPLAY. The datadir remembers whether its state was ever healed or
 ;;; skipped (replay.sexp), so R3 counts only the contiguous run from genesis.
 
-(defparameter *r3-result-path* "~/scratch/clempo/r3/replay.json"
-  "Where `replay` writes its result unless -result says otherwise; R3 reads it.")
+(defparameter *r3-result-path* "~/cache/clempo/replay.json"
+  "Where `replay` writes its report unless -result says otherwise.")
 
 (defun expand-home (path)
   (if (and (plusp (length path)) (char= (char path 0) #\~))
@@ -139,7 +139,7 @@ get the restarts in the debugger)."
   (check-type sender-threads (integer 1 16))
   (let* ((clempo.executor:*chain* chain)
          (source (make-archive-source))
-         (start (get-internal-real-time))
+         (start (clempo.io:monotonic-ticks))
          (store (when datadir
                   (clempo.store:open-store (expand-home datadir)
                                            :genesis (lambda (db) (clempo.executor:load-genesis db :chain chain))
@@ -150,13 +150,13 @@ get the restarts in the debugger)."
          (from (or from (1+ (clempo.store:db-number db))))
          (to (or to (clempo.archive:archive-contiguous-height)))
          (heals 0) (skips 0) (diagnosis nil)
-         (last-log (get-internal-real-time)) (last-n from)
+         (last-log (clempo.io:monotonic-ticks)) (last-n from)
          (result nil))
     (log-line "replay: ~D..~D from state at ~D (~A), datadir ~A" from to (clempo.store:db-number db)
               (octets->hex (clempo.store:db-root-hash db)) (or datadir "none"))
     (flet ((progress (n outcome)
              (declare (ignore outcome))
-             (let ((now (get-internal-real-time)))
+             (let ((now (clempo.io:monotonic-ticks)))
                (when (or (zerop (mod n 100000))
                          (> (- now last-log) (* 30 internal-time-units-per-second)))
                  (let ((secs (/ (- now last-log) internal-time-units-per-second)))
@@ -200,7 +200,7 @@ get the restarts in the debugger)."
                                                            (first diagnosis) :chain chain)
                              (error (e) (format nil "opcode diagnosis failed: ~A" e)))))))
         (when store (clempo.store:close-store store))))
-    (let* ((secs (max 1/1000 (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
+    (let* ((secs (max 1/1000 (/ (- (clempo.io:monotonic-ticks) start) internal-time-units-per-second)))
            (r result)
            (prior-heals (getf history :heals))
            (prior-skips (getf history :skips))
@@ -254,13 +254,48 @@ get the restarts in the debugger)."
                       :chain (intern (string-upcase (arg args :chain "mainnet")) :keyword))))
     (if (member (clempo.json:jget json "stop") '(nil :null)) 0 1)))
 
+(defun verify-replay-head (datadir archive height)
+  (let* ((dir (uiop:ensure-directory-pathname (expand-home datadir)))
+         (manifest (merge-pathnames "MANIFEST" dir)))
+    (unless (probe-file manifest)
+      (score-input-error "No replay store at ~A; run replay -datadir ~A first." dir datadir))
+    ;; Opening the stopped store also checks the checkpoint root and WAL roots.
+    (let ((store (clempo.store:open-store dir)))
+      (unwind-protect
+           (let* ((db (clempo.store:store-db store))
+                  (head (clempo.store:db-number db)))
+             (when (and height (/= height head))
+               (score-input-error "Report is for head ~D, but the datadir is at ~D." height head))
+             (let* ((block (clempo.blocks:decode-block (clempo.archive:raw-block head archive)))
+                    (header (clempo.blocks:block-header block)))
+               (unless (and (= head (clempo.headers:header-number header))
+                            (octets= (clempo.store:db-hash db) (clempo.blocks:block-hash block))
+                            (octets= (clempo.store:db-root-hash db) (clempo.headers:header-state-root header)))
+                 (score-input-error "Datadir head ~D does not match the archive block hash and state root." head))
+               head))
+        (clempo.store:close-store store)))))
+
 (defrung "R3" (args)
-  "highest mainnet block N such that 1..N executed from genesis match (from the last replay result)"
-  (let ((path (expand-home (arg args :result *r3-result-path*))))
-    (if (probe-file path)
-        (let ((json (clempo.json:parse-json (clempo.io:read-file-string path))))
-          (clempo.json:jobject "score" (clempo.json:jget json "r3_height")
-                               "source" path
-                               "last" (clempo.json:jget json "last")
-                               "stop" (clempo.json:jget json "stop")))
-        (clempo.json:jobject "score" 0 "source" path "stop" "no replay result"))))
+  "read replay evidence: -result REPORT; optionally recheck a stopped store against the archive: -datadir DIR [-archive DIR]"
+  (let* ((path (arg args :result))
+         (datadir (arg args :datadir))
+         (usage "Use score -rung R3 -result REPORT and/or -datadir STOPPED_DIR [-archive DIR]. Create REPORT with replay -result REPORT."))
+    (when (or (and (not path) (not datadir)) (eq path t) (eq datadir t))
+      (score-input-error "~A" usage))
+    (let* ((report (when path
+                     (setf path (expand-home path))
+                     (unless (probe-file path) (score-input-error "No replay report at ~A. ~A" path usage))
+                     (clempo.json:parse-json (clempo.io:read-file-string path))))
+           (height (clempo.json:jget report "r3_height"))
+           (last (clempo.json:jget report "last"))
+           (archive (namestring (uiop:ensure-directory-pathname
+                                 (expand-home (arg args :archive (namestring (clempo.archive:archive-dir)))))))
+           (head (progn
+                   (when (and path (not (and (integerp height) (integerp last) (<= 0 height last))))
+                     (score-input-error "~A does not contain valid R3 replay heights." path))
+                   (when datadir (verify-replay-head datadir archive last)))))
+      (clempo.json:jobject "score" (or height "head verified (not a replay score)")
+                           "source" (or path :null)
+                           "last" (or last head)
+                           "stop" (or (clempo.json:jget report "stop") :null)
+                           "verified_head" (or head :null)))))

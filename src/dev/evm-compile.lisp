@@ -88,7 +88,7 @@ threads see global values). Returns true when compilation is on."
                             (push (hex->octets hex) codes)))))))
 
 (defun seconds-since (start)
-  (/ (- (get-internal-real-time) start) internal-time-units-per-second))
+  (/ (- (clempo.io:monotonic-ticks) start) internal-time-units-per-second))
 
 (defcommand "jit-latency" (args)
   "compile latency by code size: jit-latency [dir] [-n contracts] [-fork Osaka]"
@@ -101,7 +101,7 @@ threads see global values). Returns true when compilation is on."
          (rows (make-array (length buckets) :initial-element nil))
          (failed 0))
     (dolist (code codes)
-      (let ((start (get-internal-real-time)))
+      (let ((start (clempo.io:monotonic-ticks)))
         (multiple-value-bind (fn warnings)
             (handler-case (clempo.evm:compile-code code fork)
               (serious-condition (c) (values nil (list (princ-to-string c)))))
