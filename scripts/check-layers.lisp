@@ -155,13 +155,19 @@ Walk quoted and backquoted code too: macros can generate executable forms from t
                                       (loop-word-p kind "HASH-KEY" "HASH-KEYS" "HASH-VALUE" "HASH-VALUES"))
                               do (incf hash-scans)))
                     (visit op)
-                    (cond ((and (member op '(let let*)) (consp args))
+                    (cond ((and (member op '(let let* lambda)) (consp args))
                            ;; OPEN in a binding name isn't a call to CL:OPEN.
                            (visit-bindings (first args))
                            (visit-list (rest args)))
+                          ((and (member op '(defun defmacro define-compiler-macro)) (consp args))
+                           (visit (first args))
+                           (visit-bindings (second args))
+                           (visit-list (cddr args)))
                           (t (visit-list args)))))
                  (sb-impl::comma (visit (sb-impl::comma-expr x)))
-                 (simple-vector (map nil #'visit x)))))
+                 ((or string bit-vector) nil)
+                 (array
+                  (dotimes (i (array-total-size x)) (visit (row-major-aref x i)))))))
       (visit form))
     (values symbols operators hash-scans unbounded-loops)))
 
@@ -317,7 +323,8 @@ Walk quoted and backquoted code too: macros can generate executable forms from t
              (when (< (gethash path assertions 0) count)
                (push (format nil "~A: consensus-critical module lost its required assertions" path)
                      violations)))
-    (dolist (v (sort violations #'string<)) (format t "~&layers: ~A~%" v))
+    (setf violations (sort violations #'string<))
+    (dolist (v violations) (format t "~&layers: ~A~%" v))
     (format t "~&layers: ~D violation~:P~%" (length violations))
     (null violations)))
 

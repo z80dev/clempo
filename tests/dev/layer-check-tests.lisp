@@ -16,6 +16,7 @@
 (assert (null (audit-fixture "\"(open \" ; (probe-file x)
 #| (sb-ext:get-time-of-day) #| (delete-file x) |# |#
 (let ((open 1)) open)")))
+(assert (null (audit-fixture "(defun client-hello (random) random)" t)))
 
 (dolist (fixture '(("(funcall #'cl:probe-file p)" . "PROBE-FILE")
                    ("\"semicolon ;\" (cl::delete-file p)" . "DELETE-FILE")
@@ -27,6 +28,16 @@
                    ("(sb-alien:alien-funcall callable)" . "SB-ALIEN")
                    ("(sb-unix:unix-getpid)" . "SB-UNIX")))
   (assert (some (lambda (v) (search (cdr fixture) v)) (audit-fixture (car fixture)))))
+
+(assert (audit-fixture "#2A((sb-thread:make-thread))"))
+
+(let ((starts (make-hash-table :test #'equal)) (joins (make-hash-table :test #'equal))
+      (violations nil)
+      (policy '(:threads (("src/io/fixture.lisp" "START" 1 "STOP" "STOP joins START's worker.")))))
+  (setf (gethash '("src/io/fixture.lisp" "START") starts) 1)
+  (check-thread-owners policy starts joins
+                       (lambda (control &rest args) (push (apply #'format nil control args) violations)))
+  (assert (and (= 1 (length violations)) (search "join owner STOP has no JOIN-THREAD" (first violations)))))
 
 (let* ((name (symbol-name (gensym "LAYER-CHECK-FIXTURE")))
        (package (make-package name :use '(#:cl))))

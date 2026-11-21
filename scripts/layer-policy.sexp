@@ -65,12 +65,20 @@
    ("(:COMPILE-TOPLEVEL :LOAD-TOPLEVEL :EXECUTE)" 2 "Compile-time generation searches for a fixed count of primes.")
    ("DEFINE-SHA" 1 "Streaming hash loop consumes input blocks."))
   ("src/crypto/keccak/keccak.lisp" ("KECCAK-UPDATE" 1 "Consumes bytes up to the supplied end offset."))
+  ("src/crypto/pki/der.lisp" ("DER-CHILDREN" 1 "Each DER child advances the cursor inside the enclosing length."))
+  ("src/crypto/pki/gcm.lisp"
+   ("CTR-XOR" 2 "Processes finite input blocks and bytes within each counter block.")
+   ("GHASH-BLOCKS" 3 "Visits fixed-size words or a final partial block of the supplied bytes.")
+   ("MAKE-GCM" 1 "Prepares the fixed-size table for multiplying GHASH field elements."))
+  ("src/crypto/pki/x509.lisp"
+   ("IPV4-OCTETS" 1 "Scans a finite numeric address string, rejecting malformed octets.")
+   ("PEM-CERTIFICATES" 1 "Advances through a finite PEM bundle one certificate at a time."))
   ("src/evm/compile.lisp"
    ("CODE-BLOCKS" 1 "Disassembly advances the program counter past each instruction.")
    ("RUN-COMPILED" 1 "The EVM gas schedule bounds executed steps, including cycles.")
    ("SDEEP" 1 "Scans the compiler's finite list of stack depths."))
   ("src/evm/frame.lisp" ("ANALYZE-CODE" 2 "Instruction decoding advances across a finite bytecode vector."))
-  ("src/evm/interpreter.lisp" ("DEFINE-INTERPRETER" 1 "The EVM gas schedule bounds execution; only halting opcodes can consume no gas indefinitely."))
+  ("src/evm/interpreter.lisp" ("DEFINE-INTERPRETER" 1 "Every executable control-flow cycle incurs positive EVM gas."))
   ("src/evm/tracing.lisp"
    ("EFFECTIVE-P" 1 "Traversal follows a finite chain of trace parents.")
    ("PARITY-PTRACES" 1 "Consumes a finite trace list.")
@@ -87,6 +95,7 @@
    ("COMPRESS" 4 "Varint and copy loops consume finite input lengths and matches.")
    ("DECOMPRESS" 1 "Consumes compressed tags up to the finite input length, checking the declared output bound."))
   ("src/rpc/defrpc.lisp" ("VALUE-SPANS" 1 "Advances through values of a fixed JSON slice."))
+  ("src/rpc/fill.lisp" ("OWNER-WEIGHT" 1 "Scans the finite configured owner list."))
   ("src/rpc/revert.lisp" ("SPLIT-SEQUENCE" 1 "Scans the finite signature string from one separator to the next."))
   ("src/rpc/serde.lisp"
    ("DO-ARRAY" 1 "Each element consumes input, or invalid JSON stops parsing.")
@@ -95,7 +104,6 @@
    ("PARSE-SERDE-NUMBER" 3 "Each numeric scan consumes digits of the finite JSON token.")
    ("READ-STRING" 1 "Consumes characters or escapes from a bounded JSON input.")
    ("SKIP-NUMBER" 1 "Consumes characters of one number token.")
-   ("SKIP-VALUE" 2 "Consumes array/object elements of a bounded JSON input.")
    ("SKIP-WS" 1 "Stops at end of supplied input."))
   ("src/rpc/stubs.lisp" ("SPLIT" 1 "Splits a finite string, advancing past the separator each time."))
   ("src/rpc/tempo-request.lisp"
@@ -160,6 +168,10 @@
   ("src/consensus/simplex/voter.lisp"
    ("ADD-FINALIZATION" 1 "Marks independently obsolete rounds, with no per-round emitted effects.")
    ("PRUNE" 1 "Removes a set of unrelated rounds, with no per-round emitted effects."))
+  ("src/evm/compile-cache.lisp"
+   ("CLEAR-JIT-CACHE" 1 "Clears independent compiled entry states before clearing the cache.")
+   ("JIT-CANCEL" 1 "Drops pending markers without emitting per-entry effects.")
+   ("JIT-EVICT" 1 "Selects the entry with the oldest recency stamp."))
   ("src/evm/spec.lisp" ("PRECOMPILE-ADDRESSES" 1 "Produces the set used for initial warm addresses."))
   ("src/evm/tracing.lisp"
    ("CAPTURE-POST-STATE" 2 "Captures independent per-account and per-slot values; rendering sorts the keys.")
