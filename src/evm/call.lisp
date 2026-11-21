@@ -110,6 +110,26 @@ output); output is the revert data on :revert, empty otherwise."
       (not (eq (account-code-hash account) +empty-code-hash+))
       (storage-nonempty-p world account)))
 
+(defun call-roles (frame kind to value)
+  "(values caller target value) of a KIND call to TO made by FRAME."
+  (let ((self (frame-address frame)))
+    (ecase kind
+      (:call (values self to value))
+      (:callcode (values self self value))
+      (:delegatecall (values (frame-caller frame) self (frame-value frame)))
+      (:staticcall (values self to 0)))))
+
+(defun trace-unstarted (kind caller address code-address value input code gas depth
+                        status gas-left)
+  "Tell *TRACER* about a message that failed its prechecks (depth, balance, nonce,
+collision) and so never ran: a frame that starts and ends with STATUS."
+  (let ((tracer *tracer*)
+        (frame (%make-frame :kind kind :caller caller :address address
+                            :code-address code-address :value value :input input :code code
+                            :gas gas :depth depth)))
+    (trace-call-start tracer frame)
+    (trace-call-end tracer frame status gas-left +empty-code+)))
+
 ;;; The CALL family. Memory is already expanded and paid; FRAME-GAS holds the gas.
 ;;; Returns the word to push (1 or 0) or NIL for an exceptional halt.
 
@@ -147,18 +167,20 @@ output); output is the revert data on :revert, empty otherwise."
         (setf (frame-return-data frame) +empty-code+)
         (when (or (>= depth +max-depth+)
                   (and transfers (< (account-balance (frame-account frame)) value)))
+          (setf (frame-gas frame) gas)
+          (when *tracer*
+            (multiple-value-bind (caller target value) (call-roles frame kind to value)
+              (trace-unstarted kind caller target code-address value
+                               (memory-slice frame in-offset in-size)
+                               (or code (get-code world code-address)) sub-gas (1+ depth)
+                               (if (>= depth +max-depth+) :call-too-deep :out-of-funds)
+                               sub-gas)))
           (setf (frame-gas frame) (+ gas sub-gas))
           (return-from op-call 0))
-        (let ((input (memory-slice frame in-offset in-size))
-              (self (frame-address frame)))
+        (let ((input (memory-slice frame in-offset in-size)))
           (setf (frame-gas frame) gas)    ; what the step left, seen by tracers
           (multiple-value-bind (status gas-left output)
-              (multiple-value-bind (caller target value)
-                  (ecase kind
-                    (:call (values self to value))
-                    (:callcode (values self self value))
-                    (:delegatecall (values (frame-caller frame) self (frame-value frame)))
-                    (:staticcall (values self to 0)))
+              (multiple-value-bind (caller target value) (call-roles frame kind to value)
                 (call-message kind caller target code-address value input sub-gas (1+ depth)
                               (or (frame-static-p frame) (eq kind :staticcall))
                               :code (or code (get-code world code-address))
@@ -194,6 +216,18 @@ for an exceptional halt."
       (when (or (< (account-balance account) value)
                 (= (account-nonce account) +max-nonce+)
                 (>= depth +max-depth+))
+        (setf (frame-gas frame) gas)
+        (when *tracer*
+          (let* ((initcode (memory-slice frame offset size))
+                 (address (if (eq kind :create)
+                              (create-address self (account-nonce account))
+                              (create2-address self salt initcode))))
+            (trace-unstarted kind self address address value +empty-code+ initcode child-gas
+                             (1+ depth)
+                             (cond ((>= depth +max-depth+) :call-too-deep)
+                                   ((< (account-balance account) value) :out-of-funds)
+                                   (t :nonce-overflow))
+                             child-gas)))
         (setf (frame-gas frame) (+ gas child-gas))
         (return-from op-create 0))
       (let* ((initcode (memory-slice frame offset size))
@@ -204,6 +238,9 @@ for an exceptional halt."
         (increment-nonce world account)
         (when (collision-p world (get-account world address))
           (setf (frame-gas frame) gas)
+          (when *tracer*
+            (trace-unstarted kind self address address value +empty-code+ initcode child-gas
+                             (1+ depth) :create-collision 0))
           (return-from op-create 0))
         (setf (frame-gas frame) gas)
         (multiple-value-bind (status gas-left output)

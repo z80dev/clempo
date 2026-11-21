@@ -225,7 +225,11 @@ contract-address)."
         (let ((address (create-address sender (evm-tx-nonce tx))))
           (when (fork>= :berlin) (warm-address world address))
           (if (collision-p world (get-account world address))
-              (values :create-collision 0 +empty-code+ nil)
+              (progn
+                (when *tracer*
+                  (trace-unstarted :create sender address address value +empty-code+
+                                   (evm-tx-data tx) gas 0 :create-collision 0))
+                (values :create-collision 0 +empty-code+ nil))
               (multiple-value-bind (status gas-left output)
                   (create-message sender address value (evm-tx-data tx) gas 0)
                 (values status gas-left output (and (success-p status) address)))))

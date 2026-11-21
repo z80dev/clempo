@@ -75,14 +75,17 @@ Returns (values status output); FRAME-GAS holds the gas left (0 after an excepti
                        ,@',(when traced
                              '((trace-step-end tracer frame step-pc
                                 (if (< step-pc code-len) (aref code step-pc) 0)
-                                (frame-gas frame) sp stack st)))
+                                gas sp stack st)))   ; gas the op had left, before zeroing
                        (return-from run (values st out))))
                   (mem-ensure (offset size)
                     `(unless (eql ,size 0)
                        (let ((end (mem-end ,offset ,size)))
-                         (unless end (halt :out-of-gas))
+                         (unless end (halt :memory-out-of-gas))
                          (when (> end (frame-mem-size frame))
-                           (charge (expansion-cost frame end gp))
+                           (let ((c (expansion-cost frame end gp)))
+                             (declare (type fixnum c))
+                             (decf gas c)
+                             (when (< gas 0) (halt :memory-out-of-gas)))
                            (grow-memory frame end))))))
          (block run
            (loop
