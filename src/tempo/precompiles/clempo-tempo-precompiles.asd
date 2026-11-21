@@ -22,4 +22,5 @@
   :components ((:file "oracle")
                (:file "precompiles-tests")
                (:file "validator-tests")
-               (:file "tip20-tests")))
+               (:file "tip20-tests")
+               (:file "fee-manager-tests")))
