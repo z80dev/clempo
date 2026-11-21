@@ -71,7 +71,8 @@ clempo.evm's SSTORE-SET is the whole zero-to-nonzero cost, so Tempo's values gai
 
 (defstruct (tempo-precompiles (:constructor make-tempo-precompiles (fork base)))
   fork base
-  (entries (make-hash-table) :type hash-table))
+  ;; lazily filled and shared by every thread running this fork's cached spec (RPC calls)
+  (entries (make-hash-table :synchronized t) :type hash-table))
 
 (defmethod evm:find-precompile ((p tempo-precompiles) address)
   (or (evm:find-precompile (tempo-precompiles-base p) address)

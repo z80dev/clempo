@@ -91,7 +91,9 @@ committed blocks into a log and periodic checkpoints.")
   (new-codes '() :type list)
   ;; speculation: committed blocks that WITH-SPECULATIVE-BLOCKS will undo, newest first
   (speculation-depth 0 :type fixnum)
-  (speculative '() :type list))
+  (speculative '() :type list)
+  ;; serializes proof readers' lazy storage-trie builds (DB-STORAGE-PROOF)
+  (proof-lock (sb-thread:make-mutex :name "statedb proofs")))
 
 (defun db-block-open-p (db) (db-open-p db))
 (defun db-account-count (db) (hash-table-count (db-accounts db)))
@@ -186,6 +188,10 @@ committed blocks into a log and periodic checkpoints.")
     (trie-root (db-trie db))))
 
 ;;; Merkle proofs (eth_getProof) of the db as it is now: node RLP octets, root first.
+;;; Concurrent readers (RPC requests under the backend's shared read lock) may ask for proofs
+;;; of a committed db: its tries are clean, and proofs over a clean trie write nothing shared
+;;; (clempo.trie publishes its node memo atomically). The one lazy fill, a storage trie a
+;;; checkpoint load left unbuilt, happens under the db's proof lock.
 
 (defun db-account-proof (db address)
   "The account trie proof for ADDRESS (an absence proof when it has no account)."
@@ -198,7 +204,7 @@ root is the empty root, which has no nodes)."
   (let ((a (db-account db address)))
     (when a
       (db-state-root db)
-      (let ((trie (ensure-storage-trie a)))
+      (let ((trie (sb-thread:with-mutex ((db-proof-lock db)) (ensure-storage-trie a))))
         (if (octets= (trie-root trie) +empty-trie-root+)
             '()
             (trie-proof trie (slot-octets slot)))))))
