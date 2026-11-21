@@ -127,7 +127,7 @@
   (destructuring-bind (token access-mode gateway-mode accounts gateways admin sequencers threshold rpc-url)
       params
     (unless (clempo.tip20-factory:tip20-p token) (revert 'invalid-token))
-    (unless (clempo.tip403:registered-token-transfer-policy-id token)
+    (unless (funcall (symbol-function 'clempo.tip403:registered-token-transfer-policy-id) token)
       (revert 'token-transfer-policy-not-set))
     (validate-closed-loop accounts gateways sequencers)
     (when (zerop admin) (revert 'invalid-admin))
