@@ -86,14 +86,32 @@ SBCL 2.6.8, Darwin ARM64, 8 GiB heap. Initial arena cutover measurements:
 | P256 verification, supplied scratch, 2,000 calls | 182.005 us | not recorded | 0 |
 | Dependent Fp multiplication, 1,000,000 calls | 20.914 ns | 20.883 ns | 0 |
 
+The GC-safe ARM64 kernel build `217b0c1`, width-8 generator tables and unrolled
+scalar helpers were then measured with a 2 GiB heap after the coordinated Busy
+benchmark slot was released:
+
+| Operation | CPU/call | Wall/call | Allocated bytes/call |
+|---|---:|---:|---:|
+| ecrecover, supplied output/scratch, 20,000 calls | 45.094 us | 45.097 us | 0 |
+| ecrecover-address, supplied scratch, 20,000 calls | 44.992 us | 45.001 us | 29.5 |
+| ecrecover, fresh pubkey, 10,000 calls | 44.960 us | 44.991 us | 78.6 |
+| P256 verification, supplied scratch, 2,000 calls | 152.765 us | not recorded | 0 |
+| Dependent Fp multiplication, 1,000,000 calls | 13.570 ns | 13.553 ns | 0 |
+
+The address result occupies one 32-byte bignum; a fresh pubkey occupies 80 bytes.
+The allocation-counter estimates above are region-rounded, not claims of
+smaller objects. The P256 row remeasures the same arena implementation, not a
+new P256 kernel. CPU and wall time are separate because this is a shared host.
+Earlier unprotected VOP prototype timings are not shipping-build measurements.
+
 The P256 baseline loaded the historical field/curve sources from commit
 `f6a2b6a166` in an isolated SBCL process, including its old field packing helper,
 and used the same valid signature as the native benchmark. No working source
 was reverted or modified for that measurement.
 
-These initial CPU timings do not meet the 25-us recovery target. The standalone
-post-cutover CPU profile (1,656 samples) attributes 66.2% self to Fp multiplication,
-6.4% to field addition, 5.6% to subtraction and 8.6% inclusive to scalar inversion.
+The latest 45-us recovery timing still does not meet the 25-us target. The first
+arena cutover's standalone CPU profile (1,656 samples) attributed 66.2% self to Fp
+multiplication, 6.4% to addition, 5.6% to subtraction and 8.6% inclusive to scalar inversion.
 The earlier shared Busy profile remains the end-to-end baseline; it attributed
 55.7% inclusive to recovery and 22.7% exclusive to Darwin mutex wait/drop. The
 standalone profile does not establish causality for those multiworker waits.
@@ -103,6 +121,27 @@ region, so per-call nonzero allocation estimates are approximate. The zero-cons
 checks use repeated preallocated operations; address tests allow one allocation
 region of counter rounding around one 32-byte result bignum per call. Default
 fresh pubkeys are never claimed to allocate zero bytes.
+
+### Paired Busy replay
+
+ExecSpeedAgent ran two alternating, sequential pairs on the same pipelined
+replay baseline: A=`d3aace8`, B=`53adb01` (A plus `217b0c1`). The four replay
+JSON/log artifacts were inspected under `~/scratch/clempo/busy/es/`:
+
+| Arm | Replay wall time | Replay CPU time |
+|---|---:|---:|
+| B, 20261121-084650 | 24.527776 s | 57.582116 s |
+| A, 20261121-084715 | 24.807578 s | 79.482179 s |
+| B, 20261121-084741 | 24.726618 s | 57.920589 s |
+| A, 20261121-084807 | 24.712409 s | 79.262957 s |
+
+Every result is complete through block 9,909,999 from the same parent root:
+20,000 blocks, 659,246 transactions and 31,499,321,696 gas, with no stop reason.
+Mean CPU falls from 79.373 s to 57.751 s (27.2%); wall time is essentially
+unchanged (24.760 s versus 24.627 s). The replay thread, rather than concurrent
+sender recovery, is now the wall-time critical path. These pairs isolate the
+kernel patch; comparisons against the older 127.4-s Busy baseline also include
+other agents' replay/pipeline changes and must not be attributed solely to crypto.
 
 ## Regression coverage
 
