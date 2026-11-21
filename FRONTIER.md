@@ -42,6 +42,16 @@ Fixture tests: votes and certificates signed/assembled with the Rust harness's s
 byte-identical to Rust's golden vectors; goempo's recorded mainnet finalizations verify under
 the outcomes of blocks 42098399/44085599/44107199 and across the 2041->2042 full-DKG boundary.
 
+R7 Rust reference baseline (Apple Silicon `Mac15,9`, Tempo 1.19.0-dev
+`568b4fb4258c`, release, one sample): Early 1..1,000,000 used
+`tempo import --fail-on-invalid-block` from genesis on canonical archive RLP.
+It imported all 1,000,000 blocks (135,315,780 gas) in **89.14 s wall**,
+**41.67 s CPU**, and **7.22 GB peak RSS**: **11,218 blocks/s**, **1.52 Mgas/s**;
+Execution + MerkleExecute took **17.35 s**. MerkleExecute checked the
+terminal state root for each import chunk, not every block’s root; Clempo
+checks every block. See [benchmark commands](docs/BENCH.md). R7 remains
+unscored.
+
 Keccak-256 (SBCL 2.6.8 release, Apple Silicon): the ARM SHA3 permutation and
 copy-free 32/64-byte paths reduced 64-byte hashes from **626 ns to 178 ns**
 (1 million calls, about 3.5× faster) and 480 to 272 bytes consed per hash.
