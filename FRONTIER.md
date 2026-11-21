@@ -11,7 +11,7 @@
 | R4 Follow | partial: certificates 20,001/20,001 consecutive mainnet finalizations across epochs 2314/2315; live `follow -certify` 91/91 at zero lag; public devp2p follow 3,350 finalized blocks byte-identical at zero lag; node binary with RPC and REPL. The executed one-hour run waits for R3 to reach the tip | `bba3dfe`, `37a9c7a`, `3ab8073` | 2026-11-21 |
 | R5 RPC | 145/154 methods, 14,147/14,287 cases (99.0%) with full history coverage 0..50,049,999: blocks 5,126/5,126, calls 853/853, consensus 9/9, envelope 50/50, logs 508/508, static 119/119, tempo-params 101/101, txs 1,027/1,027, state 3,539/3,542, traces 2,801/2,927, success 14/25; 152/156 reference methods served. Left: head-state methods at "latest", debug_intermediateRoots, debug_traceBlock (raw RLP), reference-side timeouts recorded in the corpus | `7980399` | 2026-11-21 |
 | R6 Validator | Sims: 4, 5 and 7 validators, three epochs each, every reshare concluded through per-node DKG managers. Live Rust devnet: one Clempo signer necessary through two reshares, two Clempo signers necessary through three | `b680aaf`, `dbe14d1` | 2026-11-21 |
-| R7 Speed | Clempo vs Rust, wall / CPU seconds: **Early** 1..1,000,000 **9.01 / 12.73 vs 58.22 / 37.25** (paired, 6.46× wall throughput); **Busy** 9,890,000..9,909,999 **24.52–24.73 / 57.75–57.81 vs 36.00 / 43.22** (historical, unpaired between clients, 1.46–1.47×); **Recent** 49,410,000..49,449,999 **36.41 / 37.34 vs 47.22 / 21.41** (unpaired, 1.30× timed wall throughput, 1.74× CPU). Clempo checks every root; Rust checks import-chunk terminal roots. [RSS, GC, commands, and profiles](docs/BENCH.md#results-on-the-shared-dev-host). | `40521c1`, `15c118d` | 2026-11-21 |
+| R7 Speed | Clempo vs Rust, wall / CPU seconds: **Early** 1..1,000,000 **9.01 / 12.73 vs 58.22 / 37.25** (paired, 6.46× wall throughput); **Busy** 9,890,000..9,909,999 **22.59–22.77 / 58.14–58.87 vs 36.00 / 43.22** (historical, unpaired between clients, 1.58–1.59×); **Recent** 49,410,000..49,449,999 **29.66–32.68 / 35.30–37.46 vs 47.22 / 21.41** (unpaired, 1.44–1.59× timed wall throughput, 1.65–1.75× CPU). Clempo checks every root; Rust checks import-chunk terminal roots. [RSS, GC, commands, and profiles](docs/BENCH.md#results-on-the-shared-dev-host). | `40521c1`, `15c118d`, `b81e3e5` | 2026-11-21 |
 
 ## Evidence
 
@@ -158,6 +158,21 @@ participants were equal (27.20/27.50/27.68 vs 27.17/27.88/27.70 s). Replay-threa
 profile now (`-profile-threads main`): TIP-20 transfer and fee pre/post paths ~35%, metered
 SLOAD path ~20% (bignum-keyed hash lookups ~15%), state root ~12%, expiring-nonce ring
 ~10%, receipts root and bloom ~6%, synchronous EVM JIT compiles ~2%.
+
+R7 pipeline handoff and storage-trie build (`b81e3e5`, paired against `6c0f9d2`,
+alternating, all blocks root-checked; `~/scratch/clempo/busy/es/recent/` and `es/`):
+**Recent** 36.16 / 35.98 s wall (37.27 / 37.34 s CPU) -> **32.68 / 29.91 s** (37.46 / 35.64 s
+CPU), with two further `b81e3e5` runs at 30.84 / 29.66 s; **Busy** 24.83 / 24.62 s ->
+**22.77 / 22.59 s** wall (CPU 57.9 / 57.7 -> 58.9 / 58.1 s). The block pipeline now signals
+only a side that waits and wakes a full producer once per 32 blocks (64 ahead) instead of
+broadcasting per block; a storage trie a checkpoint load left unbuilt is built top down from
+its slots (`clempo.trie:trie-from-items`), its keys hashed and the root's subtrees built and
+hashed on a 4-participant pool. Recent profile after (`es/recent/prof-17b8646.txt`): first-write
+trie builds on the replay thread 23.8% -> 5.0% of samples (the rest runs on the pool), pipeline
+`CONDITION-NOTIFY` 28.4% -> 6.2%; P-384 Nitro verification is now 37%. Three of seven `b81e3e5`
+Recent runs had a late collection (GC 3.7–4.0 s, peak RSS 7.1 GB instead of 2.6 s / 5.6 GB) and
+account for the spread. A 256-deep pipeline (refill 128) measured the same (29.87 / 29.91 s vs
+30.84 / 29.66 s) and was not kept.
 
 R7 Early and Recent (`15c118d`): the Early pair repeated from genesis after the
 certified follower reached steady state, Rust then Clempo, with no overlapping

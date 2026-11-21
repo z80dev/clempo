@@ -21,8 +21,8 @@ stages. The timings compare these two workflows, not isolated executors.
 | Range | Clempo wall / CPU s | Clempo peak RSS GB / GC s | Rust wall / CPU s | Rust peak RSS GB | Clempo / Rust blocks/s | Comparison |
 |---|---:|---:|---:|---:|---:|---|
 | Early | 9.01 / 12.73 | 2.33 / 0.083 | 58.22 / 37.25 | 7.22 | 110,986 / 17,176 | 6.46× wall throughput, paired |
-| Busy | 24.52–24.73 / 57.75–57.81 | 3.12 / 1.25 | 36.00 / 43.22 | 3.89 | 809–816 / 556 | 1.46–1.47× wall throughput, historical and unpaired between clients |
-| Recent | 36.41 / 37.34 | 5.45 / 2.68 | 47.22 / 21.41 | 3.72 | 1,098 / 847 | 1.30× wall throughput, historical Rust baseline (unpaired) |
+| Busy (`b81e3e5`) | 22.59–22.77 / 58.14–58.87 | 3.1 / 1.39–1.50 | 36.00 / 43.22 | 3.89 | 878–885 / 556 | 1.58–1.59× wall throughput, historical and unpaired between clients |
+| Recent (`b81e3e5`) | 29.66–32.68 / 35.30–37.46 | 5.58–7.11 / 2.57–4.04 | 47.22 / 21.41 | 3.72 | 1,224–1,349 / 847 | 1.44–1.59× wall throughput, historical Rust baseline (unpaired) |
 
 RSS is in decimal GB; the Rust runner has no GC metric. No other benchmark ran
 during the new scored trials. The reference node and the certified Clempo
@@ -61,6 +61,10 @@ A separate full-range `-profile-mode cpu` run captured 5,731 samples:
 | 23.8% inclusive | `FINISH-BLOCK` → `WRITE-CHANGES` → `DB-SET-STORAGE` → `ENSURE-STORAGE-TRIE`, split between building and hashing storage tries on first write after checkpoint load |
 
 Source: `~/scratch/clempo/bench/r7-early-recent/recent-profile.txt`.
+After `b81e3e5` (batched pipeline handoff, bulk-built storage tries; paired against
+`6c0f9d2` in [FRONTIER](../FRONTIER.md#evidence)) the replay thread's share of first-write
+trie builds fell to 5.0% and the pipeline notify to 6.2%; P-384 is 37%
+(`~/scratch/clempo/busy/es/recent/prof-17b8646.txt`).
 Early was faster in both wall and CPU and needed no diagnostic profile.
 
 ## Clempo
