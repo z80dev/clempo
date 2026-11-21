@@ -437,7 +437,10 @@ Short inline nodes and persisted or proof nodes need their own exact arrays."
             (multiple-value-bind (opened end) (decode-node-at bytes 0 (length bytes))
               (unless (= end (length bytes)) (bad-node "trailing data"))
               (when (>= end 32) (setf (node-ref opened) hash))
-              (setf (stored-node-loaded node) opened))))))
+              ;; The memo is the only write a read makes. CAS publishes the node
+              ;; fully initialized; concurrent readers of a clean trie that decoded
+              ;; it too adopt the first copy.
+              (or (sb-ext:compare-and-swap (stored-node-loaded node) nil opened) opened))))))
 
 (defun walk-key (node key store &optional visit)
   (declare #.clempo.base:*hot* (type octets key))
