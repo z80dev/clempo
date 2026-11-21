@@ -1,12 +1,13 @@
 (defsystem "clempo-validator"
   :description "Local Tempo validator process and authenticated peer supervision"
   :depends-on ("clempo-p2p" "clempo-io" "clempo-codec" "clempo-crypto-hash" "sb-bsd-sockets"
-               "clempo-consensus" "clempo-types")
+               "sb-posix" "clempo-consensus" "clempo-consensus-simplex" "clempo-consensus-dkg" "clempo-types"
+               "clempo-tempo-builder" "clempo-tempo-precompiles")
   :serial t
-  :components ((:file "manifest") (:file "network") (:file "wire")))
+  :components ((:file "manifest") (:file "network") (:file "wire") (:file "journal") (:file "engine")))
 
 (defsystem "clempo-validator/tests"
   :depends-on ("clempo-validator")
   :pathname "../../tests/validator/"
   :serial t
-  :components ((:file "network") (:file "wire")))
+  :components ((:file "network") (:file "wire") (:file "journal") (:file "engine")))

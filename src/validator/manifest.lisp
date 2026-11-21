@@ -7,6 +7,7 @@
            #:slot-share-path #:slot-port #:slot-rpc-url #:manifest-slot #:read-slot-seed
            #:call-with-validator-network #:network-receive #:network-send #:network-peers
            #:network-event #:network-event-kind #:network-event-peer #:network-event-channel
+           #:run-devnet-validator
            #:network-event-frame #:network-event-start #:network-event-end))
 
 (in-package #:clempo.validator)
