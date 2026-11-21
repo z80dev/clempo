@@ -6,6 +6,8 @@ unhealed `clempo-dev replay -datadir DIR` checkpoint. The node checks the
 loaded checkpoint and log, rejects recorded heals or skips, and compares the
 head hash and state root with the configured upstream before serving.
 
+Set `STATE` to the datadir to open.
+
 ```sh
 bin/clempo --upstream http://127.0.0.1:8545 \
   --datadir "$STATE" --rpc-port 18545

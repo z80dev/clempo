@@ -17,7 +17,7 @@ says blocks, methods or reports. `score -help` describes required inputs.
 
 | Rung | What the number counts |
 |---|---|
-| R0 | Pass/fail for `scripts/verify.sh`: clean strict compile, Lisp tests, source layer/determinism audit and generated-spec drift. The test totals count results reported by the test harness, not assertions or fixture cases. |
+| R0 | Pass/fail for `scripts/verify.sh`: clean strict compile, Lisp tests, seeded fuzz and corpus replay, source layer/determinism audit and generated-spec drift. The test totals count results reported by the test harness, not assertions or fixture cases. |
 | R1 | Sampled blocks passing canonical encoding, hash and transaction/sender comparisons, plus receipt root and bloom. The full-archive scan is separately labeled: it checks every raw block and transaction in its range but does not check receipts or execute blocks. Transaction counts include system transactions; recovery counts only count actual cryptographic recoveries. |
 | R2 | Mainnet and Moderato genesis state roots and header hashes against the reference. |
 | R3 | Greatest contiguous mainnet height executed from genesis with matching gas, receipt root, bloom and state root; heals and skips end the contiguous score even when a later block matches. `score -result` reads the replay evidence. `-datadir` independently checks the checkpoint/WAL roots and the stored head's hash and state root against the archive. This does not independently re-execute the history. |

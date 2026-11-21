@@ -13,7 +13,7 @@ clempo climbs the same ladder as [goempo](https://github.com/gakonst/goempo) and
 | R4 | Follow | catches the live mainnet tip and follows it for at least an hour: every block executed (gas, receipts, bloom, state root) and every finalization certificate verified; read-only JSON-RPC probes independently match the canonical head and its live state | yes |
 | R5 | RPC | share of the reference's RPC methods that answer the same as the reference on a recorded corpus | 111/111 methods, 3,378/3,378 cases |
 | R6 | Validator | Simplex consensus and DKG: N clempo validators in a seeded simulation (faults, reshare) whose chain the follower's certificate verifier accepts; then clempo validators finalizing with Rust validators on a devnet | sim yes; devnet with Rust validators yes |
-| R7 | Speed | mainnet blocks executed with state root per second, against the Rust node on the same host | 1.57x slower to 9.2x faster depending on range |
+| R7 | Speed | mainnet blocks executed with state root per second, against the Rust node on the same host | varies by range; see [goempo's benchmark notes](https://github.com/gakonst/goempo/blob/main/docs/METRICS.md) for its host and methodology |
 
 The headline number is R3's height. Climb in order: a rung above an unmet one does not count, except that R7 work starts only after R3 reaches the tip.
 

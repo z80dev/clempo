@@ -119,7 +119,7 @@ base io crypto net codec trie types store state evm tempo consensus p2p sync rpc
 - **Execution and validator scope.** Replay and live-hour evidence are for the recorded mainnet ranges; mixed-validator evidence is for devnets, not mainnet signing. See [the T14/T15 coverage notes](docs/DEVIATIONS.md) and [docs/DEVNET.md](docs/DEVNET.md).
 - **Constant time.** Secret-key operations (signing, ECDH) are not hardened against timing or cache side channels.
 - **Not for production use.** Treat clempo as an independent implementation for testing and research. It has not run as a mainnet validator.
-- **Linux coverage is limited.** The full mainnet replay, live following, mixed-validator devnet, and Rust speed comparisons were run on Apple Silicon, not on Linux.
+- **Linux coverage is limited.** The full mainnet replay, live following, mixed-validator devnet and same-host speed comparisons were run on Apple Silicon. Linux arm64 uses the portable Lisp crypto code; the ARM64 VOP paths have not been exercised on Linux arm64.
 
 ## How it was built
 

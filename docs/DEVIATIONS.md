@@ -19,3 +19,7 @@ Numbered, never renumbered.
 8. **T14/T15 execution coverage.** T14 transaction execution includes 0x05 configurable-account signatures, account configuration commitments, retired root keys, upgrade authorization and the 0xef shim opcode. T14 execution is not established by the mainnet replay evidence. The block-level T14 proposer fee-recipient check and T15 boundary DKG-outcome check are not implemented.
 
 9. **Recent-validator fee-token cache after startup.** The follower seeds the cache from its anchor beneficiary and learns the remaining recent validators as heads arrive, rather than preloading the entire window.
+
+10. **ABI loose decoding of zero-size array elements.** clempo charges 16 bytes per element for its list representation; alloy charges one byte per zero-size token. With the default 1 GiB allocation limit, clempo accepts no more than 2^26 such elements.
+
+11. **Very long JSON integers.** Integer tokens with more than 1,000 digits are parsed as double floats, not arbitrary-precision integers. Tokens beyond the finite double range yield signed infinity.
