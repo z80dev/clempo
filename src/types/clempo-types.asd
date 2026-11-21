@@ -11,5 +11,6 @@
   :depends-on ("clempo-types" "clempo-io")
   :pathname "../../tests/types/"
   :serial t
-  :components ((:file "signatures") (:file "transactions") (:file "validation")
+  :components ((:file "signatures") (:file "configurable-signatures") (:file "transactions")
+               (:file "validation")
                (:file "payments") (:file "blocks")))

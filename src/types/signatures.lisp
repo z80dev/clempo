@@ -15,7 +15,16 @@
            #:key-authorization-call-scope #:key-authorization-call-scope-target
            #:key-authorization-call-scope-selector-rules
            #:key-authorization-selector-rule #:key-authorization-selector-rule-selector
-           #:key-authorization-selector-rule-recipients))
+           #:key-authorization-selector-rule-recipients
+           ;; T14 ConfigurableAccount signatures
+           #:configurable-signature #:configurable-signature-p #:configurable-signature-account
+           #:configurable-signature-salt #:configurable-signature-version
+           #:configurable-signature-threshold #:configurable-signature-owners
+           #:configurable-signature-signatures #:parse-configurable-signature
+           #:configurable-commitment #:configurable-commitment-error
+           #:configurable-account-address #:configurable-derivation-gas
+           #:configurable-verification-gas #:verify-configurable-approvals
+           #:configurable-config-error))
 
 (in-package #:clempo.signatures)
 
@@ -27,7 +36,9 @@
   (error 'signature-error :reason reason))
 
 (defun signature-shape (signature start)
-  "Return outer and primitive kinds without copying a keychain's inner payload."
+  "Return outer and primitive kinds without copying a keychain's inner payload. A T14
+ConfigurableAccount signature (0x05 || RLP) is fully decoded and shape-checked; its kinds
+are :CONFIGURABLE-ACCOUNT."
   (let ((n (- (length signature) start)))
     (cond ((= n 65) (values :secp256k1 :secp256k1))
           ((< n 2) (reject-signature "missing signature payload"))
@@ -41,8 +52,12 @@
                 (unless (zerop start) (reject-signature "nested keychain"))
                 (multiple-value-bind (outer inner) (signature-shape signature (+ start 21))
                   (declare (ignore outer))
+                  (when (and (= (aref signature start) 3) (eq inner :configurable-account))
+                    (reject-signature "configurable account access keys require keychain V2"))
                   (values (if (= (aref signature start) 3) :keychain-v1 :keychain-v2)
                           inner)))
+               (5 (parse-configurable-signature signature (1+ start))
+                  (values :configurable-account :configurable-account))
                (otherwise (reject-signature "unknown signature type")))))))
 
 (defun signature-kind (signature)
@@ -170,13 +185,16 @@
       (clempo.sha2:sha256
        (octets-concat (subseq signature 1 38) (clempo.sha2:sha256 json))))))
 
+(defun secp256k1-parity (v)
+  "alloy normalize_v: 0/27 even, 1/28 odd, EIP-155 values from 35."
+  (case v ((0 1) v) ((27 28) (- v 27))
+        (otherwise (if (>= v 35) (mod (- v 35) 2) (reject-signature "invalid recovery parity")))))
+
 (defun recover-primitive (signature hash kind)
   (if (eq kind :secp256k1)
       (let* ((r (octets->integer signature :end 32))
              (s (octets->integer signature :start 32 :end 64))
-             (v (aref signature 64))
-             (recid (case v ((0 1) v) ((27 28) (- v 27))
-                          (otherwise (reject-signature "invalid recovery parity")))))
+             (recid (secp256k1-parity (aref signature 64))))
         (unless (<= 1 s #x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0)
           (reject-signature "secp256k1 high or zero s"))
         (or (clempo.secp256k1:ecrecover-address hash r s recid)
@@ -194,20 +212,256 @@
         (octets->integer (clempo.keccak:keccak256 (subseq signature (+ start 64) (+ start 128)))
                          :start 12))))
 
+;;; ConfigurableAccount signatures (T14, TIP-1107; tempo_primitives
+;;; transaction/configurable_account): 0x05 || rlp([account, [salt, version, threshold,
+;;; [[owner, weight] ...]], [owner-signature ...]]). The owners' primitive signatures approve
+;;; keccak(domain || inner digest || account || version) with weights reaching the threshold.
+
+(defconstant +max-configurable-owners+ 48)
+(defconstant +max-configurable-signatures+ 8)
+(defconstant +max-owner-signature-bytes+ 2049 "1 + MAX_WEBAUTHN_SIGNATURE_LENGTH")
+(define-constant +configurable-account-domain+ (string->octets "tempo:configurable-account:account"))
+(define-constant +configurable-config-domain+ (string->octets "tempo:configurable-account:config"))
+(define-constant +configurable-signature-domain+
+  (string->octets "tempo:configurable-account:signature"))
+
+(defstruct (configurable-signature (:constructor %make-configurable-signature))
+  "A decoded ConfigurableAccountSignature. OWNERS are ((address weight) ...), strictly
+ascending; SIGNATURES the owners' primitive signature octets, in approval order."
+  (account 0 :read-only t) (salt 0 :read-only t) (version 0 :read-only t)
+  (threshold 0 :read-only t) (owners nil :read-only t) (signatures nil :read-only t))
+
+(defun configurable-config-error (account version threshold owners)
+  "ConfigurableAccountConfig::validate_for_account: NIL, or the error keyword."
+  (cond ((null owners) :empty-owners)
+        ((> (length owners) +max-configurable-owners+) :too-many-owners)
+        ((zerop threshold) :zero-threshold)
+        ((loop for (owner) in owners
+               thereis (cond ((zerop owner) :zero-owner)
+                             ((and (zerop version) account (= account owner)) :account-is-owner))))
+        ((some (lambda (o) (zerop (second o))) owners) :zero-weight)
+        ((loop for (a b) on owners while b thereis (>= (first a) (first b)))
+         (if (/= (length (remove-duplicates owners :key #'first)) (length owners))
+             :duplicate-owner
+             :owners-not-ascending))
+        ((> (reduce #'+ owners :key #'second) 255) :total-weight-exceeds-max)
+        ((> threshold (reduce #'+ (subseq (sort (mapcar #'second owners) #'>) 0
+                                          (min +max-configurable-signatures+ (length owners)))))
+         :threshold-exceeds-weight)))
+
+(defun signature-shape-primitive (signature)
+  "The kind of a PrimitiveSignature's octets, or NIL when they are not one."
+  (let ((n (length signature)))
+    (cond ((= n 65) :secp256k1)
+          ((< n 2) nil)
+          ((= (aref signature 0) 1) (and (= n 130) :p256))
+          ((= (aref signature 0) 2) (and (<= 129 n 2049) :webauthn)))))
+
+(defun parse-configurable-signature (data start)
+  "decode_exact::<ConfigurableAccountSignature>(DATA[START..]) with try_new's shape checks."
+  (flet ((bad () (reject-signature "Invalid configurable account signature RLP"))
+         (fixed (x n) (and (typep x 'octets) (= (length x) n))))
+    (let ((item (handler-case (clempo.rlp:rlp-decode data :start start)
+                  (clempo.rlp:rlp-error () (bad)))))
+      (unless (and (listp item) (= (length item) 3)) (bad))
+      (destructuring-bind (account config signatures) item
+        (unless (and (fixed account 20) (listp config) (= (length config) 4) (listp signatures))
+          (bad))
+        (destructuring-bind (salt version threshold owners) config
+          (unless (and (fixed salt 32) (listp owners)) (bad))
+          (flet ((int (x bytes) (handler-case (clempo.rlp:rlp-decode-integer x :max-bytes bytes)
+                                  (clempo.rlp:rlp-error () (bad)))))
+            (let ((account (octets->integer account))
+                  (version (int version 8))
+                  (threshold (int threshold 1))
+                  (owners (mapcar (lambda (o)
+                                    (unless (and (listp o) (= (length o) 2) (fixed (first o) 20))
+                                      (bad))
+                                    (list (octets->integer (first o)) (int (second o) 1)))
+                                  owners)))
+              (dolist (s signatures)
+                ;; PrimitiveSignature::from_bytes: no keychain or configurable owner approvals
+                (unless (and (typep s 'octets) (signature-shape-primitive s)) (bad)))
+              (when (or (zerop account)
+                        (configurable-config-error account version threshold owners)
+                        (null signatures)
+                        (> (length signatures) +max-configurable-signatures+)
+                        (some (lambda (s) (> (length s) +max-owner-signature-bytes+)) signatures))
+                (reject-signature "invalid configurable account signature"))
+              (%make-configurable-signature :account account :salt (octets->integer salt)
+                                            :version version :threshold threshold
+                                            :owners owners :signatures signatures))))))))
+
+(defun configurable-signature (signature)
+  "The CONFIGURABLE-SIGNATURE a transaction signature names: its own (0x05) or the delegate
+of a V2 keychain wrapping one; NIL for every other signature."
+  (unless (typep signature 'octets) (reject-signature "expected octets"))
+  (let ((n (length signature)))
+    (cond ((or (= n 65) (< n 2)) nil)
+          ((= (aref signature 0) 5) (parse-configurable-signature signature 1))
+          ((and (= (aref signature 0) 4) (> n 22) (/= (- n 21) 65) (= (aref signature 21) 5))
+           (parse-configurable-signature signature 22)))))
+
+(defun make-configurable-signature (&key (account 0) (salt 0) (version 0) threshold owners
+                                         signatures)
+  "A CONFIGURABLE-SIGNATURE from its parts (OWNERS ((address weight) ...), SIGNATURES the
+owners' primitive signature octets), unchecked: ENCODE-CONFIGURABLE-SIGNATURE and parse it to
+validate."
+  (%make-configurable-signature :account account :salt salt :version version
+                                :threshold threshold :owners owners :signatures signatures))
+
+(defun encode-configurable-signature (signature)
+  "The wire octets 0x05 || rlp([account, [salt, version, threshold, owners], signatures])."
+  (octets-concat
+   (octets-of 5)
+   (clempo.rlp:rlp-encode
+    (list (integer->octets (configurable-signature-account signature) 20)
+          (list (integer->octets (configurable-signature-salt signature) 32)
+                (configurable-signature-version signature)
+                (configurable-signature-threshold signature)
+                (mapcar (lambda (o) (list (integer->octets (first o) 20) (second o)))
+                        (configurable-signature-owners signature)))
+          (configurable-signature-signatures signature)))))
+
+(defun configurable-owner-set-octets (threshold owners)
+  (apply #'octets-concat (octets-of threshold (length owners))
+         (loop for (owner weight) in owners
+               collect (integer->octets owner 20) collect (octets-of weight))))
+
+(defun configurable-account-address (signature)
+  "The account a version-zero configuration derives: keccak(account domain || salt ||
+owner set), last 20 bytes."
+  (octets->integer
+   (clempo.keccak:keccak256
+    (octets-concat +configurable-account-domain+
+                   (integer->octets (configurable-signature-salt signature) 32)
+                   (configurable-owner-set-octets (configurable-signature-threshold signature)
+                                                  (configurable-signature-owners signature))))
+   :start 12))
+
+(defun configurable-commitment-preimage-length (signature)
+  (+ (length +configurable-config-domain+) 32 8 2
+     (* 21 (length (configurable-signature-owners signature)))))
+
+(defun configurable-account-preimage-length (signature)
+  (+ (length +configurable-account-domain+) 32 2
+     (* 21 (length (configurable-signature-owners signature)))))
+
+(defun configurable-commitment (signature)
+  "config_commitment: keccak(config domain || salt || version || owner set) as an integer."
+  (octets->integer
+   (clempo.keccak:keccak256
+    (octets-concat +configurable-config-domain+
+                   (integer->octets (configurable-signature-salt signature) 32)
+                   (integer->octets (configurable-signature-version signature) 8)
+                   (configurable-owner-set-octets (configurable-signature-threshold signature)
+                                                  (configurable-signature-owners signature))))))
+
+(defun configurable-commitment-error (signature stored)
+  "validate_account_commitment against the STORED commitment (0: unregistered): NIL, or
+:commitment-mismatch, :unregistered-version or :initial-account-mismatch."
+  (let ((actual (configurable-commitment signature)))
+    (cond ((or (zerop actual) (and (/= stored 0) (/= stored actual))) :commitment-mismatch)
+          ((/= stored 0) nil)
+          ((/= (configurable-signature-version signature) 0) :unregistered-version)
+          ((/= (configurable-account-address signature) (configurable-signature-account signature))
+           :initial-account-mismatch))))
+
+(defun keccak-word-gas (length) (+ 30 (* 6 (ceiling length 32))))
+
+(defun configurable-derivation-gas (signature)
+  "ConfigurableAccountConfig::derivation_gas: keccak of the account preimage."
+  (keccak-word-gas (configurable-account-preimage-length signature)))
+
+(defun primitive-verification-gas (signature)
+  "PrimitiveSignature::verification_gas: 3000 secp256k1, 8000 P256, 8000 WebAuthn plus the
+calldata cost of its assertion data."
+  (ecase (signature-shape-primitive signature)
+    (:secp256k1 3000)
+    (:p256 8000)
+    (:webauthn (+ 8000 (* 4 (loop for i from 1 below (- (length signature) 128)
+                                  sum (if (zerop (aref signature i)) 1 4)))))))
+
+(defun configurable-verification-gas (signature)
+  "ConfigurableAccountSignature::verification_gas: every owner approval, the witness
+(account and configuration RLP) as calldata, the commitment and signature-digest hashes."
+  (let ((witness (octets-concat
+                  (clempo.rlp:rlp-encode (integer->octets (configurable-signature-account signature) 20))
+                  (clempo.rlp:rlp-encode
+                   (list (integer->octets (configurable-signature-salt signature) 32)
+                         (configurable-signature-version signature)
+                         (configurable-signature-threshold signature)
+                         (mapcar (lambda (o) (list (integer->octets (first o) 20) (second o)))
+                                 (configurable-signature-owners signature)))))))
+    (+ (reduce #'+ (configurable-signature-signatures signature) :key #'primitive-verification-gas)
+       (* 4 (loop for b across witness sum (if (zerop b) 1 4)))
+       (keccak-word-gas (configurable-commitment-preimage-length signature))
+       (keccak-word-gas (+ (length +configurable-signature-domain+) 32 20 8)))))
+
+(defun configurable-digest (signature inner-digest)
+  "configurable_account_digest: what the owners sign for INNER-DIGEST (32 octets)."
+  (clempo.keccak:keccak256
+   (octets-concat +configurable-signature-domain+ inner-digest
+                  (integer->octets (configurable-signature-account signature) 20)
+                  (integer->octets (configurable-signature-version signature) 8))))
+
+(defun verify-configurable-approvals (signature inner-digest)
+  "verify_approvals with ConfigurableAccountWeightAccumulator: the owners' signatures over
+INNER-DIGEST, recovered owners strictly ascending, reaching the threshold with the last
+approval and without one to spare. Returns the account or signals SIGNATURE-ERROR."
+  (let* ((digest (configurable-digest signature inner-digest))
+         (threshold (configurable-signature-threshold signature))
+         (owners (configurable-signature-owners signature))
+         (count 0) (weight 0) (min-weight nil) (previous nil))
+    (when (zerop threshold) (reject-signature "configurable account threshold cannot be zero"))
+    (loop for (approval . more) on (configurable-signature-signatures signature)
+          do (let* ((owner (handler-case
+                               (recover-primitive approval digest (signature-shape-primitive approval))
+                             (signature-error ()
+                               (reject-signature "invalid configurable account owner signature"))))
+                    (owner-weight (or (second (assoc owner owners))
+                                      (reject-signature "configurable account signer is not an owner"))))
+               (when (and (plusp count) (>= weight threshold))
+                 (reject-signature "excess configurable account owner signatures"))
+               (incf count)
+               (when (> count +max-configurable-signatures+)
+                 (reject-signature "too many configurable account signatures"))
+               (when (and previous (>= previous owner))
+                 (reject-signature "configurable account recovered owners must be strictly ascending"))
+               (setf previous owner)
+               (incf weight owner-weight)
+               (setf min-weight (if min-weight (min min-weight owner-weight) owner-weight))
+               (when (and (>= weight threshold) more)
+                 (reject-signature "excess configurable account owner signatures"))))
+    (cond ((zerop count) (reject-signature "configurable account signatures cannot be empty"))
+          ((< weight threshold) (reject-signature "configurable account signature weight below threshold"))
+          ((>= weight (+ threshold min-weight))
+           (reject-signature "excess configurable account owner signatures")))
+    (configurable-signature-account signature)))
+
+(defun recover-account (signature start hash)
+  "AccountSignature::recover_account of SIGNATURE[START..] over HASH (32 octets)."
+  (if (and (/= (- (length signature) start) 65) (> (- (length signature) start) 1)
+           (= (aref signature start) 5))
+      (verify-configurable-approvals (parse-configurable-signature signature (1+ start)) hash)
+      (let ((inner (if (zerop start) signature (subseq signature start))))
+        (recover-primitive inner hash (nth-value 1 (signature-shape inner 0))))))
+
 (defun recover-signature (signature hash)
-  "Return sender and, for keychain envelopes, verified access-key ID.
-Keychain authorization in on-chain state and fork-version gating remain the caller's responsibility."
+  "Return sender and, for keychain envelopes, verified access-key ID. A ConfigurableAccount
+signature (or a V2 keychain delegate wrapping one) recovers the account once its owner
+quorum verifies. Keychain authorization, commitments in on-chain state and fork-version
+gating remain the caller's responsibility."
   (unless (and (typep hash 'octets) (= (length hash) 32))
     (reject-signature "expected 32-byte signing hash"))
   (let ((kind (signature-kind signature)))
     (if (member kind '(:keychain-v1 :keychain-v2))
         (let* ((account (octets->integer signature :start 1 :end 21))
-               (inner (subseq signature 21))
                (effective (if (eq kind :keychain-v2)
                               (clempo.keccak:keccak256
                                (octets-concat (octets-of 4) hash (subseq signature 1 21))) hash)))
-          (values account (recover-primitive inner effective (signature-kind inner))))
-        (values (recover-primitive signature hash kind) nil))))
+          (values account (recover-account signature 21 effective)))
+        (values (recover-account signature 0 hash) nil))))
 
 (defun wire-integer (value bytes)
   (if (integerp value)
@@ -258,7 +512,8 @@ Keychain authorization in on-chain state and fork-version gating remain the call
               (case i
                 (0 (wire-integer value 8))
                 (1 (let ((kind (wire-integer value 1)))
-                     (unless (<= kind 2) (reject-signature "invalid key type")) kind))
+                     ;; 3: a T14 configurable account granted as an access key
+                     (unless (<= kind 3) (reject-signature "invalid key type")) kind))
                 (2 (wire-address value))
                 (3 (if (absent-option-p value) value
                        (let ((expiry (wire-integer value 8)))

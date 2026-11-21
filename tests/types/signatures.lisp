@@ -206,7 +206,8 @@
 
 (deftest signature-parsed-key-authorization-malformed ()
   (let ((signature (make-octets 65)) (empty (make-octets 0)))
-    (dolist (fields (list nil (list 1 0) (list 1 3 2) (list 1 0 (make-octets 19))
+    ;; key type 3 is a T14 ConfigurableAccount grant (SignatureType 3); 4 is no type
+    (dolist (fields (list nil (list 1 0) (list 1 4 2) (list 1 0 (make-octets 19))
                          (list 1 0 2 0) (list 1 0 2 empty (list (list 3 4 0)))
                          (list 1 0 2 empty empty (list (list 3 (list (list empty nil)))))
                          (list 1 0 2 empty empty empty (make-octets 31))

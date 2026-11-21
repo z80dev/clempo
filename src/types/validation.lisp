@@ -8,8 +8,9 @@
         sum (if (zerop (aref data i)) 1 4)))
 
 (defun tempo-signature-verification-gas (signature)
-  "Extra intrinsic gas above the secp256k1 verification included in 21000.
-Primitive P256/WebAuthn add 5000; WebAuthn also pays its assertion calldata cost.
+  "Extra intrinsic gas above the secp256k1 verification included in 21000 (signature_gas.rs).
+Primitive P256/WebAuthn add 5000; WebAuthn also pays its assertion calldata cost; a T14
+ConfigurableAccount signature pays its owner quorum, witness and hashes less 3000.
 Keychain envelopes add 3000 for validation, independently of their inner scheme."
   (let* ((kind (clempo.signatures:signature-inner-kind signature))
          (keychain (and (/= (length signature) 65)
@@ -20,7 +21,11 @@ Keychain envelopes add 3000 for validation, independently of their inner scheme.
          (:secp256k1 0)
          (:p256 5000)
          (:webauthn (+ 5000 (* 4 (calldata-tokens signature :start (1+ start)
-                                                 :end (- (length signature) 128)))))))))
+                                                 :end (- (length signature) 128)))))
+         (:configurable-account
+          (- (clempo.signatures:configurable-verification-gas
+              (clempo.signatures:configurable-signature signature))
+             3000))))))
 
 
 (defun validate-signature-version (signature t1c-p)
@@ -74,11 +79,14 @@ This verifies the grant signature, not its on-chain permission/expiry/spending s
                          (admin clempo.signatures:key-authorization-is-admin)
                          (account clempo.signatures:key-authorization-account)) view
           (cond
+            ((and (= key-type 3) (not (validation-fork-at-least-p fork :t14)))
+             :configurable-account-unsupported-context)
             ((and access-key-id (not same-key) (not t6-p))
              :access-key-cannot-authorize-other-keys)
             ((and same-key t3-p
                   (not (eq inner-kind (ecase key-type
-                                        (0 :secp256k1) (1 :p256) (2 :webauthn)))))
+                                        (0 :secp256k1) (1 :p256) (2 :webauthn)
+                                        (3 :configurable-account)))))
              :key-authorization-signature-type-mismatch)
             ((and (or admin account) (not t6-p)) :admin-key-before-t6)
             ((and t6-p account (/= account sender)) :key-authorization-account-mismatch)
