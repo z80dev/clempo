@@ -10,10 +10,37 @@
 | R3p Precompiles | - | | |
 | R4 Follow | - | | |
 | R5 RPC | 109/132 methods, 5,426/8,221 cases; 107/156 reference methods served (blocks 3,890/3,890, logs 366/366, envelope 50/50, static 106/119; state, calls and traces wait on the executor) | rpc slice 4 | 2026-11-21 |
-| R6 Validator | - | | |
+| R6 Validator | sim yes: 4, 5 and 7 seeded validators with faults, 3 epochs each with a successful reshare, every chain certified by the mainnet verifier (devnet with Rust validators: -) | `cb8ae2e` | 2026-11-21 |
 | R7 Speed | - | | |
 
 ## Evidence
+
+R6 sim (cb8ae2e): `bin/clempo-dev score -rung R6 -json` (or `bin/clempo-dev sim -scenario r6-4`)
+runs src/sim/scenarios.lisp: clempo.simplex voters (commonware 2026.10.1 voter, Random V1
+elector) and clempo.dkg (commonware Feldman/Desmedt reshare, Tempo's dealer logs in extraData
+and boundary outcomes) on a seeded network; the produced chain goes through the same
+certify-blocks used for mainnet, anchored at the genesis DKG outcome. Release build:
+- r6-4: 4 validators, epochs of 20, latency 5-60 ms, 2% drops, node 3 down 1.5-4 s: 59/59
+  blocks certified, 3/3 ceremonies concluded, group key unchanged, all 4 nodes at height 59
+  (6,263 messages, 272 dropped; 7.9 s simulated, 131 s real).
+- r6-5: 5 validators, epochs of 25, node 1 down 1-3 s, partition {0,1}|{2,3,4} 5-6.5 s:
+  74/74 blocks certified (73 certificates, one block covered by its child's), 3/3 ceremonies,
+  all 5 nodes at height 74 (183 s real).
+- r6-7: 7 validators, epochs of 35, node 6 crashed for the whole run, node 2 down 3-6 s:
+  104/104 blocks certified, 3/3 ceremonies, the 6 live nodes at height 104 (474 s real).
+Real time is BLS12-381 field arithmetic (bignum mod); verify.sh runs smoke-4 (2 epochs).
+
+R4 certificates (bba3dfe): `CLEMPO_RPC=http://127.0.0.1:8545 CLEMPO_BUILD=release bin/clempo-dev certify -from 49995000 -to 50015000 -threads 16`
+verified all 20,001 consecutive mainnet finalization certificates across the epoch 2314/2315
+boundary in 38 s (16 threads; one random linear combination per batch of 250, two pairings
+each). The identity of epoch 2314 is anchored at the DKG outcome in boundary block 49982399
+(= the published network identity 0x8627d337...); epoch 2315's is installed from block
+50003999's outcome only after that block's own certificate is in the verified run. Blocks
+come from the archive (hash, parent links, transactions root checked); certificates from
+https://rpc.tempo.xyz consensus_getFinalization (cached in ~/cache/clempo/finalizations).
+Fixture tests: votes and certificates signed/assembled with the Rust harness's shares are
+byte-identical to Rust's golden vectors; goempo's recorded mainnet finalizations verify under
+the outcomes of blocks 42098399/44085599/44107199 and across the 2041->2042 full-DKG boundary.
 
 Keccak-256 (SBCL 2.6.8 release, Apple Silicon): the ARM SHA3 permutation and
 copy-free 32/64-byte paths reduced 64-byte hashes from **626 ns to 178 ns**
