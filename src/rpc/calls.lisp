@@ -853,11 +853,10 @@ Returns the rendered results in order."
                                                      :tx-hash (tx-hash-int b i) :tx-index i)))
 
 (defun parity-replay (b)
+  "TraceResultsWithTransactionHash of transaction I of B."
   (lambda (tracer i outcome)
-    (let ((r (clempo.tracing:parity-result tracer :output (executor:tx-outcome-output outcome))))
-      (if b
-          (append r (list (cons "transactionHash" (hex32 (svref (cblock-tx-hashes b) i)))))
-          r))))
+    (append (clempo.tracing:parity-result tracer :output (executor:tx-outcome-output outcome))
+            (list (cons "transactionHash" (hex32 (svref (cblock-tx-hashes b) i)))))))
 
 (defun opcode-gas (b)
   (lambda (tracer i outcome)
@@ -1117,7 +1116,7 @@ Returns the rendered results in order."
 
 (defrpc "trace_replayTransaction" ((hash hash) (types trace-types))
   "replay a transaction with parity tracers"
-  (or (tx-trace hash (parity-maker types) (lambda (b) (declare (ignore b)) (parity-replay nil)))
+  (or (tx-trace hash (parity-maker types) #'parity-replay)
       (rpc-fail -32000 "transaction not found")))
 
 (defrpc "trace_transactionOpcodeGas" ((hash hash))
