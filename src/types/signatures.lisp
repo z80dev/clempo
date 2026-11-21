@@ -25,7 +25,7 @@
            #:configurable-account-address #:configurable-derivation-gas
            #:configurable-verification-gas #:verify-configurable-approvals
            #:configurable-config-error #:make-configurable-signature
-           #:encode-configurable-signature #:signature-error-reason))
+           #:encode-configurable-signature #:signature-error-reason #:key-authorization-hash))
 
 (in-package #:clempo.signatures)
 
@@ -639,15 +639,24 @@ This validates shape only, not signatures, chain/fork policy or state."
          :call-scope-count (if (eq calls :absent) 0 (length calls))
          :selector-count selector-count :recipient-count recipient-count)))))
 
+(defun key-authorization-hash (key-auth)
+  "The signature hash of a SignedKeyAuthorization's authorization: keccak(rlp(fields))."
+  (clempo.keccak:keccak256 (clempo.rlp:rlp-encode (key-authorization-fields (first key-auth)))))
+
 (defun key-authorization-signer (key-auth)
-  "Recover a SignedKeyAuthorization decoded as (authorization signature)."
+  "SignedKeyAuthorization::authorizing_account of (authorization signature): the recovered
+primitive signer, or the account a ConfigurableAccount signature names. The configurable
+owner quorum is not checked here (verify it with VERIFY-CONFIGURABLE-APPROVALS over
+KEY-AUTHORIZATION-HASH), nor the account's commitment and code."
   (unless (and (listp key-auth) (= (length key-auth) 2))
     (reject-signature "key authorization shape"))
   (destructuring-bind (authorization signature) key-auth
-    (let ((fields (key-authorization-fields authorization)))
-      (when (member (signature-kind signature) '(:keychain-v1 :keychain-v2))
-        (reject-signature "keychain cannot authorize a key"))
-      (recover-signature signature (clempo.keccak:keccak256 (clempo.rlp:rlp-encode fields))))))
+    (key-authorization-fields authorization)
+    (case (signature-kind signature)
+      ((:keychain-v1 :keychain-v2) (reject-signature "keychain cannot authorize a key"))
+      (:configurable-account
+       (configurable-signature-account (configurable-signature signature)))
+      (t (recover-signature signature (key-authorization-hash key-auth))))))
 
 (defun authorization-signer (auth)
   "Recover a Tempo four-field or EIP-7702 six-field decoded authorization."

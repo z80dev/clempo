@@ -123,3 +123,41 @@ two keccaks; the transaction pays it less the 3000 its base covers (signature_ga
          (gas (clempo.signatures:configurable-verification-gas parsed)))
     (is (> gas 6000))
     (is= (- gas 3000) (clempo.transactions:tempo-signature-verification-gas signature))))
+
+(deftest configurable-grant-names-its-account ()
+  "SignedKeyAuthorization::authorizing_account: a configurable-signed grant names its account
+without recovering the quorum, which the executor verifies over key-authorization-hash."
+  (let* ((fields (list 1337 3 (make-octets 20)))
+         (hash (clempo.keccak:keccak256 (clempo.rlp:rlp-encode fields))))
+    (multiple-value-bind (signature account) (build hash)
+      (let ((grant (list fields signature)))
+        (is-equalp hash (key-authorization-hash grant))
+        (is= account (key-authorization-signer grant))
+        (is= account (verify-configurable-approvals (configurable-signature signature)
+                                                    (key-authorization-hash grant))))
+      (let ((other (list (list 1 3 (make-octets 20)) signature)))
+        (is= account (key-authorization-signer other))
+        (signals signature-error
+          (verify-configurable-approvals (configurable-signature signature)
+                                         (key-authorization-hash other)))))))
+
+(deftest reference-devnet-t14-transactions ()
+  "Transactions a T15 reference devnet accepted and sealed (data/README.md): clempo decodes
+each and recovers the sender the Rust node recovered, through the owner quorum where the
+signature is a ConfigurableAccount one."
+  (let ((records (with-open-file (in (merge-pathnames "data/t14-devnet-transactions.json"
+                                                      (asdf:system-relative-pathname
+                                                       "clempo-types" "../../tests/types/")))
+                   (let ((text (make-string (file-length in))))
+                     (clempo.json:parse-json (subseq text 0 (read-sequence text in))))))
+        (configurable 0))
+    (is= 3 (length records))
+    (loop for record across records
+          for tx = (clempo.transactions:decode-transaction
+                    (hex->octets (clempo.json:jget record "raw")))
+          for signature = (car (last (clempo.transactions:transaction-fields tx)))
+          do (is= (hex->integer (clempo.json:jget record "from"))
+                  (clempo.transactions:transaction-sender tx))
+             (when (eq :configurable-account (signature-kind signature))
+               (incf configurable)))
+    (is= 2 configurable)))

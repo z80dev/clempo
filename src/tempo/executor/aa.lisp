@@ -438,7 +438,9 @@ alone."
                 (warm-aa-accounts)
                 (state:warm-address world (block-env-beneficiary env)))
           (let* ((fee (resolve-fee-context ctx v fee-payer))
-                 (create-nonce (apply-aa-nonce v))
+                 (create-nonce (prog1 (apply-aa-nonce v)
+                                 ;; owner quorums: after the nonce, before the access key
+                                 (verify-configurable-grant v)))
                  (kc (prepare-keychain v fee)))
             (collect-fee ctx fee (when (= (fee-payer fee) caller) (kc-fee-key kc)))
             (let* ((remaining (max 0 (- gas-limit intrinsic)))

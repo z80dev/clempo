@@ -178,6 +178,21 @@ direct configurable signer, or in simulation a registered caller signing without
                        (t 0))))
     (clempo.configurable-account:set-authority caller direct eligibility)))
 
+(defun verify-configurable-grant (v)
+  "configurable_account::verify for the inline grant's role: a key authorization signed by a
+configurable account names its account without recovery (authorizing_account), so its owner
+quorum is checked here over the authorization's signature hash. The outer role's quorum was
+verified when the sender (or keychain key) was recovered. Simulation skips it."
+  (let ((raw (txv-key-authorization v)))
+    (when (and raw (not (txv-simulation-p v))
+               (eq (clempo.signatures:signature-kind (second raw)) :configurable-account))
+      (handler-case
+          (clempo.signatures:verify-configurable-approvals
+           (clempo.signatures:configurable-signature (second raw))
+           (clempo.signatures:key-authorization-hash raw))
+        (clempo.signatures:signature-error (c)
+          (invalid "configurable account quorum: ~A" (clempo.signatures:signature-error-reason c)))))))
+
 (defun register-commitments (v)
   "register_commitments: each signing configurable account without a commitment is registered
 at its initial configuration (ConfigurableAccountConfigUpdated, version 0), unmetered and
