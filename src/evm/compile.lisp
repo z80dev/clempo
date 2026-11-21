@@ -69,11 +69,11 @@
     ((:jump :jumpi :invalid :extern) t)
     (:op (body-halts-p (insn-info insn)))))
 
-(defun code-blocks (code fork)
-  "The reachable basic blocks of CODE under FORK (an index), in pc order."
+(defun code-blocks (code fork &optional (analysis (analyze-code code)))
+  "The reachable basic blocks of CODE under FORK (an index), in pc order. ANALYSIS is
+CODE's (by default a private one: the compiler leaves the shared caches alone)."
   (declare (type octets code))
-  (let* ((analysis (code-analysis code))
-         (jumpdests (analysis-jumpdests analysis))
+  (let* ((jumpdests (analysis-jumpdests analysis))
          (pushes (analysis-pushes analysis))
          (len (length code))
          (blocks '())
@@ -131,7 +131,7 @@ emits an unencodable STR immediate and the compile fails.")
     (and (not (op-info-manual-pc info))
          (not (<= #x80 (op-info-opcode info) #x9f))
          (/= (op-info-opcode info) #x50)
-         (mentions-p (op-info-body info) +gas-observers+)
+         (mentions-p (op-run-body info) +gas-observers+)
          (not (body-halts-p info))
          (not (member (op-info-name info) +inline-impure-ops+)))))
 
@@ -173,7 +173,7 @@ word status output), STATUS non-NIL when the op halted (FRAME-GAS then already f
                                                                      0
                                                                      `(if (member st +success-statuses+) gas 0)))))
                                                 (return-from op (values 0 st out)))))
-                                  (values (progn ,@(op-info-body info)) nil nil)))))))))))
+                                  (values (progn ,@(op-run-body info)) nil nil)))))))))))
 
 (define-op-functions)
 
@@ -182,7 +182,7 @@ word status output), STATUS non-NIL when the op halted (FRAME-GAS then already f
 ahead of them together with their segment's."
   (case (insn-kind insn)
     ((:push :dup :swap :pop) t)
-    (:op (not (mentions-p (op-info-body (insn-info insn)) +gas-observers+)))))
+    (:op (not (mentions-p (op-run-body (insn-info insn)) +gas-observers+)))))
 
 (defun insn-stack-effect (insn)
   "(values needs net) of INSN, as the interpreter checks them."
@@ -213,8 +213,8 @@ PUSH-WORD may simply return its argument."
       when (and info (not (op-info-manual-pc info)) (/= (op-info-opcode info) #x50)
                 (not (<= #x80 (op-info-opcode info) #x9f)))
         do (unless (if (plusp (op-info-pushes info))
-                       (and (= 1 (op-info-pushes info)) (tail-push-p (op-info-body info)))
-                       (not (mentions-p (op-info-body info) '(push-word))))
+                       (and (= 1 (op-info-pushes info)) (tail-push-p (op-run-body info)))
+                       (not (mentions-p (op-run-body info) '(push-word))))
              (error "compile.lisp: ~A does not end in PUSH-WORD; teach the compiler its shape"
                     (op-info-name info))))
 
@@ -351,7 +351,7 @@ block's last form."
                         `(symbol-macrolet ((pc ,(insn-pc insn)))
                            (let (,@(mapcar #'list args forms))
                              ,@(when args `((declare (type word ,@args) (ignorable ,@args))))
-                             ,@(op-info-body info))))))
+                             ,@(op-run-body info))))))
          (if (plusp (op-info-pushes info))
              (let ((v (fresh-var)))
                (push v *stk*)
@@ -508,16 +508,19 @@ there are many tags, since a long CASE nests as deeply as it has clauses."
                                        collect `(,i (go ,tag))))))))))
 
 (defun code-lambdas (code fork)
-  "CODE (octets) for FORK (index or keyword) as Lisp: (values region-forms block-region),
-BLOCK-REGION mapping each block's start pc to the index of the form that holds it."
+  "CODE (octets, not empty) for FORK (index or keyword) as Lisp: (values region-forms
+block-region), BLOCK-REGION mapping each block's start pc to the index of the form that
+holds it."
   (declare (type octets code))
   (let* ((fork (fork-index fork))
          (len (length code))
-         (jumpdests (analysis-jumpdests (code-analysis code)))
-         (regions (code-regions (code-blocks code fork)))
+         (analysis (analyze-code code))
+         (jumpdests (analysis-jumpdests analysis))
+         (regions (code-regions (code-blocks code fork analysis)))
          (block-region (make-array len :element-type '(signed-byte 32) :initial-element -1))
          (block-local (make-array len :element-type '(signed-byte 32) :initial-element -1))
          (*vars* 0))
+    (invariant (plusp len) "code-lambdas: empty code has no blocks")
     (loop for r in regions for self from 0
           do (loop for b in r for i from 0
                    do (setf (aref block-region (cblock-start b)) self
@@ -541,20 +544,39 @@ BLOCK-REGION mapping each block's start pc to the index of the form that holds i
             (setf pc a sp b)
             (return (values a b)))))))
 
+(defun empty-code-run (frame)
+  "Empty code, compiled: INTERPRET reads STOP past the end of any code."
+  (declare (ignore frame))
+  (values :stop +empty-code+))
+
+(defun native-bytes (fn)
+  "Bytes of the code object holding the compiled function FN."
+  (sb-ext:primitive-object-size (sb-kernel:fun-code-header (sb-kernel:%fun-fun fn))))
+
 (defun compile-code (code fork)
   "CODE compiled for FORK: a function of a FRAME that returns (values status output) and
 leaves FRAME-GAS as INTERPRET would. Second value: the full warnings the compiler raised
-\(muffled; any is a translation bug)."
+\(muffled; any is a translation bug). Third: the bytes of native code and tables made."
+  (declare (type octets code))
+  (when (zerop (length code))
+    (return-from compile-code (values #'empty-code-run '() 0)))
   (multiple-value-bind (forms block-region) (code-lambdas code fork)
     (let* ((warnings '())
            (regions (handler-bind ((warning (lambda (w)
                                               (unless (typep w 'style-warning)
                                                 (push (princ-to-string w) warnings))
                                               (muffle-warning w))))
-                      (map 'simple-vector (lambda (f) (compile nil f)) forms))))
+                      (map 'simple-vector (lambda (f) (compile nil f)) forms)))
+           ;; the code objects, plus the pc tables they hold (block-region, block-local
+           ;; of the same size, and the jump-destination bits)
+           (bytes (+ (* 2 (sb-ext:primitive-object-size block-region))
+                     (ceiling (length code) 8)
+                     (sb-ext:primitive-object-size regions)
+                     (loop for r across regions sum (native-bytes r)))))
       (values (if (= 1 (length regions))
                   (let ((fn (svref regions 0)))
                     (lambda (frame)
                       (funcall (the function fn) frame (acquire-stack (frame-depth frame)) 0 0)))
                   (lambda (frame) (run-compiled regions block-region frame)))
-              (nreverse warnings)))))
+              (nreverse warnings)
+              bytes))))

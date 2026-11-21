@@ -101,7 +101,6 @@ transaction, as the reference's are. Bad options signal TRACER-ERROR.")
       (#x20 (gas-params-keccak gp))
       (#x40 (gas-params-blockhash gp))
       ((#xa0 #xa1 #xa2 #xa3 #xa4) (gas-params-log gp))
-      ((#xf0 #xf5) (gas-params-create gp))
       (t (let* ((info (op-info op)) (gas (and info (op-info-gas info))))
            (if (integerp gas) gas 0))))))
 
@@ -141,6 +140,8 @@ transaction, as the reference's are. Bad options signal TRACER-ERROR.")
      "Contract address collision" :halt)
     (:precompile-error "PrecompileError" "precompiled failed" "Built-in failed" :halt)
     (:create-contract-size-limit "CreateContractSizeLimit" "max code size exceeded"
+     "Out of gas" :halt)
+    (:create-init-code-size-limit "CreateInitCodeSizeLimit" "max initcode size exceeded"
      "Out of gas" :halt)
     (:create-contract-starting-with-ef "CreateContractStartingWithEF"
      "invalid code: must not begin with 0xef" "Invalid code" :halt)))

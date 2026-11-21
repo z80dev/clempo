@@ -130,8 +130,9 @@ collision) and so never ran: a frame that starts and ends with STATUS."
     (trace-call-start tracer frame)
     (trace-call-end tracer frame status gas-left +empty-code+)))
 
-;;; The CALL family. Memory is already expanded and paid; FRAME-GAS holds the gas.
-;;; Returns the word to push (1 or 0) or NIL for an exceptional halt.
+;;; The CALL family. Static gas (the warm access) is paid, memory is already expanded and
+;;; paid; FRAME-GAS holds the gas. Returns the word to push (1 or 0) or NIL for an
+;;; exceptional halt.
 
 (defun op-call (frame kind requested to value in-offset in-size out-offset out-size)
   (declare (type frame frame))
@@ -143,9 +144,7 @@ collision) and so never ran: a frame that starts and ends with STATUS."
          (code nil)
          (delegated nil)
          (transfers (and (/= value 0) (or (eq kind :call) (eq kind :callcode))))
-         (cost (if (fork>= :berlin)
-                   (if (warm-address world to) (gas-params-warm-read gp) (gas-params-cold-account gp))
-                   (gas-params-account-read gp))))
+         (cost (cold-account-surcharge to)))
     (declare (type gas gas) (type fixnum cost))
     (when (fork>= :prague)
       (let ((target (delegation-target (get-code world to))))
@@ -188,24 +187,19 @@ collision) and so never ran: a frame that starts and ends with STATUS."
             (declare (type gas gas-left))
             (setf (frame-gas frame) (+ gas gas-left)
                   (frame-return-data frame) output)
+            (incf (frame-child-gas frame) (- child-gas gas-left))
             (let ((n (min out-size (length output))))
               (when (plusp n)
                 (replace (frame-memory frame) output :start1 out-offset :end2 n)))
             (if (success-p status) 1 0)))))))
 
 (defun op-create (frame kind value offset size salt)
-  "CREATE/CREATE2 after static gas and memory. Returns the address (or 0) to push, or NIL
-for an exceptional halt."
+  "CREATE/CREATE2 once the opcode paid its initcode, memory and creation gas. Returns the
+address (or 0) to push."
   (declare (type frame frame))
   (let* ((world *world*)
-         (spec *spec*)
-         (gp (spec-gas spec))
          (gas (frame-gas frame)))
     (declare (type gas gas))
-    (when (fork>= :shanghai)
-      (when (> size (gas-params-max-initcode-size gp)) (return-from op-create nil))
-      (decf gas (* (gas-params-initcode-word gp) (ceiling size 32)))
-      (when (< gas 0) (return-from op-create nil)))
     (let ((child-gas (all-but-64th gas))
           (account (frame-account frame))
           (self (frame-address frame))
@@ -238,6 +232,7 @@ for an exceptional halt."
         (increment-nonce world account)
         (when (collision-p world (get-account world address))
           (setf (frame-gas frame) gas)
+          (incf (frame-child-gas frame) child-gas)
           (when *tracer*
             (trace-unstarted kind self address address value +empty-code+ initcode child-gas
                              (1+ depth) :create-collision 0))
@@ -247,11 +242,13 @@ for an exceptional halt."
             (create-message self address value initcode child-gas (1+ depth) kind)
           (declare (type gas gas-left))
           (setf (frame-gas frame) (+ gas gas-left))
+          (incf (frame-child-gas frame) (- child-gas gas-left))
           (cond ((success-p status) address)
                 (t (setf (frame-return-data frame) output) 0)))))))
 
 (defun op-selfdestruct (frame beneficiary)
-  "SELFDESTRUCT (EIP-6780 from Cancun). Returns NIL for an exceptional halt."
+  "SELFDESTRUCT (EIP-6780 from Cancun) once the opcode paid its static gas and passed the
+static-context check. Returns NIL for an exceptional halt."
   (declare (type frame frame))
   (let* ((world *world*)
          (spec *spec*)
@@ -259,14 +256,14 @@ for an exceptional halt."
          (gas (frame-gas frame))
          (account (frame-account frame))
          (balance (account-balance account))
-         (cost (gas-params-selfdestruct gp)))
+         (cost 0))
     (declare (type gas gas) (type fixnum cost))
     (when (and (fork>= :berlin) (not (warm-address world beneficiary)))
       (incf cost (gas-params-cold-account gp)))
     (when (and (/= balance 0) (account-dead-p (get-account world beneficiary)))
       (incf cost (gas-params-new-account-selfdestruct gp)))
     (decf gas cost)
-    (when (or (< gas 0) (frame-static-p frame)) (return-from op-selfdestruct nil))
+    (when (< gas 0) (return-from op-selfdestruct nil))
     (setf (frame-gas frame) gas)
     (when *tracer* (trace-selfdestruct *tracer* frame beneficiary balance))
     (cond ((fork>= :cancun)

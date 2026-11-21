@@ -3,38 +3,46 @@
   (:import-from #:clempo.io #:read-file-string)
   (:documentation "Run-time compilation of EVM code from clempo-dev: the -jit option of
 statetest and evm-bench, a background compiler thread, and jit-latency.")
-  (:export #:jit-option #:jit-summary #:start-background-compiler #:stop-background-compiler))
+  (:export #:jit-option #:jit-summary #:with-jit-option #:start-background-compiler
+           #:stop-background-compiler))
 
 (in-package #:clempo.dev.evm-compile)
 
-;;; The default (clempo.evm's) policy compiles a code once it has spent
-;;; clempo.evm:*jit-threshold* gas per byte of itself interpreted.
-;;; -jit [N]  compile after N gas per byte instead (no N: 0, every code at its first call,
-;;;           the differential mode)
-;;; -jit-bg   compile in a background thread; frames interpret until their code is ready
+;;; Without an option clempo.evm interprets: it compiles only when a compiler is installed.
+;;; -jit [N]  compile on the calling thread, every code of any size once it has spent N gas
+;;;           per byte interpreted (no N: 0, every code at its first call): the
+;;;           differential mode, never a node's
+;;; -jit-bg   compile in a background thread with clempo.evm's policy (or -jit N's
+;;;           threshold); frames interpret until their code is ready
 ;;; -interp   never compile: the interpreter alone
 
 (defun jit-option (args)
   "Apply the -jit, -jit-bg and -interp options of a command process-wide (worker
 threads see global values). Returns true when compilation is on."
-  (let ((jit (arg args :jit)))
-    (cond ((arg-flag args :interp) (clempo.evm:disable-jit))
-          (jit (clempo.evm:enable-jit :threshold (if (eq jit t) 0 (parse-integer jit)))))
-    (when (and clempo.evm:*jit* (arg-flag args :jit-bg)) (start-background-compiler))
+  (let ((jit (arg args :jit))
+        (bg (arg-flag args :jit-bg)))
+    (cond ((arg-flag args :interp) (stop-background-compiler) (clempo.evm:remove-jit-compiler))
+          (bg (start-background-compiler
+               :threshold (if (stringp jit) (parse-integer jit) clempo.evm:*jit-threshold*)))
+          (jit (setf clempo.evm:*jit-max-code-size* most-positive-fixnum)
+               (clempo.evm:install-jit-compiler #'clempo.evm:jit-compile-synchronously
+                                                :threshold (if (eq jit t) 0 (parse-integer jit)))))
     (and clempo.evm:*jit* t)))
 
 (defun jit-summary (&optional (stream *standard-output*))
   (let ((s clempo.evm:*jit-stats*))
-    (format stream "jit: threshold ~D, ~:D compiled, ~:D shared from cache, ~:D failed~%"
+    (format stream "jit: threshold ~D, ~:D compiled, ~:D shared from cache, ~:D failed, ~:D refused, ~:D evicted~%"
             clempo.evm:*jit-threshold* (clempo.evm:jit-stats-compiled s)
-            (clempo.evm:jit-stats-shared s) (clempo.evm:jit-stats-failed s))
+            (clempo.evm:jit-stats-shared s) (clempo.evm:jit-stats-failed s)
+            (clempo.evm:jit-stats-refused s) (clempo.evm:jit-stats-evicted s))
     (loop for (code fork reasons) in (clempo.evm:jit-stats-failures s)
           do (format stream "  failed: ~D bytes, ~A: ~A~%" (length code)
                      (clempo.evm:fork-name fork)
                      (let ((r (princ-to-string (first reasons))))
                        (subseq r 0 (min 300 (length r))))))))
 
-;;; The background compiler: one thread draining a queue of compile thunks.
+;;; The background compiler: one thread draining a queue of compile thunks. clempo.evm
+;;; hands it at most clempo.evm:*jit-max-pending* at a time.
 
 (defvar *compiler-thread* nil)
 (defvar *queue* '())
@@ -44,14 +52,15 @@ threads see global values). Returns true when compilation is on."
 (defun enqueue (thunk)
   (sb-thread:with-mutex (*queue-lock*)
     (setf *queue* (nconc *queue* (list thunk)))
-    (sb-thread:condition-notify *queue-ready*)))
+    (sb-thread:condition-notify *queue-ready*))
+  t)
 
 (defun dequeue ()
   (sb-thread:with-mutex (*queue-lock*)
     (loop until *queue* do (sb-thread:condition-wait *queue-ready* *queue-lock*))
     (pop *queue*)))
 
-(defun start-background-compiler ()
+(defun start-background-compiler (&key (threshold clempo.evm:*jit-threshold*))
   "Compile hot code in a background thread from now on."
   (unless *compiler-thread*
     (setf *compiler-thread*
@@ -59,15 +68,23 @@ threads see global values). Returns true when compilation is on."
                                    (loop for thunk = (dequeue)
                                          until (eq thunk :stop)
                                          do (funcall (the function thunk))))
-                                 :name "jit compiler")
-          clempo.evm:*jit-compile-hook* #'enqueue)))
+                                 :name "jit compiler")))
+  (clempo.evm:install-jit-compiler #'enqueue :threshold threshold))
 
 (defun stop-background-compiler ()
   (when *compiler-thread*
-    (setf clempo.evm:*jit-compile-hook* nil)
+    (clempo.evm:remove-jit-compiler)
     (enqueue :stop)
     (sb-thread:join-thread *compiler-thread*)
     (setf *compiler-thread* nil)))
+
+(defmacro with-jit-option ((on args) &body body)
+  "Run BODY with ARGS' -jit, -jit-bg or -interp applied and ON true when compilation is
+on; then print the JIT summary (when on) and stop the background compiler, if any."
+  `(let ((,on (jit-option ,args)))
+     (unwind-protect (progn ,@body)
+       (when ,on (jit-summary))
+       (stop-background-compiler))))
 
 ;;; jit-latency: compile time against code size, over the distinct contracts of the
 ;;; state-test fixtures; every one must compile without a warning.

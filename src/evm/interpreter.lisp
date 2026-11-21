@@ -19,9 +19,12 @@
       `(,(op-info-opcode info)
         ,@(unless (eq since :istanbul)
             `((unless (>= fork ,(fork-index since)) (halt :invalid-opcode))))
+        ;; evm2's order: static gas, then (for CREATE and LOG) the static context, then
+        ;; the stack (defop.lisp)
+        ,@(unless (eql gas 0) `((charge ,gas)))
+        ,@(when (op-info-static-first info) '((static-guard)))
         ,@(when (plusp needs) `((when (< sp ,needs) (halt :stack-underflow))))
         ,@(when (plusp net) `((when (> sp ,(- 1024 net)) (halt :stack-overflow))))
-        ,@(unless (eql gas 0) `((charge ,gas)))
         (let (,@(loop for a in args for i from 1 collect `(,a (svref stack (- sp ,i)))))
           ,@(when args `((declare (type word ,@args) (ignorable ,@args))))
           ,@(when (plusp nargs) `((decf sp ,nargs)))

@@ -3,10 +3,11 @@
 ;;; Code analysis: valid jump destinations and the value of every PUSH, computed once per
 ;;; code vector and cached by identity.
 
-(defstruct (analysis (:constructor %make-analysis (jumpdests pushes)))
+(defstruct (analysis (:constructor %make-analysis (code jumpdests pushes)))
+  (code +empty-code+ :type octets)     ; the code vector analysed: the caches' key
   (jumpdests #* :type simple-bit-vector)
   (pushes #() :type simple-vector)
-  (jit nil))                         ; compile.lisp's per-code state (call count, code)
+  (jit nil))                         ; compile-cache.lisp's per-code state
 
 (defun analyze-code (code)
   (declare #.*hot* (type octets code))
@@ -28,16 +29,82 @@
                         (setf (svref pushes pc) v)
                         (incf pc (1+ n))))
                      (t (incf pc)))))
-    (%make-analysis jumpdests pushes)))
+    (%make-analysis code jumpdests pushes)))
 
-(defvar *analysis-cache* (make-hash-table :test 'eq :weakness :key :synchronized t)
-  "code vector -> ANALYSIS. Rebind per thread for lock-free use.")
+;;; Analyses are cached by code vector in two layers.
+;;;
+;;; The store, shared by every thread, keeps them in two generations of weak tables. A
+;;; lookup that finds an analysis in the old generation moves it into the young one;
+;;; once the young one has taken in *ANALYSIS-CACHE-CODE-BYTES* bytes of code it becomes
+;;; the old one and the previous old one is dropped. The store therefore holds the
+;;; analyses of at most twice that much code (about 9 bytes per code byte, plus the
+;;; JIT state) however many code vectors the world keeps alive, while a code in steady use
+;;; is promoted every generation and never recomputed. Weakness also drops an analysis
+;;; as soon as its code vector is garbage (an eth_call's overridden code).
+;;;
+;;; In front of the store, a direct-mapped L1 of whole analyses keyed by the code
+;;; vector's address answers the frame-by-frame lookup without a lock. A slot holds one
+;;; analysis, which names its code, so the global L1 may be shared by threads outside
+;;; WITH-EVM-THREAD: a racing write costs a miss, never a wrong answer. A collection that
+;;; moves a code vector also only costs a miss.
+
+(defparameter *analysis-cache-code-bytes* (* 4 1024 1024)
+  "Bytes of code analysed into the young generation before it ages (see above).")
+
+(defun make-analysis-table ()
+  (make-hash-table :test 'eq :weakness :key :synchronized t))
+
+(defstruct (analysis-store (:constructor make-analysis-store ()))
+  (young (make-analysis-table) :type hash-table)
+  (old (make-analysis-table) :type hash-table)
+  (bytes 0 :type sb-ext:word))          ; code bytes taken into YOUNG
+
+(defvar *analysis-store* (make-analysis-store)
+  "The analyses of every thread.")
+
+(define-constant +analysis-l1-size+ 64)
+
+(defun make-analysis-l1 () (make-array +analysis-l1-size+ :initial-element nil))
+
+(defvar *analysis-l1* (make-analysis-l1)
+  "Direct-mapped analysis cache in front of *ANALYSIS-STORE*; per thread (see
+WITH-EVM-THREAD).")
+
+(defun store-analysis (store a)
+  "Put the analysis A into STORE's young generation; the insert that carries it over its
+budget ages it, once."
+  (let* ((code (analysis-code a))
+         (cap *analysis-cache-code-bytes*)
+         (len (length code)))
+    (setf (gethash code (analysis-store-young store)) a)
+    (let ((before (sb-ext:atomic-incf (analysis-store-bytes store) len)))
+      (when (and (<= before cap) (> (+ before len) cap))
+        (setf (analysis-store-old store) (analysis-store-young store)
+              (analysis-store-young store) (make-analysis-table)
+              (analysis-store-bytes store) 0)))
+    a))
+
+(defun stored-analysis (code evicted)
+  "CODE's analysis from *ANALYSIS-STORE*, computed and stored on a miss. EVICTED, the
+analysis an L1 slot is giving up for it (or NIL), goes back into the young generation:
+an analysis in steady use in an L1 never meets the store, so it is kept alive there."
+  (declare (type octets code))
+  (let ((store *analysis-store*))
+    (when (and evicted (not (gethash (analysis-code evicted) (analysis-store-young store))))
+      (store-analysis store evicted))
+    (or (gethash code (analysis-store-young store))
+        (store-analysis store (or (gethash code (analysis-store-old store))
+                                  (analyze-code code))))))
 
 (defun code-analysis (code)
-  (declare (type octets code))
-  (let ((cache *analysis-cache*))
-    (or (gethash code cache)
-        (setf (gethash code cache) (analyze-code code)))))
+  (declare #.*hot* (type octets code))
+  (let* ((l1 *analysis-l1*)
+         (i (logand (ash (sb-kernel:get-lisp-obj-address code) -4) (1- +analysis-l1-size+)))
+         (a (svref l1 i)))
+    (declare (type simple-vector l1) (type fixnum i))
+    (if (and a (eq (analysis-code (the analysis a)) code))
+        a
+        (setf (svref l1 i) (stored-analysis code a)))))
 
 ;;; A frame is one running message: code, context, gas and memory.
 
@@ -55,7 +122,10 @@
   (mem-size 0 :type fixnum)
   (return-data +empty-code+ :type octets)
   (account nil)
-  (kind :call :type keyword))
+  (kind :call :type keyword)
+  ;; Gas the frame's child messages took and did not give back (stipends aside): what the
+  ;; JIT subtracts from the frame's own spending when it measures how hot its code is.
+  (child-gas 0 :type fixnum))
 
 ;;; Memory: MEMORY is a buffer at least MEM-SIZE long; MEM-SIZE is the active size in
 ;;; bytes, a multiple of 32.
@@ -115,10 +185,10 @@
 
 (defmacro with-evm-thread (&body body)
   "Run BODY with this thread's own interpreter scratch: operand stacks, the code-analysis
-cache and Keccak buffers. Every thread that executes EVM code besides the main one must
+L1 and Keccak buffers. Every thread that executes EVM code besides the main one must
 run inside this."
   `(let ((*stacks* (make-array 1026 :initial-element nil))
-         (*analysis-cache* (make-hash-table :test 'eq :weakness :key))
+         (*analysis-l1* (make-analysis-l1))
          (*keccak-scratch* (clempo.keccak:make-keccak))
          (*keccak-out* (make-octets 32)))
      ,@body))

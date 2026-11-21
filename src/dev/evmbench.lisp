@@ -28,19 +28,18 @@
         (values status (- gas gas-left))))))
 
 (defcommand "evm-bench" (args)
-  "EVM throughput: evm-bench [-n iterations] [-only name] [-jit [N] | -interp]"
+  "EVM throughput: evm-bench [-n iterations] [-only name] [-jit [N] | -jit-bg | -interp]"
   (let ((n (arg-int args :n 1000000))
-        (only (arg args :only))
-        (jit (clempo.dev.evm-compile:jit-option args)))
-    (dolist (entry *bodies*)
-      (destructuring-bind (name body doc) entry
-        (when (or (null only) (string= only name))
-          (let ((code (program body n)))
-            (run-program code 100000000)        ; warm up
-            (let ((start (clempo.io:monotonic-ticks)))
-              (multiple-value-bind (status used) (run-program code most-positive-fixnum)
-                (let ((secs (/ (- (clempo.io:monotonic-ticks) start) internal-time-units-per-second)))
-                  (format t "~8A ~A: ~,1F Mgas/s (~:D gas in ~,3F s, ~A) - ~A~%"
-                          name status (/ used secs 1d6) used (float secs) status doc))))))))
-    (when jit (clempo.dev.evm-compile:jit-summary))
+        (only (arg args :only)))
+    (clempo.dev.evm-compile:with-jit-option (jit args)
+      (dolist (entry *bodies*)
+        (destructuring-bind (name body doc) entry
+          (when (or (null only) (string= only name))
+            (let ((code (program body n)))
+              (run-program code 100000000)        ; warm up
+              (let ((start (clempo.io:monotonic-ticks)))
+                (multiple-value-bind (status used) (run-program code most-positive-fixnum)
+                  (let ((secs (/ (- (clempo.io:monotonic-ticks) start) internal-time-units-per-second)))
+                    (format t "~8A ~A: ~,1F Mgas/s (~:D gas in ~,3F s, ~A) - ~A~%"
+                            name status (/ used secs 1d6) used (float secs) status doc)))))))))
     0))

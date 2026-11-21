@@ -28,8 +28,9 @@ its immediate; a string is raw hex."
     (coerce (nreverse out) 'octets)))
 
 (defun run-accounts (accounts &key (to #xc0de) (gas 100000) (fork :osaka) (input (make-octets 0))
-                                   jit (threshold 0) spec)
-  "Call TO in a world of ACCOUNTS, a list of (address code); the observable outcome."
+                                   jit (threshold 0) spec (compiler #'jit-compile-synchronously))
+  "Call TO in a world of ACCOUNTS, a list of (address code); the observable outcome. JIT:
+run through JIT-RUN-FRAME with COMPILER as the executor (compiling synchronously)."
   (let ((b (make-memory-backend)))
     (memory-backend-put-account b #xca11 :balance (expt 10 18))
     (loop for (address code) in accounts
@@ -39,6 +40,8 @@ its immediate; a string is raw hex."
            (*spec* (or spec (make-spec fork)))
            (*block* (make-block-env :number 1 :gas-limit 30000000))
            (*jit* (and jit #'jit-run-frame))
+           (*jit-compiler* (and jit compiler))
+           (*jit-max-code-size* most-positive-fixnum)
            (*jit-threshold* threshold))
       (multiple-value-bind (status gas-left output)
           (call-message :call #xca11 to to 0 input gas 0 nil)
@@ -195,16 +198,35 @@ its immediate; a string is raw hex."
   (is= :invalid-opcode (first (same `((#xc0de ,(asm :push0))) :fork :istanbul)))
   (is= :stop (first (same `((#xc0de ,(asm :push0 :pop))) :fork :shanghai))))
 
+(defun jit-state (code)
+  (clempo.evm::analysis-jit (clempo.evm::code-analysis code)))
+
+(defun jit-count-of (code)
+  "The gas CODE has been counted for, or NIL before its first frame under the JIT."
+  (let ((s (jit-state code)))
+    (and s (svref s clempo.evm::+jit-count-slot+))))
+
+(defun jit-fn (code &optional (fork :osaka))
+  "What CODE's cache entry for FORK holds (a function, :PENDING, :FAILED, :EVICTED), or
+NIL without one."
+  (let* ((s (jit-state code))
+         (e (and s (svref s (fork-index fork)))))
+    (and e (clempo.evm::jit-entry-fn e))))
+
 (deftest compile-hot-threshold ()
   ;; 7 bytes spending 11 gas a call; at 2 gas per byte it compiles on the third call
-  (let ((code (asm :push1 1 :push1 2 :add :pop :stop)))
+  (let ((*jit-cache* (make-jit-cache))
+        (code (asm :push1 1 :push1 2 :add :pop :stop)))
     (is= 0 (compiled-during (lambda ()
                               (run-accounts `((#xc0de ,code)) :jit t :threshold 2)
                               (run-accounts `((#xc0de ,code)) :jit t :threshold 2))))
-    (is= 22 (clempo.evm::analysis-jit (clempo.evm::code-analysis code)))
+    (is= 22 (jit-count-of code))
     (run-accounts `((#xc0de ,code)) :jit t :threshold 2)
-    (is (functionp (svref (clempo.evm::analysis-jit (clempo.evm::code-analysis code))
-                          (fork-index :osaka))))))
+    (is (functionp (jit-fn code)))
+    ;; another vector with the same bytes adopts it at its first frame, uncounted
+    (let ((twin (copy-seq code)))
+      (is= 0 (compiled-during (lambda () (run-accounts `((#xc0de ,twin)) :jit t :threshold 2))))
+      (is (functionp (jit-fn twin))))))
 
 (defclass step-counter () ((n :initform 0 :accessor steps)))
 (defmethod trace-step ((tr step-counter) frame pc op gas sp stack)
@@ -216,3 +238,170 @@ its immediate; a string is raw hex."
     (let ((*tracer* tr))
       (run-accounts `((#xc0de ,(asm :push1 1 :push1 2 :add :pop :stop))) :jit t))
     (is= 5 (steps tr))))
+
+;;; Where and when compilation happens, and what bounds it.
+
+(defun with-evm-context (thunk)
+  (let ((*world* (make-world (make-memory-backend)))
+        (*spec* (make-spec :osaka))
+        (*block* (make-block-env :number 1 :gas-limit 30000000)))
+    (funcall thunk)))
+
+(deftest compile-empty-code ()
+  ;; Empty code compiles to what the interpreter does with it (STOP, all gas kept); the
+  ;; compiler used to read pc 0 of the empty pc table, out of bounds under safety 0.
+  (with-evm-context
+   (lambda ()
+     (let ((fn (compile-code (make-octets 0) (fork-index :osaka)))
+           (frame (clempo.evm::%make-frame :code (make-octets 0) :gas 1000)))
+       (multiple-value-bind (status output) (funcall fn frame)
+         (is= :stop status)
+         (is= 0 (length output))
+         (is= 1000 (frame-gas frame))))
+     ;; and the JIT runs empty code as the interpreter does, compiling nothing
+     (let ((*jit-cache* (make-jit-cache))
+           (*jit-compiler* #'jit-compile-synchronously)
+           (*jit-threshold* 0)
+           (frame (clempo.evm::%make-frame :code (make-octets 0) :gas 1000)))
+       (is= :stop (jit-run-frame frame))
+       (is= 1000 (frame-gas frame))
+       (is= 0 (jit-cache-count))))))
+
+(deftest jit-never-compiles-on-the-calling-thread ()
+  ;; With an executor installed a hot code is only handed over: the frame that made it hot
+  ;; and every frame until the executor ran the thunk are interpreted.
+  (let* ((*jit-cache* (make-jit-cache))
+         (queued '())
+         (executor (lambda (thunk) (push thunk queued) t))
+         (code (asm :push1 5 :jumpdest :push1 1 :swap1 :sub :dup1 :push1 2 :jumpi :stop))
+         (want (run-accounts `((#xc0de ,code)))))
+    (is= 0 (compiled-during
+            (lambda ()
+              (is-equalp want (run-accounts `((#xc0de ,code)) :jit t :compiler executor))
+              (is-equalp want (run-accounts `((#xc0de ,code)) :jit t :compiler executor)))))
+    (is= 1 (length queued) "handed over once")
+    (is (eq :pending (jit-fn code)))
+    (is= 1 (jit-cache-pending *jit-cache*))
+    ;; the compiler thread's turn
+    (is= 1 (compiled-during (lambda () (funcall (pop queued)))))
+    (is (functionp (jit-fn code)))
+    (is= 0 (jit-cache-pending *jit-cache*))
+    (is-equalp want (run-accounts `((#xc0de ,code)) :jit t :compiler executor))
+    (is (null queued))))
+
+(deftest jit-pending-is-bounded ()
+  (let* ((*jit-cache* (make-jit-cache))
+         (*jit-max-pending* 2)
+         (queued '())
+         (executor (lambda (thunk) (push thunk queued) t))
+         (codes (loop for i below 5 collect (asm :push2 (+ 1000 i) :pop :stop)))
+         (refused (jit-stats-refused *jit-stats*)))
+    (dolist (c codes) (run-accounts `((#xc0de ,c)) :jit t :compiler executor))
+    (is= 2 (length queued))
+    (is= 2 (jit-cache-pending *jit-cache*))
+    (is= 3 (- (jit-stats-refused *jit-stats*) refused))
+    ;; a refused code counts from zero again: the frame's own 5 gas
+    (is= 5 (jit-count-of (fifth codes)))
+    (is (null (jit-fn (fifth codes))))
+    (is= 2 (compiled-during (lambda () (mapc #'funcall queued))))
+    (is= 0 (jit-cache-pending *jit-cache*))))
+
+(deftest jit-executor-refusal ()
+  (let ((*jit-cache* (make-jit-cache))
+        (code (asm :push2 2000 :pop :stop)))
+    (run-accounts `((#xc0de ,code)) :jit t :compiler (constantly nil))
+    (is= 0 (jit-cache-count))
+    (is= 0 (jit-cache-pending *jit-cache*))
+    (is= 5 (jit-count-of code))))
+
+(deftest jit-remove-cancels-pending ()
+  (let* ((*jit-cache* (make-jit-cache))
+         (*jit* nil)
+         (*jit-compiler* nil)
+         (*jit-threshold* *jit-threshold*)
+         (queued '())
+         (code (asm :push2 2500 :pop :stop)))
+    (install-jit-compiler (lambda (thunk) (push thunk queued) t) :threshold 0)
+    (run-accounts `((#xc0de ,code)) :jit t :compiler *jit-compiler*)
+    (is= 1 (jit-cache-pending *jit-cache*))
+    (remove-jit-compiler)
+    (is (null *jit*))
+    (is= 0 (jit-cache-pending *jit-cache*))
+    (is (eq :evicted (jit-fn code)))
+    ;; the thunk the compiler thread still holds does nothing
+    (is= 0 (compiled-during (lambda () (funcall (pop queued)))))
+    (is= 0 (jit-cache-count))))
+
+(deftest jit-cache-evicts-least-recently-run ()
+  (let ((*jit-cache* (make-jit-cache))
+        (*jit-cache-limit* 4))
+    (destructuring-bind (a b c d e) (loop for i below 5 collect (asm :push2 (+ 3000 i) :pop :stop))
+      (dolist (x (list a b c d)) (run-accounts `((#xc0de ,x)) :jit t))
+      (is= 4 (jit-cache-count))
+      (run-accounts `((#xc0de ,a)) :jit t)  ; A ran last but one
+      (let ((evicted (jit-stats-evicted *jit-stats*)))
+        (run-accounts `((#xc0de ,e)) :jit t)  ; over the limit: down to 7/8 of it
+        (is= 3 (jit-cache-count))
+        (is= 2 (- (jit-stats-evicted *jit-stats*) evicted)))
+      (is (functionp (jit-fn a)))
+      (is (functionp (jit-fn d)))
+      (is (functionp (jit-fn e)))
+      (is (eq :evicted (jit-fn b)))
+      (is (eq :evicted (jit-fn c)))
+      ;; an evicted code lets go of its function and counts from zero again
+      (run-accounts `((#xc0de ,b)) :jit t :threshold 100)
+      (is (null (jit-fn b)))
+      (is= 5 (jit-count-of b)))))
+
+(deftest jit-cache-bounds-native-bytes ()
+  (let ((*jit-cache* (make-jit-cache))
+        (codes (loop for i below 8 collect (asm :push2 (+ 4000 i) :pop :push1 1 :pop :stop))))
+    (run-accounts `((#xc0de ,(first codes))) :jit t)
+    (let* ((one (jit-cache-bytes *jit-cache*))
+           (*jit-cache-max-bytes* (* 3 one)))
+      (is (plusp one))
+      (dolist (c (rest codes))
+        (run-accounts `((#xc0de ,c)) :jit t)
+        (is (<= (jit-cache-bytes *jit-cache*) (* 3 one))))
+      (is (<= (jit-cache-count) 3)))))
+
+(deftest jit-counts-own-work ()
+  (let ((*jit-cache* (make-jit-cache)))
+    ;; REVERT keeps its gas: its work counts (PUSH1 PUSH1 ADD POP PUSH1 DUP1 REVERT)
+    (let ((code (asm :push1 1 :push1 2 :add :pop :push1 0 :dup1 :revert)))
+      (run-accounts `((#xc0de ,code)) :jit t :threshold 1000)
+      (is= 17 (jit-count-of code)))
+    ;; an exceptional halt zeroes the gas: nothing is known of its work, nothing counts
+    (let ((code (asm :push1 1 :push1 2 :add :pop "fe")))
+      (run-accounts `((#xc0de ,code)) :jit t :threshold 1000)
+      (is= 0 (jit-count-of code)))
+    ;; a caller is not credited with what its callee spent: 5 PUSH1, PUSH2, GAS, a cold
+    ;; CALL (100 + 2,500), POP; the callee loops 100 times for 2,603
+    (let ((callee (asm :push1 100 :jumpdest :push1 1 :swap1 :sub :dup1 :push1 2 :jumpi :stop))
+          (caller (asm :push1 0 :push1 0 :push1 0 :push1 0 :push1 0 :push2 #xbeef :gas :call
+                       :pop :stop)))
+      (run-accounts `((#xc0de ,caller) (#xbeef ,callee)) :jit t :threshold 100000 :gas 200000)
+      (is= (+ 15 3 2 2600 2) (jit-count-of caller))
+      (is= 2603 (jit-count-of callee)))))
+
+(deftest analysis-store-is-bounded ()
+  ;; The store keeps at most two generations' worth of code analysed, however many code
+  ;; vectors stay alive, while a code in steady use keeps its one analysis.
+  (let ((clempo.evm::*analysis-store* (clempo.evm::make-analysis-store))
+        (clempo.evm::*analysis-l1* (clempo.evm::make-analysis-l1))
+        (clempo.evm::*analysis-cache-code-bytes* 1000)
+        (kept (asm :push1 1 :stop))
+        (alive '()))
+    (let ((a (clempo.evm::code-analysis kept)))
+      (dotimes (i 200)
+        (let ((c (make-octets 100)))
+          (push c alive)
+          (clempo.evm::code-analysis c))
+        (is (eq a (clempo.evm::code-analysis kept))))
+      (let ((store clempo.evm::*analysis-store*))
+        (is (<= (+ (hash-table-count (clempo.evm::analysis-store-young store))
+                   (hash-table-count (clempo.evm::analysis-store-old store)))
+                22)
+            "~D analyses stored" (+ (hash-table-count (clempo.evm::analysis-store-young store))
+                                    (hash-table-count (clempo.evm::analysis-store-old store))))))
+    (is= 200 (length alive))))
