@@ -43,10 +43,10 @@
             (is-equalp '(:canonical-hash 2)
                        (check-batch (vector one two) (make-head :number 2 :hash anchor)))))))))
 
-(defstruct collecting-executor (heights nil))
+(defstruct collecting-executor (heights nil) (certificates nil))
 
 (defmethod apply-follow-block ((executor collecting-executor) block &key certificate)
-  (declare (ignore certificate))
+  (push certificate (collecting-executor-certificates executor))
   (push (hdr:ethereum-header-number (hdr:header-inner (blocks:block-header block)))
         (collecting-executor-heights executor)))
 
@@ -54,7 +54,9 @@
 
 (defmethod certify-follow-batch ((certifier prefix-certifier) blocks previous-hash)
   (declare (ignore previous-hash))
-  (min (length blocks) (prefix-certifier-available certifier)))
+  (let ((count (min (length blocks) (prefix-certifier-available certifier))))
+    (values count (map 'simple-vector (lambda (block) (octets->hex (blocks:block-hash block)))
+                       (subseq blocks 0 count)))))
 
 (deftest follow-from-archive-through-verified-prefix ()
   (let* ((dir (format nil "/tmp/clempo-follow-test-~A/" (octets->hex (clempo.io:random-octets 8))))
@@ -74,11 +76,14 @@
                  (is= 1 (head-number head))
                  (is (not caught-up))
                  (is-equalp '(1) (collecting-executor-heights executor))
+                 (is-equalp (list (octets->hex hash-one)) (collecting-executor-certificates executor))
                  (is= 1 (follower-certified follower)))
                (multiple-value-bind (head caught-up) (follow-to follower target)
                  (is caught-up)
                  (is-equalp hash-two (head-hash head))
                  (is-equalp '(2 1) (collecting-executor-heights executor))
+                 (is-equalp (mapcar #'octets->hex (list hash-two hash-one))
+                            (collecting-executor-certificates executor))
                  (is= 2 (follower-blocks follower))
                  (is= 2 (follower-certified follower)))
                (is-equalp '(:canonical-hash 2)
