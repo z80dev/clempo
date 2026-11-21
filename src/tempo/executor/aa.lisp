@@ -63,7 +63,8 @@
         (let* ((sload (+ (evm:gas-params-warm-read gp) (- (evm:gas-params-cold-sload gp) (evm:gas-params-warm-read gp))))
                (limit-slots (if (forks:fork>= fork :t3) (* 2 num-limits) num-limits))
                (sstores (+ 1 limit-slots (if (forks:fork>= fork :t3) (call-scope-storage-slots auth fork) 0)))
-               (sstore (+ (evm:gas-params-sstore-set gp)
+               ;; evm2's SstoreSetWithoutLoadCost: clempo.evm's sstore-set less the warm read.
+               (sstore (+ (- (evm:gas-params-sstore-set gp) (evm:gas-params-warm-read gp))
                           (if (forks:fork>= fork :t7) forks:+storage-credit-value+ 0)))
                (gas (+ sig-gas sload (* sstore sstores) 2000)))
           (when (clempo.signatures:key-authorization-witness auth)
