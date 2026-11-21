@@ -49,10 +49,12 @@
 PREVIOUS-HASH is the last accepted block hash. Only a not-yet-finalized suffix
 may be omitted. Invalid certificates or transport failures must signal."))
 
-(defstruct (follower (:constructor %make-follower (head rpc-url executor certifier archive-dir
-                                                   use-archive write-archive batch-size)))
+(defstruct (follower (:constructor %make-follower
+                         (head rpc-url block-source executor certifier archive-dir
+                          use-archive write-archive batch-size)))
   (head nil :type (or null head))
   (rpc-url nil :type (or null string) :read-only t)
+  (block-source nil :type (or null function) :read-only t)
   (executor nil :read-only t)
   (certifier nil :read-only t)
   (archive-dir nil :read-only t)
@@ -67,14 +69,17 @@ may be omitted. Invalid certificates or transport failures must signal."))
   (certified 0 :type integer)
   (chunks 0 :type integer))
 
-(defun make-follower (head &key (rpc-url (rpc:local-rpc-url)) executor certifier
+(defun make-follower (head &key (rpc-url (rpc:local-rpc-url)) block-source executor certifier
                              (archive-dir (archive:archive-dir)) use-archive write-archive
                              (batch-size 32))
-  "Anchor a new follower at HEAD. Without an EXECUTOR verify linkage and body roots only."
+  "Anchor at HEAD. Without an EXECUTOR verify linkage and body roots only.
+BLOCK-SOURCE, if supplied, takes FROM and COUNT and returns a simple-vector of
+COUNT raw block encodings. It replaces RPC body fetches, not RPC canonical heads."
   (check-type batch-size (integer 1 *))
+  (check-type block-source (or null function))
   (check-type head head)
   (let ((hash (head-hash head))) (check-type hash (simple-array (unsigned-byte 8) (32))))
-  (%make-follower head rpc-url executor certifier
+  (%make-follower head rpc-url block-source executor certifier
                   (namestring (uiop:ensure-directory-pathname archive-dir))
                   use-archive write-archive batch-size))
 
@@ -94,11 +99,17 @@ may be omitted. Invalid certificates or transport failures must signal."))
             (t (setf (follower-archive-cache follower) nil))))))
 
 (defun fetch-follow-batch (follower from count)
-  (let ((chunk (archived-chunk follower (chunk-first-for from))))
-    (if chunk
-        (let ((raw (make-array count)))
-          (dotimes (i count raw) (setf (svref raw i) (archive:chunk-block chunk (+ from i)))))
-        (archive:fetch-blocks from count :url (follower-rpc-url follower) :batch count))))
+  (let ((chunk (archived-chunk follower (chunk-first-for from)))
+        (source (follower-block-source follower)))
+    (cond (chunk
+           (let ((raw (make-array count)))
+             (dotimes (i count raw) (setf (svref raw i) (archive:chunk-block chunk (+ from i))))))
+          (source
+           (let ((raw (funcall source from count)))
+             (unless (and (simple-vector-p raw) (= count (length raw)))
+               (reject-block from :block-source "wrong block batch shape"))
+             raw))
+          (t (archive:fetch-blocks from count :url (follower-rpc-url follower) :batch count)))))
 
 (defun verify-follow-batch (from previous-hash expected raw)
   ;; Authenticate the entire batch before calling either downstream protocol.

@@ -143,8 +143,10 @@
                            (rpc-port 8545) (bind "127.0.0.1")
                            certify (cert-rpc rpc:+mainnet-rpc+)
                            repl-port repl-token-file (checkpoint-interval 0)
-                           (batch-size 32) (root-workers 4) once seconds)
+                           (batch-size 32) (root-workers 4) block-source once seconds)
   "Open a checked mainnet replay datadir, follow it with execution, and serve committed state.
+BLOCK-SOURCE optionally provides raw blocks instead of fetching them from UPSTREAM;
+UPSTREAM still supplies canonical header commitments.
 Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
   (check-type rpc-port (unsigned-byte 16))
   (check-type root-workers (integer 1 16))
@@ -172,7 +174,7 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
                                                                              :url cert-rpc)))
                   (follower (follow:make-follower head :rpc-url upstream :executor node :certifier certifier
                                                        :archive-dir archive-dir :use-archive t :write-archive t
-                                                       :batch-size batch-size))
+                                                       :batch-size batch-size :block-source block-source))
                   (started nil)
                   (next-report 0)
                   (max-lag 0)
