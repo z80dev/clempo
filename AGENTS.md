@@ -4,12 +4,12 @@ clempo is a Common Lisp (SBCL) implementation of the Tempo blockchain node. Its 
 
 ## Rules
 
-- **SBCL 2.6.8, nothing else.** No Quicklisp and no outside Lisp libraries. Allowed: the SBCL runtime and its contribs (`sb-bsd-sockets`, `sb-posix`, `sb-concurrency`, `sb-rotate-byte`, `sb-sprof`) and `curl` as the TLS transport (deviation 1). Anything else needs an entry in `docs/DEVIATIONS.md` with a reason.
+- **SBCL 2.6.8, no outside Lisp libraries.** No Quicklisp. Use the SBCL runtime and its contribs; record any extra runtime dependency in `docs/DEVIATIONS.md`.
 - **No outside code for the node's logic.** No code from goempo, zempo, geth, reth or revm, and no FFI to their libraries. Read the Rust reference as the specification. goempo's documents say where to look; never transliterate its Go.
 - **Lispy, on purpose** (GOAL.md, "What lispy means here"). Prefer one declarative form plus a macro over repeated code; context in special variables; conditions and restarts for recoverable failures; generic functions for backends and tracers; plain integers for 256-bit words.
 - **Fast where it matters.** Hot functions declare their types and use the build policy: `(declare #.clempo.base:*hot*)`. Check builds keep `safety 1` there; `CLEMPO_BUILD=release` drops to `safety 0`. Measure with `time` and `sb-sprof` before and after a speed change, and record the numbers.
 - **Invariants stay on.** Use `clempo.base:invariant` and `unreachable`; never `(declare (safety 0))` around code whose inputs come from the network without checking them first.
-- **Determinism.** Only directories marked `:io t` in `layers.sexp` may touch the clock, randomness, files, processes, sockets or threads directly. Everything else uses `clempo.io` (`*clock*`, `*entropy*`). `scripts/check-layers.lisp` enforces this and the import order.
+- **Determinism.** Use `clempo.io` for clock and entropy, and place direct file, process, socket and thread operations in the I/O boundary declared in `layers.sexp`. The layer checker reads source and checks symbol home packages, native I/O and deterministic iteration.
 - **Differential.** A result the reference can produce is tested against the reference: recorded RPC answers, traces, execution-spec-tests, the precompile oracle. A fixture records where it came from in a README next to it.
 - **Record deviations** from the reference in `docs/DEVIATIONS.md`, numbered, never renumbered.
 
@@ -23,8 +23,8 @@ One directory under `src/` per layer, in import order (`layers.sexp`). Each has 
 | `src/io` | clock, entropy, files, processes, http client |
 | `src/crypto` | keccak, sha2, ripemd160, blake2f, blake3, secp256k1, p256, bn254, bls12-381, kzg, ed25519, x25519, aes, chacha20-poly1305 |
 | `src/codec` | RLP, JSON, ABI, commonware codec |
-| `src/types` | headers, transactions (including Tempo's 0x76), receipts, blocks, signatures |
 | `src/trie` | Merkle Patricia trie, state root, proofs |
+| `src/types` | headers, transactions (including Tempo's 0x76), receipts, blocks, signatures |
 | `src/store` | the on-disk store |
 | `src/state` | the journaled world state the executor reads and writes |
 | `src/evm` | interpreter, gas schedule, Ethereum precompiles |
@@ -34,6 +34,7 @@ One directory under `src/` per layer, in import order (`layers.sexp`). Each has 
 | `src/sync` | JSON-RPC client, block fetch and archive, follow |
 | `src/rpc` | JSON-RPC server, tracers |
 | `src/sim` | seeded validator simulation |
+| `src/validator` | validator lifecycle, signing, network supervision and devnet |
 | `src/node` | the node binary |
 | `src/dev` | `clempo-dev` commands: every file here is loaded; add commands with `defcommand` |
 
@@ -42,7 +43,7 @@ One directory under `src/` per layer, in import order (`layers.sexp`). Each has 
 ```sh
 scripts/verify.sh                 # the gate: cold strict compile, all tests, layer check
 bin/clempo-dev help               # list commands
-bin/clempo-dev score -rung R1     # measure a rung
+bin/clempo-dev score -help       # find the inputs for a rung
 ```
 
 Run one layer's tests while iterating:

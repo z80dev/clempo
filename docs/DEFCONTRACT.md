@@ -4,7 +4,7 @@ Tempo's precompiles keep Solidity-compatible storage. The Rust reference declare
 
 ## Target: TIP20Token
 
-Must equal the solc layout the Rust repo tests against, `~/dev/tempo/crates/precompiles/tests/storage_tests/solidity/testdata/tip20.layout.json` (every `*.layout.json` there is a layout test for clempo too).
+The local [solc fixtures](../tests/tempo/contract/data/layouts/README.md) include `tip20.layout.json`; the layout tests compare the generated slot assignments with those fixtures.
 
 | Field | Type | Slot | Offset | Access |
 |---|---|---|---|---|
@@ -38,7 +38,7 @@ Must equal the solc layout the Rust repo tests against, `~/dev/tempo/crates/prec
   (reward-per-token u256)        ; rel slot 1
   (reward-balance   u256))       ; rel slot 2
 
-(defcontract tip20-token (:instances tip20-address-p)
+(defcontract tip20-token (:prefix "TOKEN")
   (roles              (mapping address (mapping b256 bool)))
   (role-admins        (mapping b256 b256))
   (name               string)
@@ -61,22 +61,22 @@ Must equal the solc layout the Rust repo tests against, `~/dev/tempo/crates/prec
   (user-reward-info   (mapping address user-reward-info)))
 ```
 
-Field options: `:since`, `:reserved`, `:doc`, and `:slot n` / `:base-slot n` matching Rust's `#[slot]` and `#[base_slot]` (a manual slot does not advance the automatic chain; a base slot resets it).
+Contract options are `:address` for a fixed instance and `:prefix` for accessor names (`t` uses the contract name, or supply a string). Field options are `:since`, `:reserved`, `:doc`, `:label`, and `:slot n` / `:base-slot n` matching Rust's `#[slot]` and `#[base_slot]` (a manual slot does not advance the automatic chain; a base slot resets it).
 
 ## Expansion
 
 - A layout object stored on the symbol: a vector of `(name type slot offset bytes access since)`. Everything else derives from it.
 - Slot constants such as `+tip20-token/balances+` = 9.
-- Inline accessors that return a place descriptor and touch no storage: `(balances self addr)`.
-- A load-time collision check over all fields, manual slots included.
+- Inline accessors that return a place descriptor and touch no storage: `(token-balances self addr)`.
+- A macroexpansion-time collision check over all fields, manual slots included.
 - Exporters: `(layout-json 'tip20-token)` in solc `storageLayout` shape, diffed against the fixtures; a Markdown slot table for `spec/`.
 
 Storage is touched only by explicit verbs, the same split as Rust's `.read()` / `.write()`:
 
 ```lisp
-(read  (balances self from))               ; exactly one SLOAD
-(write (balances self from) new-balance)   ; exactly one SSTORE (full slot)
-(write (transfer-policy-id self) id)       ; SLOAD + SSTORE (packed)
+(read  (token-balances self from))               ; exactly one SLOAD
+(write (token-balances self from) new-balance)   ; exactly one SSTORE (full slot)
+(write (token-transfer-policy-id self) id)       ; SLOAD + SSTORE (packed)
 ```
 
 No `setf`/`incf` on storage places: they hide a read. Common Lisp's left-to-right argument evaluation makes operation order a language guarantee.
@@ -88,38 +88,37 @@ Encoding rules (from the Rust source):
 - **Strings:** ≤31 bytes inline, left-aligned, `length*2` in the low byte. Longer: `length*2+1` in the base slot, data at `keccak256(slot) + i`.
 - **Structs:** start on a fresh slot and take whole slots, packed internally by the same rule.
 
-`read`/`write` go through the special variable `*storage*` (Rust's thread-local `StorageCtx`). Backends implement `sload`/`sstore`/`tload`/`tstore`/`emit-log`/`deduct-gas`/`spec` as generic functions:
+`read`/`write` use the backend bound to `clempo.contract:*storage*`. The storage
+protocol includes `backend-sload`, `backend-sstore`, `backend-tload`,
+`backend-tstore`, `backend-emit-log`, `backend-deduct-gas` and `backend-refund-gas`.
 
-- `evm-storage`: journaled and metered over `clempo.state` (warm/cold costs exactly as `crates/precompiles/src/storage/evm.rs`).
-- `hashmap-storage`: unit tests (Rust's `storage/hashmap.rs`).
-- `recording-storage`: emits the operation trace for differential comparison.
+- `metered-storage`: applies gas, static and warm/cold rules over a host that implements `host-sload`, `host-sstore` and related operations.
+- `hashmap-storage`: a backend for unit tests.
+- `recording-storage`: records the operation trace for differential comparison.
 
 ## Calls and fork gating
 
 ```lisp
-(defcall tip20-token transfer ((to address) (amount u256))
-    (:sol "transfer(address,uint256)" :returns bool :mutates t)
-  ...)
+(defcall tip20-token transfer* ((to address) (amount u256))
+    (:sol "transfer(address to, uint256 amount)" :returns "bool" :mutates t)
+  (transfer self sender to amount))
 
-(defcall tip20-token logo-uri ()
-    (:sol "logoURI()" :returns string :since :t5)
-  (read (logo-uri self)))
+(defcall tip20-token logo-uri* ()
+    (:sol "logoURI()" :returns "string" :since :t5)
+  (logo-uri self))
 ```
 
-`defcall` registers selector, mutability and fork gate; the generated dispatcher keeps the order of `tip20/dispatch.rs`: charge input cost, check initialised, look up selector, reject static calls for mutating methods, decode, run, encode.
+`defcall` registers the selector, mutability and fork gate (`:since` inclusive, `:until` exclusive). The signature specifies the ABI input types; `:returns` is a type string or a list of them. The generated function binds `self`, `sender` and the decoded arguments. `run-calls` checks the selector and its fork window, decodes, rejects static calls to mutating methods, runs the body, then ABI-encodes its return values. A precompile can perform additional checks before calling `run-calls`.
 
 Fork branches use one macro so they are queryable:
 
 ```lisp
+;; Inside TIP-20 transfer, before reward updates:
 (fork-if (:before :t8)
-    (let ((balance (read (balances self from))))
+    (let ((balance (balance-of token from)))
       (when (> amount balance)
-        (revert 'insufficient-balance balance amount (address self)))
-      (handle-rewards-on-transfer self from (target to) amount)
-      (write (balances self from) (- balance amount)))
-    (progn
-      (handle-rewards-on-transfer self from (target to) amount)
-      (decrement-balance self from amount)))
+        (revert 'insufficient-balance balance amount token))
+      balance))
 ```
 
-Every `fork-if`, `:since` field and `:since` call records itself, so `(fork-sites :t8)` lists what T8 changed. `revert` signals a condition the dispatcher turns into an ABI-encoded revert; out-of-gas is a separate halt condition.
+`fork-if`, fork-gated fields, and `defcall` fork windows register source locations; `(fork-sites :t8)` lists the recorded T8 sites. `revert` signals a condition encoded as an ABI revert; out-of-gas is a separate halt condition.

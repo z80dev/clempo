@@ -1,42 +1,42 @@
 # clempo
 
-A [Tempo](https://github.com/tempoxyz/tempo) node in Common Lisp. It replays all of mainnet from genesis with every state root checked, follows the live tip with every finalization certificate verified, answers the reference node's JSON-RPC methods identically, and runs as a validator alongside Rust validators. It uses nothing outside SBCL: no EVM, trie, crypto or networking library, and no foreign code.
+A [Tempo](https://github.com/tempoxyz/tempo) node in Common Lisp. clempo has replayed mainnet from genesis through block 50,049,999 with every state root checked, followed the live tip with finalization verification, compared JSON-RPC answers against the Rust node, and finalized blocks as a signer alongside Rust validators on a devnet. Its EVM, trie, crypto and protocol implementations use no outside libraries.
 
-clempo is an independent implementation of the [Tempo reference node](https://github.com/tempoxyz/tempo), alongside others such as [goempo](https://github.com/gakonst/goempo) (Go). It climbs goempo's ladder of rungs against the same reference ([GOAL.md](GOAL.md)), with every number in [FRONTIER.md](FRONTIER.md) backed by a command you can re-run.
+clempo is an independent implementation of the Tempo reference node, alongside others such as [goempo](https://github.com/gakonst/goempo) (Go). It measures progress against the same reference ([GOAL.md](GOAL.md)); [FRONTIER.md](FRONTIER.md) records the revisions, inputs and commands behind the results.
 
 ## Status
 
 | Rung | What is checked | clempo | goempo |
 |---|---|---|---|
-| R1 Decode | blocks decoded and re-encoded byte for byte; hashes, roots and every sender recovered | 673/673 sampled blocks across T0..T13, and all 50,050,000 mainnet blocks against the reference | 632/632 sampled |
+| R1 Decode | sampled block/receipt commitments and sender recovery; separate full-archive raw block scan | 673/673 sampled across T0..T13; 50,050,000/50,050,000 mainnet blocks in the raw scan | 632/632 sampled |
 | R2 Genesis | genesis state root and block hash | mainnet and moderato | mainnet and moderato |
 | R3 Replay | executing mainnet from genesis: gas, receipts root, bloom, state root of every block | **50,049,999** (end of the local archive), no healed blocks | 49,399,999 |
 | R3e EVM | execution-spec-tests v5.4.0 state tests, Istanbul..Osaka | 61,903/61,903 | 61,903/61,903 |
 | R3p Precompiles | reference-oracle corpus of Tempo precompile calls, T0..T14 | 4,986/4,992 | 4,986/4,992 |
-| R4 Follow | live tip: executed, certified, RPC served, for an hour | yes: 47,451 blocks executed and certified, peak lag 4 | yes |
-| R5 RPC | recorded reference answers compared with clempo's | 154/154 methods, 14,287/14,287 cases | 111/111 methods, 3,378 cases |
+| R4 Follow | live tip: executed, certified, RPC probed independently | 47,451 blocks executed and certified in the historical hour run; peak sampled lag 4 | yes |
+| R5 RPC | recorded reference answers, separated by comparison mode | see the [RPC evidence](FRONTIER.md#evidence) for verdicts and coverage | see [goempo's frontier](https://github.com/gakonst/goempo/blob/main/FRONTIER.md) |
 | R6 Validator | Simplex + DKG; clempo validators with Rust validators | seeded sims (4/5/7 validators, faults, reshares); devnet where clempo signers are required for quorum | the same |
-| R7 Speed | blocks with state root per second, against the Rust node on the same host | 6.5× (early), 1.6× (busy), 2.8× (recent) wall throughput | 9.2×, 0.64×, 2.5× |
+| R7 Speed | root-checked execution, vs Rust on the same Mac | 6.65× (Early), 1.58× (Busy), 2.86× (Recent) timed wall throughput | 17.65× (Early); Busy and Recent not yet measured on this host |
 
-The six R3p differences are T14 keychain grants where clempo follows a newer reference commit than the corpus. R5 compares a larger corpus than goempo's; its known gaps are listed under [Limitations](#limitations). R7 compares wall time on one Apple Silicon host; clempo checks every block's root, the Rust import checks chunk-terminal roots, and clempo uses more CPU than Rust on the recent range (22.6 s against 21.4 s). Details and commands: [FRONTIER.md](FRONTIER.md), [docs/BENCH.md](docs/BENCH.md).
+The six R3p differences are T14 keychain grants where clempo follows a newer reference commit than the corpus. R7 ratios use timed replay/import, not end-to-end command time: clempo and goempo check every root; Rust checks import-chunk terminal roots. Clempo used more CPU than Rust on Busy (58.20 s vs 45.76 s), and less on Early and Recent. For command wall time, setup, RSS and methodology, see [docs/BENCH.md](docs/BENCH.md) and [FRONTIER.md](FRONTIER.md).
 
 ## Why Lisp
 
 The bet was that a node in Lisp could be smaller and easier to keep in step with a fast-moving protocol, without being slower. The evidence so far:
 
-**The protocol is written as declarations, and the code, tests and documents come from them.** About 50,000 lines of Lisp (`src/`, dev tools included) cover what goempo does in about 71,000 lines of Go.
+**Protocol declarations generate code and documentation.** `scripts/metrics.sh` reports current source size; lines of code are not a measure of protocol coverage.
 
-| Form | Count | One declaration generates |
-|---|---|---|
-| `defop` | 81 | an EVM opcode: gas, stack effects, the interpreter's dispatch case, and the compiled code for it |
-| `defrlp` | — | struct, decoder, encoder and field docs for headers, transactions and receipts |
-| `defcontract` | 19 | a precompile's Solidity-compatible storage layout, typed storage places, layout tests against solc's output |
-| `defcall` | 209 | a precompile method: selector, ABI decoding, mutability, fork gate, dispatch in the reference's order |
-| `fork-if`, `:since` | 117 | a hardfork branch that records where it is |
-| `defrpc` | 127 | a JSON-RPC method's parameter parsing and the reference's exact error texts |
-| `defcodec`, `defprecompile`, `defscenario` | — | commonware wire codecs, Ethereum precompiles, seeded validator simulations |
+| Form | Generates |
+|---|---|
+| `defop` | interpreter dispatch and compiled code from opcode, gas and stack metadata |
+| `defrlp` | structs, decoders, encoders and field metadata |
+| `defcontract` | Solidity-compatible storage layout and typed storage places |
+| `defcall` | a precompile method's selector, ABI, mutability, fork gate and dispatch |
+| `fork-if`, `:since` | code and source locations for a declared hardfork change |
+| `defrpc` | RPC parameter parsing and error handling |
+| `defcodec`, `defprecompile`, `defscenario` | commonware wire codecs, Ethereum precompiles and seeded validator simulations |
 
-From the same forms, `bin/clempo-dev spec` writes `spec/`: every precompile's slot table and ABI, and for every hardfork the list of the 196 places in the code it changes. The gate fails if `spec/` drifts from the code. "What did T8 change?" is a file, not an archaeology project:
+`bin/clempo-dev spec` writes precompile slot tables and ABIs, and an index of the fork sites recorded by the declarative forms. The gate fails if `spec/` drifts from the code. A layout excerpt:
 
 ```lisp
 ;; src/tempo/precompiles/tip20.lisp (abridged)
@@ -62,7 +62,7 @@ From the same forms, `bin/clempo-dev spec` writes `spec/`: every precompile's sl
 **Native code where it counts, still written in Lisp.**
 - Keccak-f and SHA-256 use the arm64 crypto instructions through SBCL's `define-vop`, with portable Lisp as the fallback: 799 MB/s and 2.7 GB/s.
 - secp256k1, P-256, P-384 and BLS12-381 run on typed limb arithmetic that allocates nothing per call. ecrecover takes 45 µs and a BLS signature check 2.7 ms.
-- Hot EVM contracts are translated from bytecode into Lisp and compiled with SBCL's own `compile` while the node runs. Small-word arithmetic runs 7.7× faster than interpreted, and the whole state-test suite passes with every contract compiled.
+- The optional EVM compiler translates bytecode into Lisp and uses SBCL's own `compile`; the interpreter is also measured and tested independently.
 
 **Context lives in special variables.** The executor, the RPC threads, the tests and the simulator rebind `*world*`, `*spec*`, `*storage*`, `*tracer*`, `*clock*` and `*entropy*`. The simulator is deterministic because the consensus code takes its clock and randomness from `*clock*` and `*entropy*`, and `scripts/check-layers.lisp` forbids any other route in the non-IO layers.
 
@@ -70,11 +70,11 @@ From the same forms, `bin/clempo-dev spec` writes `spec/`: every precompile's sl
 
 ## Quick start
 
-Requirements: [SBCL](https://www.sbcl.org) 2.6.8 (`brew install sbcl` on macOS), `curl`, `git`. The gate passes on macOS on Apple Silicon and on Linux x86-64. On Linux we also verified mainnet and Moderato genesis, all 61,903 execution-spec-tests v5.4.0 state cases, and mainnet replay from genesis through block 1,000,000 with every state root checked. See [FRONTIER.md](FRONTIER.md#evidence) for commands and timings.
+Requirements: [SBCL](https://www.sbcl.org) 2.6.8 and `git`. The gate has passed on Apple Silicon macOS and Linux x86-64. Linux evidence also covers mainnet and Moderato genesis, 61,903 execution-spec-tests v5.4.0 state cases and mainnet replay to block 1,000,000. See [FRONTIER.md](FRONTIER.md#evidence) for commands and timings.
 
 ```sh
-git clone <this repository> clempo && cd clempo
-scripts/verify.sh            # the gate: cold strict compile, ~590 tests, layer check, spec drift (about a minute)
+git clone https://github.com/z80dev/clempo.git && cd clempo
+scripts/verify.sh            # cold strict compile, tests, layer check and spec drift
 bin/clempo-dev help          # every tool
 ```
 
@@ -82,11 +82,14 @@ The rungs need mainnet data, and the public RPC is rate limited. For anything be
 
 ```sh
 export CLEMPO_RPC=http://127.0.0.1:8545
+STATE="$PWD/run/state"
+REPORT="$PWD/run/replay.json"
 bin/clempo-dev genesis                         # R2: state root of block 0
 bin/clempo-dev fetch-range -to 50049999        # raw block archive, ~46 GB under ~/cache/clempo/mainnet
-CLEMPO_BUILD=release bin/clempo-dev replay -datadir ~/clempo-state -checkpoint 500000   # R3: hours, not minutes
+CLEMPO_BUILD=release bin/clempo-dev replay -datadir "$STATE" -checkpoint 500000 -result "$REPORT"
 bin/clempo-dev certify -from 49995000 -to 50015000   # finalization certificates
-bin/clempo-dev score                            # every rung
+bin/clempo-dev score -help                    # inputs for each rung
+bin/clempo-dev score -rung R3 -result "$REPORT" -datadir "$STATE" -json
 ```
 
 Running the node, its RPC server and the REPL: [docs/NODE.md](docs/NODE.md). Validators on a local devnet with Rust validators: [docs/DEVNET.md](docs/DEVNET.md).
@@ -103,7 +106,7 @@ base io crypto codec trie types store state evm tempo consensus p2p sync rpc sim
 |---|---|
 | `crypto` | Keccak, SHA-2, RIPEMD-160, BLAKE2f/BLAKE3, AES, ChaCha20-Poly1305, X25519, Ed25519, secp256k1, P-256, P-384, BN254, BLS12-381, KZG, modexp |
 | `codec`, `types` | RLP, JSON, ABI, commonware codec; headers, every Tempo transaction and signature kind, receipts |
-| `trie`, `store`, `state` | Merkle Patricia trie and proofs, the on-disk state store with checkpoints and history, the journaled world state |
+| `trie`, `store`, `state` | Merkle Patricia trie and proofs, persistent checkpoints and history with in-memory working state, journaled world state |
 | `evm` | interpreter, compiler, gas schedules Istanbul..Osaka, Ethereum precompiles, geth and parity tracers |
 | `tempo` | chain specs, hardforks, `defcontract`, every Tempo precompile, the block executor, transaction pool, payload builder |
 | `consensus`, `p2p`, `validator`, `sim` | certificates, Simplex, DKG; devp2p and commonware networking; the validator; the seeded simulator |
@@ -111,15 +114,15 @@ base io crypto codec trie types store state evm tempo consensus p2p sync rpc sim
 
 ## Limitations
 
-- **R5 is not fully closed.** Three reference methods are not served (`consensus_subscribe` and `consensus_unsubscribe` over WebSocket, `admin_clearTxpool`). `debug_executionWitness` matches the reference's shape but omits the extra trie nodes it includes. Some corpus cases recorded the reference's own database timeout and are being re-recorded.
-- **Deviations from the reference** are numbered in [docs/DEVIATIONS.md](docs/DEVIATIONS.md). Examples: TLS goes through `curl`, and EVM memory past 4 GiB is treated as out of gas.
+- **RPC coverage is not protocol equivalence.** The recorded corpus distinguishes values, errors, and live or node-local responses. The [frontier](FRONTIER.md#evidence) records the scope; behavior differences are listed in [docs/DEVIATIONS.md](docs/DEVIATIONS.md).
+- **Execution and validator scope.** Replay and live-hour evidence are for the recorded mainnet ranges; mixed-validator evidence is for local devnets, not mainnet signing. See [docs/DEVNET.md](docs/DEVNET.md).
 - **Constant time.** Secret-key operations (signing, ECDH) are not hardened against timing or cache side channels.
 - **Not for production use.** Treat clempo as an independent implementation for testing and research. It has not been audited, and it has never run as a mainnet validator.
 - **Linux coverage is limited.** The full mainnet replay, live following, mixed-validator devnet, and Rust speed comparisons were run on Apple Silicon, not on Linux.
 
 ## How it was built
 
-A lead agent and a swarm of agents wrote clempo in about eight hours. Each agent owned one directory and pushed small verified slices, and every claim was checked against the Rust reference node. [docs/HOW-IT-WAS-BUILT.md](docs/HOW-IT-WAS-BUILT.md) tells the story, [AGENTS.md](AGENTS.md) and [LOOP.md](LOOP.md) give the rules, and `scripts/metrics.sh` prints the current numbers.
+Agents developed clempo in independent slices and recorded verification against the Rust reference node. [docs/HOW-IT-WAS-BUILT.md](docs/HOW-IT-WAS-BUILT.md) describes the process. [AGENTS.md](AGENTS.md) and [LOOP.md](LOOP.md) give the development rules; [docs/METRICS.md](docs/METRICS.md) explains the current measurements.
 
 ## License
 

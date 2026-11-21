@@ -1,8 +1,8 @@
 # DKG test data
 
-Recorded data only (no code). Copied from goempo's checked-in fixtures
-(goempo's repository, `internal/...`) and the tempo checkout (`~/dev/tempo`, commit
-568b4fb4258c, 2026-11-20). Each file's origin, as recorded by its source:
+Recorded data only (no code), from [goempo](https://github.com/gakonst/goempo)
+fixtures and [Tempo `568b4fb4258c`](https://github.com/tempoxyz/tempo/tree/568b4fb4258c).
+Each fixture's origin:
 
 - `mainnet_block_42098399_extradata.hex`: extraData of mainnet block 42098399
   (eth_getBlockByNumber), the boundary DKG outcome that installs epoch 1949.
@@ -23,12 +23,11 @@ Recorded data only (no code). Copied from goempo's checked-in fixtures
   messages (`Dealer` = DealerPubMsg || DealerPrivMsg, `Ack` = PlayerAck, each behind the epoch
   mux varint) for a fresh round (epoch 1) and a reshare round (epoch 2), every dealer to every
   player, plus each dealer's SignedDealerLog. From goempo `internal/dkg/testdata`.
-- `mainnet-network-identity.json`, `testnet-network-identity.json`: tempo's published network
-  identities (`~/dev/tempo/*.json`).
-- `devnet_r6_blocks.jsonl`: an all-Rust 4-validator Tempo devnet (P2PAgent's
-  `scripts/devnet`, tempo 568b4fb425 release binary, `generate-localnet --seed 42`, hardfork
-  T13, epoch length 60, T12 from genesis, no T15), recorded 2026-11-21 under
-  `~/cache/clempo/devnet-r6-1795238891/baseline-with-dkg.jsonl`: for heights 0..145 the
+- `mainnet-network-identity.json`, `testnet-network-identity.json`: identities published in
+  [tempoxyz/tempo](https://github.com/tempoxyz/tempo).
+- `devnet_r6_blocks.jsonl`: an all-Rust 4-validator Tempo devnet (`scripts/devnet`,
+  Tempo `568b4fb425` release binary, `generate-localnet --seed 42`, hardfork T13,
+  epoch length 60, T12 from genesis, no T15), recorded 2026-11-21. Contains, for heights 0..145, the
   finalized block hash and extraData, identical on all four validators' RPCs. Genesis carries
   the epoch-0 outcome, blocks 32..44 and 92..98 signed dealer logs, 59 and 119 the boundary
   outcomes.

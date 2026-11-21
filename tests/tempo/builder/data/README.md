@@ -4,9 +4,8 @@
 carries a user transaction (26 blocks, 3211 through 3874), the raw block and the raw header of
 its parent, one `(:number N :parent-header "0x…" :block "0x…")` form per line.
 
-Source: the raw block archive `~/cache/clempo/mainnet/chunk-0000000000.blk`
-(`clempo.archive`, filled from `debug_getRawBlock` on the mainnet reference node), copied
-byte for byte on 2026-11-21. No transaction, header or block was altered.
+Source: the raw archive chunk starting at block 0, filled from `debug_getRawBlock`
+on the mainnet reference node on 2026-11-21. No transaction, header or block was altered.
 
 Checked while extracting (the script asserted each of these):
 

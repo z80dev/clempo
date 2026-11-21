@@ -1,6 +1,6 @@
 # Frontier
 
-Paths under `logs/` are the measuring host's local run logs and result files; they are not part of the repository. Each evidence paragraph gives the command that regenerates them.
+These measurements are revision-specific. Paths under `logs/` describe local artifacts, not files in the checkout; replace them with paths to your own run directory. See [metric definitions](docs/METRICS.md) before comparing rungs or clients.
 
 | Rung | Score | Commit | Date |
 |---|---|---|---|
@@ -10,10 +10,10 @@ Paths under `logs/` are the measuring host's local run logs and result files; th
 | R3 Replay | **50,049,999** (the archive tip; goempo's frontier 49,399,999): every mainnet block 1..50,049,999 executed from genesis matches gas used, receipts root, logs bloom and state root, state on disk, no heals, no skips, through every fork T0..T13 | `d1d277e` (replay), `0fad06f` | 2026-11-21 |
 | R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `750c66b` | 2026-11-21 |
 | R3p Precompiles | 4,986/4,992 (goempo's frontier; every Tempo precompile T0..T14; the 6 differences are T14 keychain grants where clempo follows tempo c8b89f9, newer than the corpus: +2,600 gas root-retirement probe) | `fd2d4cf` | 2026-11-21 |
-| R4 Follow | yes: 47,451 mainnet blocks executed and certified through 50,097,450 from the unhealed R3 checkpoint; 62m10s of independently sampled live RPC after reaching the moving tip, peak lag 4 blocks, p95 3, no incorrect responses | `15c118d` | 2026-11-21 |
-| R5 RPC | **154/154 methods, 14,287/14,287 cases (100%)**: blocks 5,126/5,126, calls 853/853, consensus 9/9, envelope 50/50, logs 508/508, state 3,542/3,542, static 119/119, success 25/25, tempo-params 101/101, traces 2,927/2,927, txs 1,027/1,027; 152/156 reference methods served. 37 debug_intermediateRoots cases whose recorded answer is the reference's own MDBX read timeout (-96000) are classed reference-timeout (every one of 19 re-sent at 1 thread answered in 60–284 s and clempo matched it; see evidence) | `4c2db4d` | 2026-11-21 |
-| R6 Validator | Sims: 4, 5 and 7 validators, three epochs each, every reshare concluded through per-node DKG managers. Live Rust devnet: one Clempo signer necessary through two reshares, two Clempo signers necessary through three | `b680aaf`, `dbe14d1` | 2026-11-21 |
-| R7 Speed | Clempo vs Rust, wall / CPU seconds: **Early** 1..1,000,000 **9.01 / 12.73 vs 58.22 / 37.25** (paired, 6.46× wall throughput); **Busy** 9,890,000..9,909,999 **22.59–22.77 / 58.14–58.87 vs 36.00 / 43.22** (historical, unpaired between clients, 1.58–1.59×); **Recent** 49,410,000..49,449,999 **16.76–17.24 / 22.39–22.85 vs 47.22 / 21.41** (historical Rust unpaired, 2.74–2.82× timed wall throughput, 1.05–1.07× CPU). Native P-384 is 198 µs/zero consing with scratch. Clempo checks every root; Rust checks import-chunk terminal roots. [RSS, GC, commands, and profiles](docs/BENCH.md#results-on-the-shared-dev-host). | `40521c1`, `15c118d`, `b81e3e5`, `828674f` | 2026-11-21 |
+| R4 Follow | Historical hour: 47,451 mainnet blocks executed and certified through 50,097,450; 62m10s independently sampled RPC after catchup, peak lag 4, p95 3, no incorrect responses. See the rerun command and original verdict below. | `15c118d` | 2026-11-21 |
+| R5 RPC | See the RPC evidence below. The legacy aggregate included negative-test labels, shape-only cases and reference timeouts; it does not establish value parity. | `4c2db4d` (legacy report) | 2026-11-21 |
+| R6 Validator | Sims: 4, 5 and 7 validators, three epochs each. Mixed devnet: one clempo signer necessary through two reshares, two clempo signers necessary through three. | `b680aaf`, `dbe14d1` | 2026-11-21 |
+| R7 Speed | Same Mac, timed wall / CPU seconds, clempo vs Rust: Early **8.83 / 9.65 vs 58.71 / 36.41**; Busy **22.75 / 58.20 vs 35.93 / 45.76**; Recent **19.97 / 23.82 vs 57.13 / 24.42**. Goempo Early was **3.33 / 10.21**; see the [benchmark methodology and revisions](docs/BENCH.md). Root checks differ: every block in clempo/goempo, chunk-terminal in Rust. | See benchmark report | 2026-11-21 |
 
 ## Evidence
 
@@ -79,8 +79,8 @@ slots 2 and 3 authored 71 and 68 finalized proposals and kept signing
 through all three reshares (59, 119 and 179). Every Clempo signer was
 necessary for quorum and was selected as an on-chain dealer at each boundary.
 `CLEMPO_BUILD=release bin/clempo-dev score -rung R6-devnet -json -one "$Q1"
--two "$Q2"` returned `2`; reports (`mixed-proof.jsonl`) and node logs are
-under `logs/devnet/pushed-main-quorum-{1,2}/`. On the same
+-two "$Q2"` returned `2`; `Q1` and `Q2` are the `mixed-proof.jsonl` reports
+from the one- and two-clempo-signer runs above. On the same
 commit, `scripts/verify.sh` reported 470 passed, 0 failed, 2 skipped
 (pool inline-grant checks), and zero layer violations. See `docs/DEVNET.md`.
 
@@ -103,12 +103,17 @@ no transaction was sent. `score -rung R2 -json` also matched the Moderato
 genesis state root and block hash against live RPC. The JSON report is in
 `logs/public-p2p/moderato-3000.log`; see `docs/DEVNET.md`.
 
-R4 live hour (`15c118d`): `CLEMPO_RPC=http://127.0.0.1:8545
-logs/r4/run-hour.sh logs/r3/dd
-logs/r4/run-20261121-093831` cloned the unhealed R3 datadir
-at 50,049,999 and built a standalone release node. It served local JSON-RPC
-on port 18545 while following the archive RPC with `--certify --seconds 3840`,
-verifying the public mainnet RPC's finalization certificates. The node
+R4 hour (historical run at `15c118d`): the harness cloned the unhealed R3
+datadir at 50,049,999 and built a release node. It served local JSON-RPC
+while following the archive RPC with `--certify --seconds 3840`,
+using the public mainnet finalization endpoint. To rerun with the tracked harness:
+
+```sh
+CLEMPO_RPC=http://127.0.0.1:8545 bin/clempo-dev score -rung R4 \
+  -datadir "$STOPPED_STATE" -run-dir "$NEW_RUN_DIR" -json
+```
+
+The historical node
 executed and certified all 47,451 blocks through 50,097,450, checking gas used,
 receipts root, logs bloom and state root at each block.
 
@@ -117,11 +122,10 @@ Over the next 3,730.456 s, 744 of 746 attempts matched the canonical block
 hash, state root and live EIP-2935 parent-hash storage slot; two attempts
 returned errors, none returned an incorrect value, and the longest gap
 between successful samples was 10.020 s. Observed lag was at most 4 blocks
-(p95 3). The raw `r4.json` says `no` solely because the harness imposed a
-final-sample lag limit of 2 blocks that GOAL does not require: that sample
-saw 3, and the node finished at 50,097,450, one block past the sample's
-upstream head. The node exited on its timer. Raw `r4.json`, `node.json`,
-`node.log` and `rpc.jsonl` are in that run directory.
+(p95 3). The historical harness returned `no`: its extra end-sample cutoff
+was 2 blocks, and its last sample saw 3. The committed harness uses the
+criteria in [GOAL.md](GOAL.md), without an extra cutoff. It writes `r4.json`,
+`node.json`, `node.log` and `rpc.jsonl` in the supplied run directory.
 
 R4 certificates (bba3dfe): `CLEMPO_RPC=http://127.0.0.1:8545 CLEMPO_BUILD=release bin/clempo-dev certify -from 49995000 -to 50015000 -threads 16`
 verified all 20,001 consecutive mainnet finalization certificates across the epoch 2314/2315
@@ -191,7 +195,7 @@ Per step, each paired Clempo A/B on the previous step:
 | 2 GiB nursery (GC 1.78 -> 1.19 s) | 26.53 / 26.73 / 27.24 | 26.24 / 26.37 |
 | memoized struct fields, last warm address | 26.41 / 26.47 | 25.45 / 25.68 |
 | 0x76 unique ids on recovery threads | 25.77 / 25.70 | 24.92 / 24.74 |
-| CurvesAgent `217b0c1` (CPU 79.4 -> 57.8 s) | 24.81 / 24.71 | 24.53 / 24.73 |
+| Native recovery `217b0c1` (CPU 79.4 -> 57.8 s) | 24.81 / 24.71 | 24.53 / 24.73 |
 
 The first three rows are single runs taken while the host load was changing. Parallel
 storage-trie hashing (`7075d08`) was reverted: paired runs with 1 vs 4 state-root
@@ -549,14 +553,14 @@ outside this archive check, so it does not replace sampled R1 or score R7.
 Result: `logs/r1-archive/full-1795243500.json`; its `.failures.jsonl`
 is empty, with per-chunk evidence in `.chunks.jsonl` and console output in `.log`.
 
-R3 = 50,049,999 (2026-11-21): `CLEMPO_BUILD=release bin/clempo-dev replay -datadir logs/r3/dd -checkpoint 500000 -diagnose -result logs/r3/replay.json` reached the end of the archive. The final segment (from the 14.7M checkpoint) ran 35,354,196 blocks and 18,773,211 transactions in 9,612.5 s (3,678 blocks/s, 280 Mgas/s) on the shared host; the datadir's replay.sexp records no heals and no skips since genesis. `bin/clempo-dev score -rung R3 -json` reports 50049999.
+R3 = 50,049,999 (2026-11-21): `CLEMPO_BUILD=release bin/clempo-dev replay -datadir "$STATE" -checkpoint 500000 -diagnose -result "$REPORT"` reached the end of the archive. The final segment (from the 14.7M checkpoint) ran 35,354,196 blocks and 18,773,211 transactions in 9,612.5 s (3,678 blocks/s, 280 Mgas/s); `replay.sexp` records no heals and no skips since genesis. `bin/clempo-dev score -rung R3 -result "$REPORT" -datadir "$STATE" -json` reads the replay report and checks the stopped datadir's head against the archive.
 
-R5 = 154/154 methods, 14,287/14,287 cases (2026-11-21, `4c2db4d`): `CLEMPO_HEAP=40000 CLEMPO_RPC=http://127.0.0.1:8545 bin/clempo-dev rpcdiff` (880 s, 16 threads, in-process server over the archive and the history 0..50,049,999). What closed the last 140 cases:
+R5 historical run (2026-11-21, `4c2db4d`): `CLEMPO_HEAP=40000 CLEMPO_RPC=http://127.0.0.1:8545 bin/clempo-dev rpcdiff` ran in 880 s with 16 threads and a complete history through block 50,049,999. Its legacy aggregate of 154 labels and 14,287 cases is not a value-match score. Technical observations from the run:
 - State tries (src/rpc/tries.lisp): the archive backend loads clempo.store checkpoints (the history build's job-N.state files at 13,999,999 .. 50,049,999, or `$CLEMPO_TRIE_STATE`) and moves a state database between blocks with clempo.history's changed keys (`history-map-changes`; across the three gap seeds 14M/16M/20M, whose deletions the history does not list, every key is re-read). Every move is checked against the header's state root. Measured: checkpoint load 14 s (356k accounts, 10.7M slots, 1.4 GB heap), moves of 10k/50k/400k blocks 1.3–9.5 s. A pinned head state serves eth_getProof/getAccount/getMultiProof at "latest".
 - debug_intermediateRoots: the block re-executed on the parent's trie state with the state root after each transaction (`executor:flush-transactions`; a test checks flushing keeps gas, receipts, bloom and root). 132 cases in ~24 min at 16 threads, one cursor (the cases jump across 0..50M).
 - debug_stateRootWithUpdates: reth's TrieUpdates (account_nodes/removed_nodes/storage_tries) emulated from reth's walker and alloy's HashBuilder store rules over `trie:trie-node-at`; both recorded cases identical.
 - debug_executionWitness*: a recording backend (reth CacheDB's reads), proofs, codes, keys, headers (live, shape); debug_traceBlock over raw RLP; trace_replayTransaction of an unknown hash answers null.
-- Reference timeouts: 56 debug_intermediateRoots cases were recorded as the reference's `read transaction has been timed out (-96000)` (recorded at 16 threads; blocks 1..30,383,385 while blocks 20.6M+ answered). Re-sent one at a time (read-only, 1 thread) the reference answered all 19 tried in 60–284 s; those answers replaced the errors in corpus-traces.jsonl (`"rerecorded"`, raw in ~/cache/clempo/rpc/rerecord-intermediateRoots-20261121.jsonl). The remaining 37 (≈2 h of reference time) are classed `reference-timeout` in src/dev/rpcdiff.lisp: they match an answer with a result, since the reference recorded none.
+- Reference timeouts: 56 `debug_intermediateRoots` cases originally returned MDBX error `-96000` at concurrency 16. Re-sent one at a time, all 19 tried answered in 60–284 s; those answers replaced the errors. The other 37 in this historical report had no result to compare and do not demonstrate parity.
 
 R7 native P-384 (`828674f`): uncached verification **1,476.173 -> 198.248 µs CPU**
 and **2,930,154 -> zero bytes/call** with caller scratch. The bounded opt-in
@@ -571,4 +575,4 @@ Isolated Recent pairs against parent `4c2db4d` completed every comparison on
 Sampled inclusive P384 share fell 37.3% -> 0.8%. Evidence:
 `logs/p384/recent-{A1,A2,B1,B2}/replay.json`.
 
-Lead audit (2026-11-21, dc82753+): re-scored on main with `CLEMPO_RPC=http://127.0.0.1:8545 CLEMPO_BUILD=release bin/clempo-dev score -rung <R> -json`: R1 673/673, R2 yes, R3 50049999, R3e 61903/61903, R3p 4986/4992, R6 sim yes (r6-4 71/71, r6-5 73 certificates at height 74, r6-7 104/104, every ceremony 3/3; 20 s for all three scenarios now that BLS12-381 runs on limb arithmetic, against 13 minutes before). `scripts/verify.sh`: 589 passed, 0 failed, 0 layer violations.
+Gate and rung check (`dc82753` series, 2026-11-21): R1 673/673 sampled, R2 yes, R3 report 50,049,999, R3e 61,903/61,903, R3p 4,986/4,992, and R6 simulation passed. `scripts/verify.sh`: 589 passed, 0 failed, 0 layer violations.

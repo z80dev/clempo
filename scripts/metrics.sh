@@ -15,6 +15,6 @@ for d in $(sed -n 's/.*(:dir "\([a-z0-9]*\)".*/\1/p' layers.sexp); do
   [ -d "src/$d" ] && printf "%-12s %6s\n" "$d" "$(lines "src/$d")"
 done
 echo
-echo "rung       latest score (FRONTIER.jsonl)"
-jq -r -s 'group_by(.rung) | map(last) | sort_by(.rung) | .[] | "\(.rung)\t\(.score)"' FRONTIER.jsonl |
+echo "rung       latest recorded score (FRONTIER.jsonl)"
+jq -r -s 'map(select(.score != null)) | group_by(.rung) | map(last) | .[] | "\(.rung)\t\(.score)"' FRONTIER.jsonl |
   awk -F'\t' '{printf "%-10s %s\n", $1, $2}'

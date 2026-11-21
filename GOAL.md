@@ -1,6 +1,6 @@
 # Goal: reach goempo's frontier, in Common Lisp
 
-clempo climbs the same ladder as [goempo](https://github.com/gakonst/goempo) and zempo. Each rung has a number that only goes up, measured by `bin/clempo-dev score` against the reference node (`https://rpc.tempo.xyz` for mainnet, `https://rpc.moderato.tempo.xyz` for testnet, or a private mainnet node in `CLEMPO_RPC` for bulk work). A rung counts only when `scripts/verify.sh` passes on the same commit.
+clempo climbs the same ladder as [goempo](https://github.com/gakonst/goempo) and zempo. `bin/clempo-dev score -help` lists the inputs each rung needs. Evidence is revision-specific; a rung counts only when `scripts/verify.sh` passes on the same commit. Use `https://rpc.tempo.xyz` for mainnet, `https://rpc.moderato.tempo.xyz` for testnet, or set `CLEMPO_RPC` to your reference archive node for bulk work.
 
 | Rung | Name | Score (higher is better) | Frontier (goempo, 2026-11-19) |
 |---|---|---|---|
