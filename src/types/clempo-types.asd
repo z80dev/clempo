@@ -1,4 +1,4 @@
-;;; Owner: the types agent. Headers, transactions, receipts, blocks.
+;;; Headers, transactions, receipts and blocks.
 (defsystem "clempo-types"
   :description "Declarative Tempo headers, transaction envelopes, signatures, receipts and blocks"
   :depends-on ("clempo-base" "clempo-crypto" "clempo-codec" "clempo-trie")

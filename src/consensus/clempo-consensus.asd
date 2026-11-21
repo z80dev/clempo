@@ -1,4 +1,4 @@
-;;; Owner: the consensus agent. Simplex artifacts, the threshold scheme and finalization
+;;; Simplex artifacts, the threshold scheme and finalization
 ;;; certificates. Subsystems: dkg/ (clempo-consensus-dkg), simplex/ (clempo-consensus-simplex).
 (defsystem "clempo-consensus"
   :description "Tempo consensus: simplex wire types, bls12381 threshold VRF scheme, certificates"

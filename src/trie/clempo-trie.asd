@@ -1,6 +1,6 @@
-;;; Owner: the trie agent. Merkle Patricia trie, roots, proofs.
+;;; Merkle Patricia tries, roots and proofs.
 (defsystem "clempo-trie"
-  :description "Owner: the trie agent. Merkle Patricia trie, roots, proofs."
+  :description "Merkle Patricia tries, roots and proofs."
   :depends-on ("clempo-base" "clempo-crypto-keccak" "clempo-codec")
   :serial t
   :components ((:file "trie")))

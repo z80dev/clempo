@@ -1,4 +1,4 @@
-;;; Owner: the rpc agent. JSON-RPC server, method table, renderers, tracers.
+;;; JSON-RPC server, method table, renderers and tracers.
 (defsystem "clempo-rpc"
   :description "JSON-RPC server (HTTP and WebSocket) serving the reference node's method set"
   :depends-on ("clempo-base" "clempo-io" "clempo-crypto" "clempo-codec" "clempo-trie" "clempo-types"

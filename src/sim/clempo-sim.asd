@@ -1,4 +1,4 @@
-;;; Owner: the consensus agent. The seeded validator simulation (R6).
+;;; Seeded validator simulation (R6).
 (defsystem "clempo-sim"
   :description "N simplex+DKG validators on a seeded simulated network"
   :depends-on ("clempo-base" "clempo-io" "clempo-crypto" "clempo-codec"

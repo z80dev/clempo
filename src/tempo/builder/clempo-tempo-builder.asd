@@ -1,6 +1,6 @@
-;;; Owner: the payload builder agent. Tempo payload building over the pool and executor.
+;;; Tempo payload building over the pool and executor.
 (defsystem "clempo-tempo-builder"
-  :description "Owner: the payload builder agent. Builds Tempo blocks from pooled transactions
+  :description "Builds Tempo blocks from pooled transactions
 on the block executor (tempo crates/payload/builder)."
   :depends-on ("clempo-base" "clempo-crypto" "clempo-codec" "clempo-trie" "clempo-types"
                "clempo-store" "clempo-tempo-forks" "clempo-tempo-chainspec"

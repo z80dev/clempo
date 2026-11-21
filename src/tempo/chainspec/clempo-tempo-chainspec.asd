@@ -1,6 +1,6 @@
-;;; Owner: the trie agent. Chain specs, genesis, fork schedule.
+;;; Chain specs, genesis and fork schedules.
 (defsystem "clempo-tempo-chainspec"
-  :description "Owner: the trie agent. Chain specs, genesis, fork schedule."
+  :description "Chain specs, genesis and fork schedules."
   :depends-on ("clempo-base" "clempo-io" "clempo-crypto-keccak" "clempo-codec"
                "clempo-trie" "clempo-tempo-forks")
   :serial t

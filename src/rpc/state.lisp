@@ -269,8 +269,7 @@ state root) and held for the call."
 (defun proof-json (db address keys)
   "alloy EIP1186AccountProofResponse for ADDRESS with storage KEYS (storage-key structs)."
   (multiple-value-bind (exists nonce balance code-hash storage-root) (account-fields db address)
-    ;; reth answers an absent account with zero code and storage hashes (recorded by
-    ;; FuzzLoadAgent's rpc-load against the reference, 43/400 cases)
+    ;; The reference returns zero code and storage hashes for an absent account.
     (let ((proofs (storage-proofs db address (mapcar #'storage-key-value keys)))
           (nodes (lambda (list) (map 'simple-vector #'hexbytes list))))
       (json:jobject "address" (addr address)

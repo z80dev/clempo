@@ -14,9 +14,7 @@ fields are reported after the closing brace), state and block overrides, simulat
 bundles and tracing options. Each method then follows reth's order: the block, the checks that
 depend only on the request, the state (CLEMPO.RPC.STATE:STATE-AT, which fails loudly for a
 state the backend does not keep) and finally execution through the executor's call API
-(clempo.executor begin-call-block / execute-request, agreed with the executor agent) or the
-tracers (EvmAgent's tracing package); until those land the methods fail with an internal error naming the
-missing piece.")
+(clempo.executor:begin-call-block and clempo.executor:execute-request) or the EVM tracers.")
   (:export #:call-request #:tx-request #:state-override #:block-overrides #:simulate-payload
            #:bundles #:state-context #:tracing-options #:trace-types
            #:normalize-request

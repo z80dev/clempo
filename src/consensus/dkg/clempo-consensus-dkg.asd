@@ -1,4 +1,4 @@
-;;; Owner: the DKG agent. commonware's Feldman/Desmedt DKG and reshare, and Tempo's
+;;; commonware's Feldman/Desmedt DKG and reshare, and Tempo's
 ;;; on-chain DKG artifacts (boundary outcomes, dealer logs in extraData).
 (defsystem "clempo-consensus-dkg"
   :description "Feldman/Desmedt DKG and reshare over BLS12-381 (MinSig), byte-compatible with commonware 2026.10.1 and Tempo"

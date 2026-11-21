@@ -1,4 +1,4 @@
-;;; Owner: the TLS agent. What a TLS client needs beyond hash/ and ec/: AES-GCM, RSA
+;;; TLS cryptography beyond hash/ and ec/: AES-GCM, RSA
 ;;; signature verification, a DER reader and X.509 path validation.
 (defsystem "clempo-crypto-pki"
   :description "aes-gcm, rsa verification, asn.1 der, x.509"
