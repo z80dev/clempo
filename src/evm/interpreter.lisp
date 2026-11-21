@@ -78,11 +78,12 @@ Returns (values status output); FRAME-GAS holds the gas left (0 after an excepti
             (fork (spec-fork spec))
             (block *block*)
             (step-pc 0)
+            (step-gas gas)
             ,@(when traced '((tracer *tracer*))))
-       (declare (type octets code) (type fixnum code-len sp pc fork step-pc) (type gas gas)
+       (declare (type octets code) (type fixnum code-len sp pc fork step-pc) (type gas gas step-gas)
                 (type simple-bit-vector jumpdests) (type simple-vector pushes stack)
                 (type gas-params gp) (type spec spec) (type block-env block)
-                (ignorable jumpdests pushes world block step-pc))
+                (ignorable jumpdests pushes world block step-pc step-gas))
        (macrolet ((current-fork () 'fork)
                   (when-tracing (&body body)
                     (declare (ignorable body))
@@ -94,18 +95,22 @@ Returns (values status output); FRAME-GAS holds the gas left (0 after an excepti
                              ,(cond ((member status +success-statuses+) 'gas)
                                     ((keywordp status) 0)
                                     (t `(if (member st +success-statuses+) gas 0))))
-                       ,@',(when traced
-                             '((trace-step-end tracer frame step-pc
-                                (if (< step-pc code-len) (aref code step-pc) 0)
-                                gas sp stack st)))   ; gas the op had left, before zeroing
+                       ,@',(case traced
+                             ((t) '((trace-step-end tracer frame step-pc
+                                     (if (< step-pc code-len) (aref code step-pc) 0)
+                                     gas sp stack st)))   ; gas the op had left, before zeroing
+                             (:lean '((trace-halt tracer frame step-pc
+                                       (if (< step-pc code-len) (aref code step-pc) 0)
+                                       step-gas gas st))))
                        (return-from run (values st out)))))
          (block run
            (loop
              (let ((op (if (< pc code-len) (aref code pc) 0)))
                (declare (type (unsigned-byte 8) op))
-               ,@(when traced
-                   '((setf step-pc pc)
-                     (trace-step tracer frame pc op gas sp stack)))
+               ,@(case traced
+                   ((t) '((setf step-pc pc)
+                          (trace-step tracer frame pc op gas sp stack)))
+                   (:lean '((setf step-pc pc step-gas gas))))
                (case op
                  ,@(loop for info across *op-table* when info collect (op-clause info))
                  (t
@@ -119,11 +124,14 @@ Returns (values status output); FRAME-GAS holds the gas left (0 after an excepti
                       (setf sp new-sp)
                       (reload-gas)
                       (incf pc)))))
-               ,@(when traced
+               ,@(when (eq traced t)
                    '((trace-step-end tracer frame step-pc op gas sp stack nil))))))))))
 
 (define-interpreter interpret)
 (define-interpreter interpret-traced :traced t)
+;; For tracers that take no per-op hooks (TRACE-STEPS-P false): only the halting op is
+;; reported, through TRACE-HALT.
+(define-interpreter interpret-lean-traced :traced :lean)
 
 (defvar *jit* nil
   "NIL, or a function (frame) -> (values status output) that runs FRAME's code (compiled
@@ -131,6 +139,6 @@ or not; see compile.lisp). Never used while *TRACER* is set.")
 
 (defun run-frame (frame)
   "Execute FRAME's code. Returns (values status output) with the gas left in FRAME-GAS."
-  (cond (*tracer* (interpret-traced frame))
+  (cond (*tracer* (if (trace-steps-p *tracer*) (interpret-traced frame) (interpret-lean-traced frame)))
         (*jit* (funcall (the function *jit*) frame))
         (t (interpret frame))))

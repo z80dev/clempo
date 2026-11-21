@@ -601,6 +601,20 @@ gas once a CALL or CREATE charged everything (NIL otherwise). STATIC-P: the fram
                     (setf (step-mem step)
                           (cons (car range) (subseq (frame-memory frame) (car range) (cdr range))))))))))))))
 
+;;; A tracer that records no steps and no opcode gas needs only the halting op (its frame's
+;;; error), so the interpreter skips the per-op hooks and reports that op alone.
+
+(defmethod trace-steps-p ((tracer tracer))
+  (with-slots (steps-p opcode-gas-p) tracer
+    (or steps-p opcode-gas-p)))
+
+(defmethod trace-halt ((tracer tracer) frame pc op gas-before gas status)
+  (declare (ignore pc))
+  (let ((stop (step-stop-and-cost status op gas-before gas nil (frame-static-p frame)))
+        (node (current-node tracer)))
+    (when (and node stop (stop-halt-p stop))
+      (setf (node-halt node) stop))))
+
 (defmethod trace-log ((tracer tracer) frame log)
   (declare (ignore frame))
   ;; A log outside any frame (a Tempo key authorization before the first call) takes an

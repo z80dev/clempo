@@ -216,6 +216,13 @@ accounts without code are frames too.")
 (define-trace-hook trace-step-end (frame pc op gas sp stack status)
   "After OP ran: GAS and the stack as it left them; STATUS is NIL when execution goes
 on, else the frame's halting status (gas is then what the frame ends with).")
+(define-trace-hook trace-halt (frame pc op gas-before gas status)
+  "For a tracer that takes no per-op hooks: OP at PC, begun with GAS-BEFORE, halted FRAME
+with STATUS, GAS left (what TRACE-STEP-END would see for the halting op).")
+(defgeneric trace-steps-p (tracer)
+  (:documentation "Whether TRACER takes TRACE-STEP and TRACE-STEP-END around every op; when
+false the interpreter reports only the halting op, through TRACE-HALT.")
+  (:method (tracer) (declare (ignore tracer)) t))
 (define-trace-hook trace-log (frame log)
   "FRAME emitted the CLEMPO.STATE:LOG-ENTRY LOG.")
 (define-trace-hook trace-selfdestruct (frame beneficiary balance)
