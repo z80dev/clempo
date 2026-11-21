@@ -122,9 +122,9 @@ ignoring a trailing parameter name. Returns the type."
   ;; array suffixes bind last: T[] / T[n]
   (let ((n (length s)))
     (when (and (> n 0) (char= (char s (1- n)) #\]))
-      (let* ((open (position #\[ s :from-end t))
-             (inner (parse-type-core (subseq s 0 open)))
-             (dim (subseq s (1+ open) (1- n))))
+      (let* ((bracket (position #\[ s :from-end t))
+             (inner (parse-type-core (subseq s 0 bracket)))
+             (dim (subseq s (1+ bracket) (1- n))))
         (return-from parse-type-core
           (if (string= dim "")
               (list :array inner)
@@ -157,14 +157,14 @@ ignoring a trailing parameter name. Returns the type."
 
 (defun parse-signature (signature)
   "\"transfer(address to, uint256)\" -> (values \"transfer\" (:address (:uint 256)))."
-  (let* ((open (position #\( signature))
-         (close (position-of-matching signature open)))
-    (values (string-trim " " (subseq signature 0 open))
-            (mapcar #'parse-abi-type (split-top-level (subseq signature (1+ open) close) #\,)))))
+  (let* ((lparen (position #\( signature))
+         (rparen (position-of-matching signature lparen)))
+    (values (string-trim " " (subseq signature 0 lparen))
+            (mapcar #'parse-abi-type (split-top-level (subseq signature (1+ lparen) rparen) #\,)))))
 
-(defun position-of-matching (s open)
+(defun position-of-matching (s lparen)
   (loop with depth = 0
-        for i from open below (length s)
+        for i from lparen below (length s)
         do (case (char s i)
              (#\( (incf depth))
              (#\) (decf depth) (when (zerop depth) (return i))))
