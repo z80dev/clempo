@@ -5,7 +5,7 @@
 | R0 Gate | yes: `scripts/verify.sh` (cold strict compile of every layer, ~540 tests incl. the precompile oracle, layer and determinism check, spec/ drift check) | `6bff662` | 2026-11-21 |
 | R1 Decode | mainnet 640/640 (T0..T13), moderato 33/33; full archive 50,050,000/50,050,000 blocks (35,979,413 txs) re-encoded and checked against eth_getBlockByNumber, 0 failures | 1edd52f, 4e28f4d | 2026-11-21 |
 | R2 Genesis | yes: matching state roots and block hashes on mainnet and Moderato | `ec20b6b` | 2026-11-21 |
-| R3 Replay | 20,500,000 (every block 1..20,500,000 from genesis matches gas, receipts root, bloom and state root, state on disk, no heals; through T1/T1A, T1B, T1C, T2 and T3; run continuing toward the tip) | `b56e883` | 2026-11-21 |
+| R3 Replay | **50,049,999** (the archive tip; goempo's frontier 49,399,999): every mainnet block 1..50,049,999 executed from genesis matches gas used, receipts root, logs bloom and state root, state on disk, no heals, no skips, through every fork T0..T13 | `d1d277e` (replay), `0fad06f` | 2026-11-21 |
 | R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `750c66b` | 2026-11-21 |
 | R3p Precompiles | 4,986/4,992 (goempo's frontier; every Tempo precompile T0..T14; the 6 differences are T14 keychain grants where clempo follows tempo c8b89f9, newer than the corpus: +2,600 gas root-retirement probe) | `fd2d4cf` | 2026-11-21 |
 | R4 Follow | partial: certificates 20,001/20,001 consecutive mainnet finalizations across epochs 2314/2315; live `follow -certify` 91/91 at zero lag; public devp2p follow 3,350 finalized blocks byte-identical at zero lag; node binary with RPC and REPL. The executed one-hour run waits for R3 to reach the tip | `bba3dfe`, `37a9c7a`, `3ab8073` | 2026-11-21 |
@@ -487,3 +487,5 @@ migration; it does not measure that optimization. Receipts and execution remain
 outside this archive check, so it does not replace sampled R1 or score R7.
 Result: `~/scratch/clempo/r1-archive/full-1795243500.json`; its `.failures.jsonl`
 is empty, with per-chunk evidence in `.chunks.jsonl` and console output in `.log`.
+
+R3 = 50,049,999 (2026-11-21): `CLEMPO_BUILD=release bin/clempo-dev replay -datadir ~/scratch/clempo/r3/dd -checkpoint 500000 -diagnose -result ~/scratch/clempo/r3/replay.json` reached the end of the archive. The final segment (from the 14.7M checkpoint) ran 35,354,196 blocks and 18,773,211 transactions in 9,612.5 s (3,678 blocks/s, 280 Mgas/s) on the shared host; the datadir's replay.sexp records no heals and no skips since genesis. `bin/clempo-dev score -rung R3 -json` reports 50049999.
