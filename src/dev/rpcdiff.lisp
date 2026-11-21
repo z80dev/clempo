@@ -227,13 +227,14 @@ value, their map orders aside (WITNESS-EQUAL)."
 (defparameter *trie-cursor-methods*
   '("debug_intermediateRoots" "debug_executionWitness" "debug_executionWitnessByBlockHash"
     "debug_stateRootWithUpdates")
-  "Methods clempo answers on its one trie-state cursor (clempo.rpc.tries:with-trie-state), one
-caller at a time. rpcdiff replays them one after another, with an hour's read timeout. At 16
-threads they queue on the cursor past the client's 120 s timeout (12 of the success suite's 48
-value cases, all client timeouts, on 54fc44d). The reference behaves the same way: at 16
-recording threads it failed 56 debug_intermediateRoots cases with MDBX's read-transaction
-timeout (-96000), and answered each one when it was re-sent alone. Every answer is still
-compared by value; only the concurrency differs.")
+  "Methods clempo answers on a pooled trie state (clempo.rpc.tries:with-trie-state). rpcdiff
+replays them one after another, with an hour's read timeout. The recorded cases jump across
+blocks 0..50M, and each costs a move of the state across the blocks in between, which the
+pool cannot make cheaper: at 16 threads with the pool, 33 of them (and 2 verified proofs)
+still passed the client's 120 s timeout (docs/BENCH.md). The reference behaves the same way:
+at 16 recording threads it failed 56 debug_intermediateRoots cases with MDBX's
+read-transaction timeout (-96000), and answered each one when it was re-sent alone. Every
+answer is still compared by value; only the concurrency differs.")
 
 (defun trie-cursor-case-p (c)
   (member (clempo.json:jget c "method") *trie-cursor-methods* :test #'string=))
@@ -426,7 +427,9 @@ at least one value case whose every case matches, CATEGORIES an alist category -
       0)))
 
 (defcommand "rpc-serve" (args)
-  "serve JSON-RPC over the archive: rpc-serve [-port 8546] [-host H] [-upstream URL]"
+  "serve JSON-RPC over the archive: rpc-serve [-port 8546] [-host H] [-upstream URL] [-proof-window N]"
+  (when (arg args :proof-window)
+    (setf clempo.rpc.state:*eth-proof-window* (arg-int args :proof-window)))
   (let* ((backend (clempo.rpc.chain:make-archive-backend :upstream (arg args :upstream)))
          (server (clempo.rpcserver:start-server :host (arg args :host "127.0.0.1")
                                                 :port (arg-int args :port 8546) :backend backend)))

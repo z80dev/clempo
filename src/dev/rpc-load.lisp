@@ -5,10 +5,11 @@
 `rpc-load` command, docs/BENCH.md). A corpus of requests is drawn, from a seeded
 *ENTROPY*, out of the blocks FROM..TO: balances and TIP-20 balanceOf calls of the
 transactions' senders at TO, full blocks, 10-block log ranges of the tokens they touched,
-call traces of their transactions and account proofs. Every request is first sent to
-both servers and the answers compared; then each method runs at each concurrency on each
-server in turn, one keep-alive connection per client thread, measuring requests per
-second and latency percentiles.")
+call traces of their transactions and account proofs; on request (*TRIE-METHODS*) also the
+calls that need a block's state tries, at a block drawn from the range. Every request is
+first sent to both servers and the answers compared; then each method runs at each
+concurrency on each server in turn, one keep-alive connection per client thread, measuring
+requests per second and latency percentiles.")
   (:export #:build-corpus #:diff-corpus #:load-run))
 
 (in-package #:clempo.rpc-load)
@@ -16,6 +17,17 @@ second and latency percentiles.")
 (defparameter *methods*
   '("eth_getBalance" "eth_call" "eth_getBlockByNumber" "eth_getLogs"
     "debug_traceTransaction" "eth_getProof"))
+
+(defparameter *trie-methods*
+  '("debug_intermediateRoots" "debug_executionWitness" "debug_stateRootWithUpdates"
+    "eth_getProof@block")
+  "Corpus labels of the calls served from a state with tries at a block below the head
+\(clempo.rpc.tries). eth_getProof@block asks eth_getProof at such a block, which a server
+answers only with its proof window open.")
+
+(defun label-method (label)
+  "The JSON-RPC method of a corpus LABEL: the label up to an @."
+  (subseq label 0 (position #\@ label)))
 
 (defparameter +pathusd+ "0x20c0000000000000000000000000000000000000")
 
@@ -75,6 +87,17 @@ served at URL."
                            (vector (pick tokens)
                                    (vector (format nil "0x~64,'0X" (io:random-below 16)))
                                    head)))
+                      ((string= m "debug_intermediateRoots") (vector (json:jget (pick blocks) "hash")))
+                      ((string= m "debug_executionWitness") (vector (json:jget (pick blocks) "number")))
+                      ((string= m "debug_stateRootWithUpdates")
+                       ;; the sender's account rewritten, by hashed address
+                       (vector (json:jobject "accounts"
+                                             (json:jobject (octets->hex (clempo.keccak:keccak256 (hex->octets who)))
+                                                           (json:jobject "nonce" "0x1" "balance" "0x0"
+                                                                         "bytecode_hash" :null))
+                                             "storages" (json:jobject))
+                               (json:jget (pick blocks) "number")))
+                      ((string= m "eth_getProof@block") (vector who (vector) (json:jget (pick blocks) "number")))
                       (t (error "rpc-load has no request shape for ~A" m)))))))
     (values corpus (length blocks) (length txs) (length senders) (length tokens))))
 
@@ -154,7 +177,7 @@ served at URL."
 (defun answer (c method params)
   "(:result value) or (:error code message) or (:fail text)."
   (handler-case
-      (multiple-value-bind (status body) (exchange c (request-octets c method params))
+      (multiple-value-bind (status body) (exchange c (request-octets c (label-method method) params))
         (let ((v (json:parse-json body)))
           (cond ((json:jget v "error")
                  (list :error (json:jget* v "error" "code") (json:jget* v "error" "message")))
@@ -207,7 +230,7 @@ one warm-up request, all released together. Returns a plist."
                     (lambda ()
                       (let* ((c (make-client url))
                              (requests (loop for i from 0 below per
-                                             collect (request-octets c method (svref params (mod (+ (* w per) i) n)))))
+                                             collect (request-octets c (label-method method) (svref params (mod (+ (* w per) i) n)))))
                              (latencies (make-array per :element-type 'double-float))
                              (errors 0))
                         (unwind-protect
@@ -250,11 +273,14 @@ one warm-up request, all released together. Returns a plist."
         while comma))
 
 (defcommand "rpc-load" (args)
-  "RPC load and answer diff of two servers at one height: rpc-load -a URL -b URL -from N -to M [-n 200] [-total 400] [-concurrency 1,16,64] [-methods m,...] [-rounds 3] [-seed S] [-result FILE] [-no-diff] [-no-load]"
+  "RPC load and answer diff of two servers at one height: rpc-load -a URL -b URL -from N -to M [-n 200] [-total 400] [-concurrency 1,16,64] [-methods m,...] [-rounds 3] [-seed S] [-result FILE] [-no-diff] [-no-load]; the method \"trie\" stands for the trie-state calls (debug_intermediateRoots, debug_executionWitness, debug_stateRootWithUpdates, eth_getProof@block)"
   (let* ((url-a (or (arg args :a) (return-from command (progn (log-line "rpc-load: -a URL required") 2))))
          (url-b (or (arg args :b) (return-from command (progn (log-line "rpc-load: -b URL required") 2))))
          (from (arg-int args :from)) (to (arg-int args :to))
-         (methods (if (arg args :methods) (split-commas (arg args :methods)) clempo.rpc-load::*methods*))
+         (methods (if (arg args :methods)
+                      (loop for m in (split-commas (arg args :methods))
+                            append (if (string= m "trie") clempo.rpc-load::*trie-methods* (list m)))
+                      clempo.rpc-load::*methods*))
          (concurrency (mapcar #'parse-integer (split-commas (arg args :concurrency "1,16,64"))))
          (total (arg-int args :total 400))
          (results '()) (diffs '()))
@@ -284,12 +310,13 @@ one warm-up request, all released together. Returns a plist."
                                                (= (getf r :c) c))
                                        collect (getf r key))
                                #'<)))
-                 (and xs (if (eq key :errors) (reduce #'+ xs) (nth (floor (length xs) 2) xs))))))
+                 (and xs (if (eq key :errors) (reduce #'+ xs) (nth (floor (length xs) 2) xs)))))
+             (rate (x) (if (< x 100) (format nil "~,2F" x) (format nil "~:D" (round x)))))
         (dolist (m methods)
           (dolist (c concurrency)
             (when (and (med :a m c :rps) (med :b m c :rps))
-              (format t "| `~A` | ~D | ~:D | ~:D | ~,2F | ~,3F/~,3F | ~,3F/~,3F | ~D/~D |~%"
-                      m c (round (med :a m c :rps)) (round (med :b m c :rps))
+              (format t "| `~A` | ~D | ~A | ~A | ~,2F | ~,3F/~,3F | ~,3F/~,3F | ~D/~D |~%"
+                      m c (rate (med :a m c :rps)) (rate (med :b m c :rps))
                       (/ (med :a m c :rps) (med :b m c :rps))
                       (med :a m c :p50) (med :a m c :p99) (med :b m c :p50) (med :b m c :p99)
                       (med :a m c :errors) (med :b m c :errors))))))

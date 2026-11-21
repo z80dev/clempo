@@ -49,4 +49,5 @@
                (:file "pool-tests")
                (:file "server-tests")
                (:file "gap-tests")
-               (:file "impl-tests")))
+               (:file "impl-tests")
+               (:file "tries-tests")))

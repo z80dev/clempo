@@ -1072,3 +1072,73 @@ after/Rust is `hol-fixed-rust`; before/Rust is `hol-old-rust`:
 - **`eth_getBalance` at 16 and 64** sits at the load client's ceiling (about 160k req/s) for
   both servers, as noted above, so its 0.96-0.98 there is noise. newphy's pinned
   setup was deleted, so this run was on the Mac only.
+
+### Trie-state calls on a pool of states
+
+`debug_intermediateRoots`, `debug_executionWitness`, `debug_stateRootWithUpdates` and
+`eth_getProof`/`eth_getAccount`/`eth_getMultiProof` below the head need the block's state with
+tries (`clempo.rpc.tries`). They used to share one cursor state behind a lock, one call at a
+time. Now each call borrows a state from a bounded pool per backend, moves it to its block
+(root checked against the header) and has it to itself until it returns:
+
+- The pool holds at most `*trie-cursors*` states (4; `$CLEMPO_TRIE_CURSORS`).
+- It grows past one state only for a call within `*grow-distance*` (200,000 blocks) of a
+  checkpoint, and only while the heap is under `*heap-share*` (1/4) of its dynamic space.
+  A mainnet state near block 50,000,000 holds 2.98 GB once its large storage tries are
+  built (1.43 GB without them; 1.28 GB as loaded), measured after full collections.
+- A load or move first collects the whole heap when it is over half full, one thread at a
+  time. Without this, four states in flight filled a 40 GB heap before SBCL collected its
+  oldest generations ("Heap exhausted", in both a full rpcdiff and a trie-only replay).
+- A call far from every checkpoint takes the state cheapest to move to it, or waits for
+  one, as calls chained through the single cursor before.
+
+Command: two release `rpc-serve` processes (heap 40000 MiB, eth_getProof's proof window
+opened), the parent `9cbbfb6` (B) and this change (A), then `CLEMPO_BUILD=release
+bin/clempo-dev rpc-load -a A -b B -from 50049000 -to 50049999 -methods trie -n 32 -total 32
+-concurrency 1,4,16 -rounds 2`. `-methods trie` stands for the four calls below;
+`eth_getProof@block` is `eth_getProof` at a block drawn from the range. Mac, unpinned,
+medians of 2 rounds, calls per second:
+
+| Method | Clients | after | before | after/before | after p50/p99 ms | before p50/p99 ms |
+|---|---:|---:|---:|---:|---:|---:|
+| `debug_intermediateRoots` | 1 | 103 | 67.8 | 1.52 | 13.9/28.4 | 14.1/29.1 |
+| `debug_intermediateRoots` | 4 | 251 | 65.6 | 3.82 | 12.7/326.4 | 46.7/406.6 |
+| `debug_intermediateRoots` | 16 | 306 | 62.4 | 4.91 | 37.6/109.3 | 175.5/491.9 |
+| `debug_executionWitness` | 1 | 92.4 | 55.8 | 1.66 | 10.6/29.9 | 18.5/35.3 |
+| `debug_executionWitness` | 4 | 259 | 60.5 | 4.28 | 14.4/33.2 | 49.8/437.1 |
+| `debug_executionWitness` | 16 | 243 | 57.7 | 4.22 | 43.2/110.8 | 183.0/537.4 |
+| `debug_stateRootWithUpdates` | 1 | 6.51 | 6.44 | 1.01 | 175.3/1,455.1 | 175.9/206.3 |
+| `debug_stateRootWithUpdates` | 4 | 20.4 | 6.39 | 3.19 | 177.8/305.6 | 395.7/4,090.5 |
+| `debug_stateRootWithUpdates` | 16 | 21.6 | 6.41 | 3.38 | 463.2/1,383.3 | 2,027.4/4,447.7 |
+| `eth_getProof@block` | 1 | 106 | 58.4 | 1.81 | 9.6/19.2 | 16.6/34.4 |
+| `eth_getProof@block` | 4 | 264 | 59.3 | 4.46 | 14.2/35.7 | 50.9/449.1 |
+| `eth_getProof@block` | 16 | 270 | 64.6 | 4.18 | 38.5/107.0 | 159.8/472.1 |
+
+- With four states, calls scale 3.2–4.9x at 4 and 16 clients; the old cursor stays flat.
+- At one client the pool is also faster (1.5–1.8x) because consecutive calls land on the
+  idle state nearest their block instead of moving the single cursor back and forth.
+- No errors on either side. In the answer diff, 32/32 answers were identical for three
+  methods. `debug_stateRootWithUpdates` differed on 4 of 32 during the diff pass.
+  Re-asked afterwards, the 3 recorded examples were identical on both servers and stable.
+  Its input here is not one the reference accepts (`nonce` as a string), and the cause of
+  the transient difference was not found.
+
+**What the pool does not fix: far-jumping calls.** The recorded rpcdiff cases jump across
+blocks 0..50M. Each costs a move of the state across the blocks in between: up to 93 s for
+a single call, and 616 s for all 163 cases replayed one at a time (163/163 identical). A
+state per call does not make those moves shorter. At 16 threads, the trie-only replay with
+the pool took 843 s (144/163, 19 client timeouts). A full rpcdiff took 2,501 s, scoring
+14,662/14,697 value cases: 31 `debug_intermediateRoots`, 2 `debug_executionWitness` and 2
+verified proofs timed out. That is no better than the old cursor's 35 timeouts, so rpcdiff
+still replays these methods one at a time (`*trie-cursor-methods*`). The reference fails
+such calls at 16 threads too (56 `debug_intermediateRoots` MDBX read-transaction timeouts
+when the corpus was recorded). Growth was then limited to calls near a checkpoint, so such
+a sequence chains through the states the pool has rather than loading a state for each
+call; that policy was not re-run against the 16-thread replay. Making far moves cheaper
+(denser checkpoints, or a history index that does not scan whole segments) is the
+remaining lever.
+
+Tests: `tests/rpc/tries-tests.lisp` runs every trie method at 9 blocks of mainnet's first
+4,000 (a genesis checkpoint as the only base). 36 calls from 12 threads on 3 states equal
+the serial answers. With two states held, a third call waits, and it completes once one
+state comes back.
