@@ -2,16 +2,16 @@
 
 | Rung | Score | Commit | Date |
 |---|---|---|---|
-| R0 Gate | scaffold: base, io, keccak, RLP, JSON, http, JSON-RPC client, layer check | - | 2026-11-20 |
+| R0 Gate | yes: `scripts/verify.sh` (cold strict compile of every layer, ~540 tests incl. the precompile oracle, layer and determinism check, spec/ drift check) | `6bff662` | 2026-11-21 |
 | R1 Decode | mainnet 640/640 (T0..T13), moderato 33/33; full archive 50,050,000/50,050,000 blocks (35,979,413 txs) re-encoded and checked against eth_getBlockByNumber, 0 failures | 1edd52f, 4e28f4d | 2026-11-21 |
 | R2 Genesis | yes: matching state roots and block hashes on mainnet and Moderato | `ec20b6b` | 2026-11-21 |
 | R3 Replay | 20,500,000 (every block 1..20,500,000 from genesis matches gas, receipts root, bloom and state root, state on disk, no heals; through T1/T1A, T1B, T1C, T2 and T3; run continuing toward the tip) | `b56e883` | 2026-11-21 |
 | R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `750c66b` | 2026-11-21 |
 | R3p Precompiles | 4,986/4,992 (goempo's frontier; every Tempo precompile T0..T14; the 6 differences are T14 keychain grants where clempo follows tempo c8b89f9, newer than the corpus: +2,600 gas root-retirement probe) | `fd2d4cf` | 2026-11-21 |
-| R4 Follow | - | | |
+| R4 Follow | partial: certificates 20,001/20,001 consecutive mainnet finalizations across epochs 2314/2315; live `follow -certify` 91/91 at zero lag; public devp2p follow 3,350 finalized blocks byte-identical at zero lag; node binary with RPC and REPL. The executed one-hour run waits for R3 to reach the tip | `bba3dfe`, `37a9c7a`, `3ab8073` | 2026-11-21 |
 | R5 RPC | 119/154 methods, 12,258/14,287 cases (`bin/clempo-dev score -rung R5`; `rpcdiff` prints per suite); 152/156 reference methods served. blocks 5,126/5,126, txs 1,027/1,027, logs 508/508, envelope 50/50, static 118/119, tempo-params 101/101, consensus 9/9, state 2,797/3,542, calls 645/853 (56 AA/7702/priced cases added), traces 1,867/2,927, success 10/25. Remaining failures are "state not available" (history coverage growing; head state and its tries absent: proofs, witnesses, the static debug_codeByHash miss) except debug_intermediateRoots (needs historical tries) and configurable-account simulations. Tempo AA traces carry evm2's wrapper frame; block access lists byte-identical where state exists | `d9bb56e` | 2026-11-21 |
 | R6 Validator | Sims: 4, 5 and 7 validators, three epochs each, every reshare concluded through per-node DKG managers. Live Rust devnet: one Clempo signer necessary through two reshares, two Clempo signers necessary through three | `b680aaf`, `dbe14d1` | 2026-11-21 |
-| R7 Speed | - | | |
+| R7 Speed | Busy 9,890,000..9,909,999 (20k blocks, 659,246 txs, 31.5 Ggas, every root checked): 201.7 s -> 127.4 s -> 83.9 s (8 recovery workers, allocation-free secp256k1) on a shared host; Rust historical re-execute 49.4 s (not root-checked), root-checked Rust import pending. Keccak 799 MB/s (arm64 SHA3 VOP), SHA-256 2.7 GB/s, BLS MinSig verify 2.7 ms CPU | `fdcdfe2` | 2026-11-21 |
 
 ## Evidence
 
