@@ -432,7 +432,9 @@ ARCHIVE-BACKEND) is instantiated with the remaining INITARGS as well."
 (defmethod backend-block-raw ((b archive-backend) n)
   (when (and (integerp n) (<= 0 n (archive-backend-head b)))
     (let ((first (* archive:+chunk-blocks+ (floor n archive:+chunk-blocks+))))
-      (when (archive:chunk-present-p first (archive-backend-dir b))
+      ;; a chunk already read is immutable: only an unread one costs a probe (a stat call)
+      (when (or (sb-thread:with-mutex ((chunk-lock b)) (assoc first (archive-backend-chunks b)))
+                (archive:chunk-present-p first (archive-backend-dir b)))
         (archive:chunk-block (archive-chunk b first) n)))))
 
 (defun backend-index-covered (b)
