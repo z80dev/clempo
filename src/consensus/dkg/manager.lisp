@@ -529,6 +529,11 @@ supply with DKG-NOTARIZED-BLOCK first."
            (view nil))
       (loop while (and (>= height first) (or (null floor-height) (>= height floor-height)))
             do (let ((block (gethash digest (epoch-events-notarized events))))
+                 ;; The finalized tip ends the walk: its log, if any, is already a finalized
+                 ;; log, so Tempo's fetch of it would add nothing.
+                 (when (and (null block) (eql height floor-height)
+                            (octets= digest (cadr (assoc height (epoch-events-finalized events)))))
+                   (loop-finish))
                  (unless block
                    (return-from dkg-ceremony-output (values nil :needs-ancestor height digest view)))
                  (let ((log (reduced-block-log block)))

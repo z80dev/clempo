@@ -272,15 +272,66 @@
                                             :parent (dkg-block-digest parent) :timestamp height
                                             :extra-data extra :parent-view height))
                (push parent blocks))
-      ;; only the tip is known: the walk asks for its parent, then down to the finalized tip
+      ;; only the tip is known: the walk asks for its parent
       (multiple-value-bind (output missing height) (dkg-ceremony-output m (first blocks))
         (is (null output)) (is (eq :needs-ancestor missing)) (is= 17 height))
+      ;; the finalized tip (10) is not needed
       (dolist (b (rest blocks)) (dkg-notarized-block m b))
-      (multiple-value-bind (output missing height) (dkg-ceremony-output m (first blocks))
-        (is (null output)) (is (eq :needs-ancestor missing)) (is= 10 height))
-      (dkg-notarized-block m (chain-block chain 10))
       (let ((output (dkg-ceremony-output m (first blocks))))
         (is output)
         (is= 3 (length (output-dealers output)))
         ;; the same parent again comes from the cache
         (is (eq output (dkg-ceremony-output m (first blocks))))))))
+
+;;; A Rust devnet's chain through the manager, as an observer.
+
+(defun devnet-blocks ()
+  (with-open-file (in (data-path "devnet_r6_blocks.jsonl"))
+    (loop for line = (read-line in nil)
+          while line
+          collect (let ((j (clempo.json:parse-json line)))
+                    (list (clempo.json:jget j "height")
+                          (hex->octets (clempo.json:jget j "hash"))
+                          (hex->octets (clempo.json:jget j "extra_data")))))))
+
+(deftest dkg-manager-rust-devnet ()
+  ;; Fed the finalized blocks of an all-Rust devnet, the manager rebuilds each round from the
+  ;; previous boundary, accepts every dealer log, and computes each boundary block's extraData
+  ;; byte for byte (as a proposer would) from the parent; it then moves to the next epoch.
+  (let* ((clempo.io:*entropy* (clempo.io:make-seeded-entropy 7))
+         (rows (devnet-blocks))
+         (blocks (make-hash-table)))
+    (loop for (height hash extra) in rows
+          for parent = (make-octets 32) then (second (nth (1- height) rows))
+          do (setf (gethash height blocks)
+                   (make-dkg-block :height height :digest hash :parent parent
+                                   :timestamp 0 :extra-data extra)))
+    (let ((m (open-dkg-manager :seed (clempo.io:random-octets 32) :store (make-memory-dkg-store)
+                               :epoch-length 60 :t12-time 0 :t15-time nil
+                               :header-at (lambda (h) (gethash h blocks))
+                               :last-finalized-height 0))
+          (boundaries 0) (logs 0))
+      (is= 0 (dkg-manager-current-epoch m))
+      (loop for height from 1 below (length rows)
+            for block = (gethash height blocks)
+            for extra = (dkg-block-extra-data block)
+            do (cond ((boundary-height-p height 60)
+                      (let ((outcome (decode-onchain-dkg-outcome extra :strict t)))
+                        (is= (hex extra)
+                             (hex (dkg-boundary-extra-data
+                                   m (gethash (1- height) blocks) (outcome-next-players outcome)
+                                   (if (outcome-is-next-full-dkg outcome)
+                                       (outcome-epoch outcome)
+                                       0))))
+                        (incf boundaries)))
+                     ((plusp (length extra))
+                      (is (dkg-verify-dealer-log m (height-epoch height 60) 0 extra))
+                      (incf logs)))
+               (dkg-finalized-block m block))
+      (is= 2 boundaries)
+      (is= 12 logs)                     ; a dealer re-proposes its log until one is finalized
+      (is= 2 (dkg-manager-current-epoch m))
+      ;; the reshares kept the devnet's identity
+      (is (octets= (outcome-network-identity (decode-onchain-dkg-outcome
+                                              (dkg-block-extra-data (gethash 0 blocks))))
+                   (sharing-public (output-public (dkg-manager-output m))))))))

@@ -25,3 +25,10 @@ Recorded data only (no code). Copied from goempo's checked-in fixtures
   player, plus each dealer's SignedDealerLog. From goempo `internal/dkg/testdata`.
 - `mainnet-network-identity.json`, `testnet-network-identity.json`: tempo's published network
   identities (`~/dev/tempo/*.json`).
+- `devnet_r6_blocks.jsonl`: an all-Rust 4-validator Tempo devnet (P2PAgent's
+  `scripts/devnet`, tempo 568b4fb425 release binary, `generate-localnet --seed 42`, hardfork
+  T13, epoch length 60, T12 from genesis, no T15), recorded 2026-11-21 under
+  `~/cache/clempo/devnet-r6-1795238891/baseline-with-dkg.jsonl`: for heights 0..145 the
+  finalized block hash and extraData, identical on all four validators' RPCs. Genesis carries
+  the epoch-0 outcome, blocks 32..44 and 92..98 signed dealer logs, 59 and 119 the boundary
+  outcomes.
