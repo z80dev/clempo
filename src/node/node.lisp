@@ -298,12 +298,26 @@
      :threads threads :name "trie subtree hash")))
 
 (defun start-history-writer (node)
-  "Append followed blocks to the backend's history when it ends exactly at the stored head;
-a gap would make later versions shadow unrecorded ones. Returns the history or NIL."
+  "Append followed blocks to the backend's history, so state of every block from now on is
+served as a reference archive node serves it. An empty history is first seeded with the
+stored head's full state; one ending exactly at the stored head is continued; any other is
+left read-only (a gap would make later versions shadow unrecorded ones). Returns the history
+or NIL."
   (let* ((h (backend:backend-history node))
          (db (node-db node))
          (number (store:db-number db)))
     (cond ((null h) nil)
+          ((null (history:history-height h))
+           (let ((start (clempo.io:monotonic-ticks)))
+             (log-node "node: seeding history ~A with the state at ~D (~D accounts)"
+                       (history:history-dir h) number (store:db-account-count db))
+             (history:history-start-writer h number db)
+             (history:history-record-state h db)
+             (history:history-flush h :db db)
+             (history:history-refresh h)
+             (log-node "node: history seeded in ~,1F s" (/ (- (clempo.io:monotonic-ticks) start)
+                                                           internal-time-units-per-second)))
+           (setf (node-history-writer node) h))
           ((eql (history:history-height h) number)
            (history:history-start-writer h (1+ number) db)
            (setf (node-history-writer node) h)
@@ -444,6 +458,15 @@ a gap would make later versions shadow unrecorded ones. Returns the history or N
 (defun default-upstream (chain)
   (ecase chain (:mainnet (rpc:local-rpc-url)) (:moderato rpc:+moderato-rpc+)))
 
+(defun parse-sync (text)
+  "--sync: block (fsync every block), group:N (every N blocks) or ms:T (at most T ms after)."
+  (cond ((string= text "block") :block)
+        ((and (> (length text) 6) (string= "group:" text :end2 6))
+         (list :group (parse-integer text :start 6)))
+        ((and (> (length text) 3) (string= "ms:" text :end2 3))
+         (list :every-ms (parse-integer text :start 3)))
+        (t (error "--sync takes block, group:N or ms:T, not ~A" text))))
+
 (defun parse-host-port (text)
   (let ((colon (position #\: text :from-end t)))
     (unless colon (error "Expected HOST:PORT, got ~A" text))
@@ -455,7 +478,8 @@ a gap would make later versions shadow unrecorded ones. Returns the history or N
                            (certify t) certify-from cert-rpc
                            repl-port repl-token-file (checkpoint-interval 0)
                            (batch-size 32) (root-workers 4) block-source once seconds
-                           metrics-address p2p-listen (jit t) (forward t) (poll-seconds 0.25))
+                           metrics-address p2p-listen (jit t) (forward t) (poll-seconds 0.25)
+                           (sync "ms:1000"))
   "Open DATADIR (initialized with CHAIN's genesis when empty), follow the chain with
 execution and, unless CERTIFY is NIL, finalization certificates, and serve committed state.
 Caches (hash index, receipts, history, finalizations) live under DATADIR unless a directory
@@ -479,7 +503,7 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
     (reject-healed-datadir dir)
     (let* ((datastore (trie:call-with-trie-hashing
                        (lambda () (store:open-store
-                                   dir :interval checkpoint-interval :log #'log-node
+                                   dir :interval checkpoint-interval :log #'log-node :sync (parse-sync sync)
                                        :genesis (lambda (db)
                                                   (log-node "node: empty datadir; loading the ~A genesis" name)
                                                   (executor:load-genesis db :chain chain))))))
@@ -494,7 +518,7 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
                          :head (follow:head-number head) :archive-dir archive-dir :upstream upstream
                          :index-dir (or index-dir (datadir-subdir dir "index"))
                          :receipts-dir (or receipts-dir (datadir-subdir dir "receipts"))
-                         :history-dir (or history-dir (datadir-subdir dir "history"))
+                         :history-dir (or history-dir (ensure-directories-exist (datadir-subdir dir "history")))
                          :finalization-dir (or finalization-dir (datadir-subdir dir "finalizations"))))
                   (initial-number (follow:head-number head))
                   (block (head-block node head upstream))
@@ -635,7 +659,7 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
               [--rpc-port N] [--bind IP] [--metrics-address HOST:PORT] [--p2p-listen HOST:PORT]~%
               [--no-certify] [--certify-from N] [--cert-rpc URL] [--no-jit] [--no-forward]~%
               [--repl-port N --repl-token-file FILE] [--once | --seconds N]~%
-              [--batch N] [--checkpoint-interval N] [--root-workers N]~%
+              [--batch N] [--checkpoint-interval N] [--root-workers N] [--sync block|group:N|ms:T]~%
        clempo keys ...        (clempo keys --help)~%
 An empty datadir starts at the chain's genesis. Caches live under the datadir unless a~%
 directory flag shares one. SIGTERM or SIGINT stops cleanly.~%"))
@@ -664,7 +688,8 @@ directory flag shares one. SIGTERM or SIGINT stops cleanly.~%"))
                                                   ("--repl-port" :repl-port t) ("--repl-token-file" :repl-token-file)
                                                   ("--seconds" :seconds t) ("--batch" :batch-size t)
                                                   ("--root-workers" :root-workers t)
-                                                  ("--checkpoint-interval" :checkpoint-interval t))
+                                                  ("--checkpoint-interval" :checkpoint-interval t)
+                                                  ("--sync" :sync))
                                          :test #'string=))
                            (value (pop words)))
                       (unless entry (error "Unknown option ~A" flag))

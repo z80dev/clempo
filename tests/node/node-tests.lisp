@@ -74,8 +74,12 @@ those requests fail, as during an upstream outage."
          (let ((report (run datadir archive url :once t)))
            (is= 20 (json:jget report "anchor"))
            (is= 0 (json:jget report "executed")))
-         ;; Caches are datadir-scoped unless shared explicitly.
-         (is (probe-file (merge-pathnames "receipts/" datadir))))))))
+         ;; Caches are datadir-scoped unless shared explicitly, and the history (seeded at
+         ;; genesis, appended per block) covers every followed block's state.
+         (is (probe-file (merge-pathnames "receipts/" datadir)))
+         (let ((history (clempo.history:open-history (merge-pathnames "history/" datadir))))
+           (unwind-protect (is= 20 (clempo.history:history-height history))
+             (clempo.history:close-history history))))))))
 
 (deftest node-bootstraps-moderato-from-genesis ()
   ;; Moderato runs system transactions before :t0 (fork :genesis); this once failed block 1.
