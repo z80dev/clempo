@@ -3,6 +3,7 @@
   (:documentation "Keccak-256 (the pre-SHA3 padding Ethereum uses).")
   (:export #:keccak256 #:keccak256-integer #:keccak256-concat
            #:make-keccak #:keccak-update #:keccak-final
+           #:keccak-reset #:keccak256-into
            #:copy-keccak-into #:keccak-digest))
 
 (in-package #:clempo.keccak)
@@ -88,6 +89,13 @@ within a round: theta, rho, pi and chi become straight-line register code."
 
 (defun make-keccak () (%make-keccak))
 
+(defun keccak-reset (k)
+  "Reset K to its initial state without replacing its storage. Return K."
+  (declare (type keccak k) #.*hot*)
+  (fill (keccak-state k) 0)
+  (setf (keccak-fill k) 0)
+  k)
+
 (defmacro load-lane (data start)
   (let ((offset (gensym)))
     `(let ((,offset ,start))
@@ -125,17 +133,15 @@ within a round: theta, rho, pi and chi become straight-line register code."
     (setf (keccak-fill k) used)
     k))
 
-(defun squeeze (state)
-  (declare (type keccak-state state) #.*hot*)
-  (let ((out (make-octets 32)))
-    (dotimes (lane 4 out)
-      (let ((w (aref state lane)))
-        (dotimes (j 8)
-          (setf (aref out (+ (* lane 8) j)) (ldb (byte 8 (* 8 j)) w)))))))
+(defun squeeze-into (state out out-start)
+  (declare (type keccak-state state) (type octets out) (type fixnum out-start) #.*hot*)
+  (dotimes (lane 4 out)
+    (let ((w (aref state lane)))
+      (dotimes (j 8)
+        (setf (aref out (+ out-start (* lane 8) j)) (ldb (byte 8 (* 8 j)) w))))))
 
-(defun keccak-final (k)
-  "Pad, squeeze 32 bytes. K must not be used afterwards."
-  (declare (type keccak k) #.*hot*)
+(defun finalize-into (k out out-start)
+  (declare (type keccak k) (type octets out) (type fixnum out-start) #.*hot*)
   (let ((buf (keccak-buffer k))
         (used (keccak-fill k))
         (state (keccak-state k)))
@@ -143,27 +149,42 @@ within a round: theta, rho, pi and chi become straight-line register code."
     (setf (aref buf used) (logxor (aref buf used) #x01))
     (setf (aref buf 135) (logxor (aref buf 135) #x80))
     (absorb-block state buf 0)
-    (squeeze state)))
+    (squeeze-into state out out-start)))
 
-(defun keccak256-fixed (data start lanes)
-  (declare (type octets data) (type fixnum start) (type (member 4 8) lanes) #.*hot*)
-  (let ((state (make-array 25 :element-type '(unsigned-byte 64) :initial-element 0)))
-    (dotimes (i lanes)
-      (setf (aref state i) (load-lane data (+ start (* 8 i)))))
-    (setf (aref state lanes) 1 (aref state 16) #x8000000000000000)
-    (squeeze (keccak-f state))))
+(defun keccak-final (k)
+  "Pad, squeeze 32 bytes. Reset K before reusing it."
+  (finalize-into k (make-octets 32) 0))
+
+(defun fixed-into (data start lanes state out out-start)
+  (declare (type octets data out) (type fixnum start out-start) (type keccak-state state)
+           (type (member 4 8) lanes) #.*hot*)
+  (dotimes (i lanes)
+    (setf (aref state i) (load-lane data (+ start (* 8 i)))))
+  (setf (aref state lanes) 1 (aref state 16) #x8000000000000000)
+  (squeeze-into (keccak-f state) out out-start))
+
+(defun keccak256-into (data start end out out-start &optional k)
+  "Hash DATA[START,END) into OUT at OUT-START. With reusable K, allocates nothing.
+K's previous digest state is discarded. Return OUT."
+  (check-type data octets)
+  (check-type out octets)
+  (check-type k (or null keccak))
+  (assert (and (typep start 'fixnum) (typep end 'fixnum) (<= 0 start end (length data))))
+  (assert (and (typep out-start 'fixnum) (<= 0 out-start (- (length out) 32))))
+  (let ((size (- end start)))
+    (cond ((or (= size 32) (= size 64))
+           (let ((state (if k (keccak-state (keccak-reset k))
+                            (make-array 25 :element-type '(unsigned-byte 64) :initial-element 0))))
+             (fixed-into data start (if (= size 32) 4 8) state out out-start)))
+          (t
+           (let ((k (if k (keccak-reset k) (%make-keccak))))
+             (keccak-update k data :start start :end end)
+             (finalize-into k out out-start))))))
 
 (defun keccak256 (data &key (start 0) (end (length data)))
   "Keccak-256 of DATA[START,END) as 32 octets."
   (declare (type octets data))
-  (assert (and (typep start 'fixnum) (typep end 'fixnum) (<= 0 start end (length data))))
-  (case (- end start)
-    (32 (keccak256-fixed data start 4))
-    (64 (keccak256-fixed data start 8))
-    (otherwise
-     (let ((k (%make-keccak)))
-       (keccak-update k data :start start :end end)
-       (keccak-final k)))))
+  (keccak256-into data start end (make-octets 32) 0))
 
 (defun keccak256-concat (&rest parts)
   (let ((k (%make-keccak)))
