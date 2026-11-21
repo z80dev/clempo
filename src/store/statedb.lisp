@@ -45,7 +45,7 @@ limits say.")
    ;; persistence
    #:store #:store-db #:store-dir #:store-interval #:open-store #:close-store
    #:store-commit-block #:store-checkpoint #:store-sync #:store-flush #:store-durable-number
-   #:store-sync-policy
+   #:store-sync-policy #:open-datadir-snapshot
    #:store-root-mismatch #:store-root-mismatch-number #:store-root-mismatch-expected
    #:store-root-mismatch-actual #:store-format-error #:store-locked #:store-locked-dir
    #:store-corrupt-log #:store-corrupt-log-path #:store-corrupt-log-offset

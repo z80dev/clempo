@@ -11,7 +11,9 @@
   "Limits well below the test state: every flush evicts.")
 
 (defmacro with-temp-dir ((dir) &body body)
-  `(let ((,dir (temp-dir)))
+  "Run BODY with a fresh directory DIR. Syncs are plain fsync: the tests kill processes but
+cannot cut power, and F_FULLFSYNC's drive flush only adds time here."
+  `(let ((,dir (temp-dir)) (clempo.store::*full-sync* nil))
      (unwind-protect (progn ,@body)
        (when (probe-file ,dir) (sb-ext:delete-directory ,dir :recursive t)))))
 
@@ -334,3 +336,66 @@ head root (through storage roots too)."
       (is (<= (getf (db-cache-stats db) :accounts) 64))
       (is (equal (snapshot mirror) (snapshot db)))
       (close-store store))))
+
+(deftest a-snapshot-reads-the-flushed-state-beside-its-owner ()
+  ;; A reader opens the datadir while the owner keeps committing, flushing and merging: it
+  ;; sees the state of the owner's last flush, can move it with its own blocks, and none of
+  ;; that reaches the datadir.
+  (with-temp-dir (dir)
+    (let* ((rng (sb-ext:seed-random-state 51))
+           (store (open-test-store dir :interval 2))
+           (mirror (mirror-db)))
+      (loop for n from 1 to 10 do (commit-random store rng n mirror))
+      (let ((snap (open-datadir-snapshot dir)))
+        (is snap)
+        (is= 10 (db-number snap))
+        (is (equal (snapshot mirror) (snapshot snap)))
+        (check-proofs snap)
+        ;; the owner moves on (merging away segments the snapshot maps); the snapshot does not
+        (let ((before (snapshot snap)))
+          (loop for n from 11 to 30 do (commit-random store rng n mirror))
+          (is (equal before (snapshot snap)))
+          ;; blocks on the snapshot stay in its RAM
+          (random-block snap rng 11)
+          (db-commit-block snap 11 (block-hash 11))
+          (is-equalp (reference-root snap) (db-root-hash snap))))
+      (close-store store)
+      (let ((again (open-test-store dir)))
+        (is= 30 (db-number (store-db again)))
+        (is (equal (snapshot mirror) (snapshot (store-db again))))
+        (close-store again))
+      (is (null (open-datadir-snapshot (format nil "~Aempty/" dir)))))))
+
+(deftest timed-sync-keeps-durable-behind-logged ()
+  (with-temp-dir (dir)
+    (let ((rng (sb-ext:seed-random-state 52))
+          (store (open-test-store dir :sync '(:every-ms 600000) :cache (make-cache-limits))))
+      ;; genesis was flushed (synced) just now: the next minutes' blocks are logged unsynced
+      (loop for n from 1 to 6 do (commit-random store rng n))
+      (is= 0 (store-durable-number store) "synced before its time")
+      (store-sync store)
+      (is= 6 (store-durable-number store))
+      (close-store store))))
+
+(deftest background-merges-keep-reads-whole ()
+  ;; Many small flushes: tiers merge on the merge thread while the writer keeps flushing and
+  ;; reading; every read and the final store agree with the mirror, and the segment count
+  ;; stays bounded.
+  (with-temp-dir (dir)
+    (let* ((rng (sb-ext:seed-random-state 53))
+           (store (open-test-store dir :interval 1 :cache (make-cache-limits)))
+           (kv (clempo.store::store-kv store))
+           (mirror (mirror-db)))
+      (loop for n from 1 to 48
+            do (commit-random store rng n mirror)
+               (when (zerop (mod n 8))
+                 (is (equal (snapshot mirror) (snapshot (store-db store))) "at ~D" n)))
+      (clempo.store::kv-wait-merges kv)
+      (is (plusp (clempo.store::kv-merges kv)))
+      (is (< (length (clempo.store::kv-segments kv)) 16) "~D segments" (length (clempo.store::kv-segments kv)))
+      (close-store store)
+      (let ((again (open-test-store dir)))
+        (is (equal (snapshot mirror) (snapshot (store-db again))))
+        (multiple-value-bind (stored reachable) (node-census (store-db again))
+          (is= reachable stored))
+        (close-store again)))))

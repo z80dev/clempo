@@ -197,10 +197,17 @@
 ;;; Durable writes. On macOS fsync(2) leaves data in the drive's cache; F_FULLFSYNC flushes it
 ;;; to stable storage, which is what a durability promise needs. Elsewhere fsync does that.
 
+(defvar *full-sync* t
+  "NIL makes macOS syncs plain fsync(2): safe against a process crash (the kernel keeps the
+data) but not a power loss. The store's tests bind it, since a killed process is what they
+can simulate; nothing else should.")
+
 (defun sync-fd (fd)
-  #+darwin (handler-case (sb-posix:fcntl fd 51) ; F_FULLFSYNC
-             ;; a file system without it (some network mounts): plain fsync
-             (sb-posix:syscall-error () (sb-posix:fsync fd)))
+  #+darwin (if *full-sync*
+               (handler-case (sb-posix:fcntl fd 51) ; F_FULLFSYNC
+                 ;; a file system without it (some network mounts): plain fsync
+                 (sb-posix:syscall-error () (sb-posix:fsync fd)))
+               (sb-posix:fsync fd))
   #-darwin (sb-posix:fsync fd)
   fd)
 

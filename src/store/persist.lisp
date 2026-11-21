@@ -11,8 +11,9 @@
 ;;; STORE-COMMIT-BLOCK appends the block's diff to the log and, under the default :BLOCK
 ;;; policy, syncs it to stable storage (F_FULLFSYNC on macOS) before returning: a block the
 ;;; store has acknowledged survives a crash or power loss. Under (:GROUP N) the log is synced
-;;; every N blocks; STORE-DURABLE-NUMBER is then the last block a crash cannot lose, and a
-;;; caller acknowledges nothing past it. Every INTERVAL blocks, and whenever the database holds
+;;; every N blocks, under (:EVERY-MS T) once T milliseconds have passed since the last sync;
+;;; both also sync at every flush and on close. STORE-DURABLE-NUMBER is then the last block a
+;;; crash cannot lose, and a caller acknowledges nothing past it. Every INTERVAL blocks, and whenever the database holds
 ;;; its cache limit's worth of unflushed writes, the store flushes them as one KV segment and
 ;;; starts a new log.
 ;;;
@@ -293,19 +294,28 @@ bad record with valid ones after it signals STORE-CORRUPT-LOG."
 (defstruct (store (:constructor %make-store (dir kv db interval sync-policy)))
   dir kv db
   (interval 0 :type integer)          ; blocks between flushes; 0 = only on the cache limit
-  (sync-policy :block)                ; :BLOCK or (:GROUP n)
+  (sync-policy :block)                ; :BLOCK, (:GROUP n) or (:EVERY-MS t)
   wal-stream wal-sink
   (logged-number -1 :type integer)    ; last block appended to the log
   (durable-number -1 :type integer)   ; last block a crash cannot lose
   (unsynced 0 :type fixnum)
+  (synced-at 0 :type integer)         ; internal real time of the last sync
   (lock-fd nil))
 
 (defun check-sync-policy (policy)
   (unless (or (eq policy :block)
-              (and (consp policy) (eq (first policy) :group) (typep (second policy) '(integer 1))
-                   (null (cddr policy))))
-    (error "store: sync policy must be :BLOCK or (:GROUP n), not ~S" policy))
+              (and (consp policy) (member (first policy) '(:group :every-ms))
+                   (typep (second policy) '(integer 1)) (null (cddr policy))))
+    (error "store: sync policy must be :BLOCK, (:GROUP n) or (:EVERY-MS t), not ~S" policy))
   policy)
+
+(defun sync-due-p (store)
+  "Whether the sync policy wants the log synced after the block just appended."
+  (let ((policy (store-sync-policy store)))
+    (cond ((eq policy :block) t)
+          ((eq (first policy) :group) (>= (store-unsynced store) (second policy)))
+          (t (>= (- (get-internal-real-time) (store-synced-at store))
+                 (* (second policy) (/ internal-time-units-per-second 1000)))))))
 
 (defun open-wal (store path)
   (let ((stream (open path :element-type '(unsigned-byte 8) :direction :output
@@ -338,7 +348,7 @@ bad record with valid ones after it signals STORE-CORRUPT-LOG."
 An empty datadir is initialized by calling GENESIS with the fresh state database, which must
 commit block 0 in it. Otherwise the flushed state is opened and the log replayed on it with
 every block's root checked; a format 1 datadir is imported first. SYNC is the log's sync
-policy (:BLOCK or (:GROUP n)); INTERVAL the blocks between flushes (0: flush only when the
+policy (:BLOCK, (:GROUP n) or (:EVERY-MS t)); INTERVAL the blocks between flushes (0: flush only when the
 unflushed writes reach CACHE's limit); CACHE the database's cache limits. LOG is called with
 a format string and arguments for progress notes."
   (check-sync-policy sync)
@@ -350,6 +360,25 @@ a format string and arguments for progress notes."
                 (setf (store-lock-fd store) fd))
       (unless store (unlock-datadir fd)))
     store))
+
+(defun open-datadir-snapshot (dir &key (cache (make-cache-limits)))
+  "A state database over the flushed state of the datadir DIR, or NIL when it holds none.
+It takes no lock, replays no log and changes no file, so it may be opened beside the store
+that owns DIR: the segments it maps stay readable after the owner merges them away. Its
+height is the owner's last flush (DB-NUMBER), not the owner's head. Blocks may be executed
+and committed on it (WITH-SPECULATIVE-BLOCKS, or plain commits that move it); they stay in
+its RAM and never reach DIR."
+  (let ((dir (normalize-dir dir)))
+    (when (kv-manifest-p dir)
+      ;; a merge may delete a listed segment between the manifest read and its open
+      (loop repeat 8
+            do (let ((kv (handler-case (open-kv dir :read-only t)
+                           (file-error () nil)
+                           (sb-posix:syscall-error () nil))))
+                 (when kv
+                   (return (when (kv-get kv (key-head))
+                             (open-backed-statedb kv cache)))))
+            finally (format-error "~A: its segments kept changing while being opened" dir)))))
 
 (defun legacy-manifest (dir)
   "The checkpoint number a format 1 MANIFEST names, or NIL."
@@ -419,6 +448,7 @@ a format string and arguments for progress notes."
   (sink-flush (store-wal-sink store))
   (sync-stream (store-wal-stream store))
   (setf (store-unsynced store) 0
+        (store-synced-at store) (get-internal-real-time)
         (store-durable-number store) (store-logged-number store)))
 
 (defun flush-db (store)
@@ -429,6 +459,7 @@ a format string and arguments for progress notes."
     (start-wal store)
     (setf (store-logged-number store) (db-number db)
           (store-durable-number store) (db-number db)
+          (store-synced-at store) (get-internal-real-time)
           (store-unsynced store) 0)
     (db-number db)))
 
@@ -447,9 +478,7 @@ the interval or the cache limit says so."
     (put-wal-record (store-wal-sink store) (encode-block-diff diff))
     (setf (store-logged-number store) (block-diff-number diff))
     (incf (store-unsynced store))
-    (let ((policy (store-sync-policy store)))
-      (when (or (eq policy :block) (>= (store-unsynced store) (second policy)))
-        (store-sync store)))
+    (when (sync-due-p store) (store-sync store))
     (let ((k (store-interval store)))
       (when (and (db-flush-ready-p db)
                  (or (and (plusp k) (zerop (mod (block-diff-number diff) k)))
@@ -539,6 +568,7 @@ the interval or the cache limit says so."
   (funcall log "store: importing format 1 checkpoint ~D of ~A" n dir)
   (dolist (p (directory (dir-file dir "seg-*.kv"))) (delete-file p))
   (let ((kv (%make-kv dir)))
+    (setf (kv-background kv) nil)
     (import-checkpoint kv (checkpoint-path dir n) log)
     (write-kv-manifest kv (mapcar #'kseg-name (kv-segments kv)))
     (kv-merge-tiers kv))
@@ -558,6 +588,7 @@ the interval or the cache limit says so."
                                (incf count))))
       (kv-write kv (db-flush-entries db))
       (db-after-flush db))
+    (kv-close kv)                       ; its merges finish before the store reopens DIR
     (funcall log "store: imported checkpoint ~D and ~D logged blocks" n count)
     (dolist (p (list (checkpoint-path dir n) path))
       (when (probe-file p) (delete-file p)))))

@@ -393,7 +393,14 @@ skipped unless KEEP-TOMBSTONES."
   dir
   (segments '() :type list)             ; newest first; replaced whole, read without a lock
   (seq 0 :type integer)
-  (merges 0 :type integer))
+  (merges 0 :type integer)
+  ;; Merges run on a background thread, one at a time. The lock orders every change of
+  ;; SEGMENTS (a flush adds one at the front, a merge replaces a run) with its MANIFEST.
+  (lock (sb-thread:make-mutex :name "kv"))
+  (merged (sb-thread:make-waitqueue :name "kv merge done"))
+  (merger nil)                          ; the running merge thread
+  (merge-error nil)                     ; a merge's failure, signalled to the next writer
+  (background t))                       ; NIL: merge on the writer's thread
 
 (defun kv-segment-name (n) (format nil "seg-~12,'0D.kv" n))
 
@@ -426,17 +433,21 @@ skipped unless KEEP-TOMBSTONES."
     (and (probe-file path)
          (eql 0 (search "clempo-kv " (clempo.io:read-file-string path))))))
 
-(defun open-kv (dir)
+(defun open-kv (dir &key read-only)
   "Open the KV store in DIR (an empty one when DIR has no KV manifest), removing segment
-files the manifest does not list (a write or merge cut short)."
+files the manifest does not list (a write or merge cut short). READ-ONLY opens what the
+manifest names and touches nothing, for a reader beside the datadir's owner; a segment a
+concurrent merge deleted between the manifest read and its open signals FILE-ERROR or
+SB-POSIX:SYSCALL-ERROR (read again)."
   (let ((kv (%make-kv dir))
         (names '()))
     (when (kv-manifest-p dir)
       (multiple-value-bind (seq listed) (parse-kv-manifest (clempo.io:read-file-string (dir-file dir "MANIFEST")))
         (setf (kv-seq kv) seq names listed)))
-    (dolist (p (directory (dir-file dir "seg-*.kv")))
-      (unless (member (file-namestring p) names :test #'string=) (delete-file p)))
-    (dolist (p (directory (dir-file dir "seg-*.kv-tmp"))) (delete-file p))
+    (unless read-only
+      (dolist (p (directory (dir-file dir "seg-*.kv")))
+        (unless (member (file-namestring p) names :test #'string=) (delete-file p)))
+      (dolist (p (directory (dir-file dir "seg-*.kv-tmp"))) (delete-file p)))
     (setf (kv-segments kv) (mapcar (lambda (n) (open-kseg (dir-file dir "~A" n))) names))
     kv))
 
@@ -456,12 +467,19 @@ files the manifest does not list (a write or merge cut short)."
 
 (defun kv-segment-bytes (seg) (kseg-length seg))
 
+(defconstant +merge-width+ 4)
+(defconstant +segments-max+ 24
+  "Segments a writer may leave before it waits for the running merge (backpressure: lookups
+cost one probe per segment).")
+
 (defun kv-write (kv entries &key (manifest t))
   "Write ENTRIES, a vector of (key . value) with distinct keys in ascending order (an empty
-value deletes), as the newest segment; then merge tiers. Without MANIFEST the segment is
+value deletes), as the newest segment, and start a merge if a tier is full. Waits while
++SEGMENTS-MAX+ segments are live and a merge is running. Without MANIFEST the segment is
 readable through KV but not yet named in MANIFEST (an import publishes them all at once)."
+  (kv-check-merge kv)
   (when (plusp (length entries))
-    (let* ((seq (incf (kv-seq kv)))
+    (let* ((seq (sb-thread:with-mutex ((kv-lock kv)) (incf (kv-seq kv))))
            (name (kv-segment-name seq))
            (path (dir-file (kv-dir kv) "~A" name))
            (i 0))
@@ -472,42 +490,90 @@ readable through KV but not yet named in MANIFEST (an import publishes them all 
                            (incf i)
                            (values (car e) (cdr e)))))
                      (length entries))
-      (let ((segments (cons (open-kseg path) (kv-segments kv))))
-        (when manifest (write-kv-manifest kv (mapcar #'kseg-name segments)))
-        (setf (kv-segments kv) segments))
-      (when manifest (kv-merge-tiers kv))))
+      (let ((seg (open-kseg path)))
+        (sb-thread:with-mutex ((kv-lock kv))
+          (let ((segments (cons seg (kv-segments kv))))
+            (when manifest (write-kv-manifest kv (mapcar #'kseg-name segments)))
+            (setf (kv-segments kv) segments))))
+      (when manifest
+        (kv-merge-tiers kv)
+        (sb-thread:with-mutex ((kv-lock kv))
+          (loop while (and (kv-merger kv) (> (length (kv-segments kv)) +segments-max+))
+                do (sb-thread:condition-wait (kv-merged kv) (kv-lock kv)))))))
   kv)
 
+(defun kv-check-merge (kv)
+  (let ((e (shiftf (kv-merge-error kv) nil)))
+    (when e (error e))))
+
+(defun merge-group (segments)
+  "The first run of +MERGE-WIDTH+ adjacent segments, newest first, within a factor of four
+in size, or NIL."
+  (loop for tail on segments
+        for group = (and (nthcdr (1- +merge-width+) tail) (subseq tail 0 +merge-width+))
+        while group
+        do (let ((sizes (mapcar #'kseg-length group)))
+             (when (<= (reduce #'max sizes) (* 4 (reduce #'min sizes)))
+               (return group)))))
+
 (defun kv-merge-tiers (kv)
-  "While the newest four segments are within a factor of four in size, merge them."
-  (loop
-    (let ((segments (kv-segments kv)))
-      (unless (>= (length segments) 4) (return))
-      (let* ((group (subseq segments 0 4))
-             (sizes (mapcar #'kv-segment-bytes group)))
-        (unless (<= (reduce #'max sizes) (* 4 (reduce #'min sizes))) (return))
-        (kv-merge kv group)))))
+  "Merge full tiers: on a background thread (one at a time), or here without BACKGROUND."
+  (if (kv-background kv)
+      (sb-thread:with-mutex ((kv-lock kv))
+        (unless (kv-merger kv)
+          (let ((group (merge-group (kv-segments kv))))
+            (when group
+              (setf (kv-merger kv)
+                    (sb-thread:make-thread
+                     (lambda ()
+                       (handler-case (loop for g = group then (sb-thread:with-mutex ((kv-lock kv))
+                                                                (merge-group (kv-segments kv)))
+                                           while g do (kv-merge kv g))
+                         (error (e) (setf (kv-merge-error kv) e)))
+                       (sb-thread:with-mutex ((kv-lock kv))
+                         (setf (kv-merger kv) nil)
+                         (sb-thread:condition-broadcast (kv-merged kv))))
+                     :name "kv merge"))))))
+      (loop for group = (merge-group (kv-segments kv))
+            while group do (kv-merge kv group))))
 
 (defun kv-merge (kv group)
-  "Replace GROUP (the newest segments, newest first) by one segment."
-  (let* ((rest (nthcdr (length group) (kv-segments kv)))
-         (seq (incf (kv-seq kv)))
-         (name (kv-segment-name seq))
-         (path (dir-file (kv-dir kv) "~A" name))
-         (next (merged-records group 0 nil :keep-tombstones (not (null rest)))))
+  "Replace GROUP, a run of adjacent segments (newest first), by one segment. The run stays
+adjacent while it merges: flushes only add segments at the front."
+  (let* ((older-p (sb-thread:with-mutex ((kv-lock kv))
+                    (rest (member (car (last group)) (kv-segments kv)))))
+         (seq (sb-thread:with-mutex ((kv-lock kv)) (incf (kv-seq kv))))
+         (path (dir-file (kv-dir kv) "~A" (kv-segment-name seq)))
+         ;; tombstones go only when no older segment holds what they delete
+         (next (merged-records group 0 nil :keep-tombstones older-p)))
     (write-segment path next (reduce #'+ group :key #'kseg-records))
-    (let ((segments (cons (open-kseg path) rest)))
-      (write-kv-manifest kv (mapcar #'kseg-name segments))
-      (setf (kv-segments kv) segments)
-      (incf (kv-merges kv))
+    (let ((merged (open-kseg path)))
+      (sb-thread:with-mutex ((kv-lock kv))
+        (let* ((segments (kv-segments kv))
+               (at (search group segments)))
+          (invariant at "merged segments are no longer adjacent")
+          (let ((new (append (subseq segments 0 at) (list merged)
+                             (nthcdr (+ at (length group)) segments))))
+            (write-kv-manifest kv (mapcar #'kseg-name new))
+            (setf (kv-segments kv) new)
+            (incf (kv-merges kv))
+            (sb-thread:condition-broadcast (kv-merged kv)))))
       ;; Readers holding the old list keep their mappings until the segments are collected.
       (dolist (s group) (delete-file (kseg-path s))))))
 
+(defun kv-wait-merges (kv)
+  "Wait for the running merge, then signal its failure if it failed."
+  (let ((thread (sb-thread:with-mutex ((kv-lock kv)) (kv-merger kv))))
+    (when thread (sb-thread:join-thread thread :default nil)))
+  (kv-check-merge kv))
+
 (defun kv-compact (kv)
   "Merge every segment into one (tombstones dropped)."
+  (kv-wait-merges kv)
   (when (rest (kv-segments kv)) (kv-merge kv (kv-segments kv)))
   kv)
 
 (defun kv-close (kv)
+  (kv-wait-merges kv)
   (setf (kv-segments kv) '())
   kv)
