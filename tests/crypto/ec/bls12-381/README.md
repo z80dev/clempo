@@ -76,7 +76,7 @@ Arkworks subgroup criteria cited in `group-performance.md`. The Lisp implementat
 is independently written, not copied library code. No Go source was read or copied.
 
 All 15 `bls*.sexp` / `fail-bls*.sexp` files are DATA ONLY converted from every
-`.json.gz` in `~/clempo-infra/goempo-ref/internal/crypto/bls12381/testdata/`.
+`.json.gz` in goempo's repository, `internal/crypto/bls12381/testdata/`.
 Each row retains `(Name Input Expected Valid)`. That fixture README records
 upstream go-ethereum `core/vm/testdata/precompiles`, master fetched 2026-11-17.
 The imported MSM files are the upstream fixture set's recorded subsets (up to

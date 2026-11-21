@@ -198,7 +198,7 @@ The harness follows the local Rust sources `xtask/src/generate_localnet.rs`,
 `xtask/src/genesis_args.rs`, `crates/chainspec/src/cli.rs`,
 `crates/consensus-config/src/lib.rs`, and the consensus DKG manager. These define
 key encryption, fork CLI spelling, history allocation, and boundary/metric
-semantics. `~/clempo-infra/goempo-ref/docs/DEVNET.md` and `HOW-IT-WAS-BUILT.md`
+semantics. goempo's repository, `docs/DEVNET.md` and `HOW-IT-WAS-BUILT.md`
 provide historical acceptance guidance only; none of their Go code or reported
 results are treated as clempo results.
 

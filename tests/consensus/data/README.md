@@ -1,6 +1,6 @@
 # Consensus fixtures
 
-Copied from goempo's checked-in test data (~/clempo-infra/goempo-ref, data only), with their
+Copied from goempo's checked-in test data (data only), with their
 original provenance:
 
 - `rust_golden.json` (goempo internal/consensus/wire/testdata): produced by a Rust harness against

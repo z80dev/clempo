@@ -1,7 +1,7 @@
 # Pool fixture provenance and developer command
 
 `mainnet-49400084-tx0-prestate.json` is copied unchanged from
-`~/clempo-infra/goempo-ref/internal/txpool/testdata/`. Its upstream README identifies
+goempo's repository, `internal/txpool/testdata/`. Its upstream README identifies
 `debug_traceTransaction` with `prestateTracer` at `https://rpc.tempo.xyz`, transaction
 0 (`0x22b20222...7dea`) of mainnet block 49,400,084. This is recorded data, not Go
 implementation code. It contains the actual fee-token, TIP-403 registry and fee-manager

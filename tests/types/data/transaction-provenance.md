@@ -1,7 +1,7 @@
 # Transaction fixtures
 
 `transaction-rpc.sexp` is a lossless projection of the recorded RPC data in
-`~/clempo-infra/goempo-ref/internal/types/testdata/txs.jsonl` (data only, no Go source).
+goempo's repository, `internal/types/testdata/txs.jsonl` (data only, no Go source).
 Rows contain label, raw EIP-2718 envelope, expected transaction hash, sender, fee payer, and key ID.
 
 - eth-0x0: moderato block 1891911, 0xf7a97b3650dd69c7cc13591a27748af329c6e9282579b2e0b4e1d1663e32d979

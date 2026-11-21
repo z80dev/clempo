@@ -28,7 +28,7 @@ Lagrange points, then 65 monomial G2 points [τ^i]G2: line 4099 = G2 generator, 
 Only [τ]G2 is needed to verify a single-point proof. BLS modulus r =
 `0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001`.
 
-## Fixtures (data only, copied from `~/clempo-infra/goempo-ref/internal/crypto/kzg/testdata/`)
+## Fixtures (data only, copied from goempo's repository, `internal/crypto/kzg/testdata/`)
 
 - `pointEvaluation.json`: go-ethereum `core/vm/testdata/precompiles` (master, fetched 2026-11-17); one valid vector.
 - `eest_point_evaluation.txt`: 125 point-evaluation (0x0a) inputs from ethereum/execution-spec-tests develop

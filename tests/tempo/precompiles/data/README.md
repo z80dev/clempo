@@ -6,7 +6,7 @@ zempo's reference-oracle corpus (`src/tempo/precompiles/testdata` at zempo commi
 4,992 generated Tempo precompile calls across T0..T14, each run through the reference's own
 precompiles (tempoxyz/tempo, via zempo's `tools/oracle` `precompile_call`) over the same
 pre-state. Copied byte for byte from goempo
-(`~/clempo-infra/goempo-ref/internal/tempo/precompiles/testdata/oracle.tar.gz`, goempo commit
+(goempo's repository, `internal/tempo/precompiles/testdata/oracle.tar.gz`, goempo commit
 92e996ca), which took it from zempo.
 
 Members: `cases.jsonl` / `expected.jsonl` and `forks/<area>.cases.jsonl` /

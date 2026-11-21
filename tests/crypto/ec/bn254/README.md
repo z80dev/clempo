@@ -85,7 +85,7 @@ Rust sources were read as specifications, not incorporated as production code:
   Frobenius constants, and final-exponent factorisation.
 
 Fixture source directory:
-`~/clempo-infra/goempo-ref/internal/crypto/bn254/testdata/`.
+goempo's repository, `internal/crypto/bn254/testdata/`.
 **Only fixture data and its README were read there; no Go source was read.**
 
 | Imported data | Cases | Source | Source SHA-256 |

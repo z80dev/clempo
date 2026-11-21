@@ -1,7 +1,7 @@
 # DKG test data
 
 Recorded data only (no code). Copied from goempo's checked-in fixtures
-(`~/clempo-infra/goempo-ref/internal/...`) and the tempo checkout (`~/dev/tempo`, commit
+(goempo's repository, `internal/...`) and the tempo checkout (`~/dev/tempo`, commit
 568b4fb4258c, 2026-11-20). Each file's origin, as recorded by its source:
 
 - `mainnet_block_42098399_extradata.hex`: extraData of mainnet block 42098399

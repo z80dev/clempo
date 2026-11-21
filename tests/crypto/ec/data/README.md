@@ -1,6 +1,6 @@
 # Prime-curve and modular-exponentiation fixtures
 
-Only data were copied from `~/clempo-infra/goempo-ref/internal/crypto/`.
+Only data were copied from goempo's repository, `internal/crypto/`.
 
 - `secp256k1/tempo_mainnet_senders.txt`: 24 legacy/EIP-1559 mainnet transactions from blocks 0x2000000–0x2f19028, recorded from rpc.tempo.xyz.
 - `secp256k1/eest_senders.txt`: 160 Ethereum execution-spec-tests transactions (legacy, EIP-155, types 1/2) and 40 EIP-7702 authorizations.

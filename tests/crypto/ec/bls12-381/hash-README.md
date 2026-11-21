@@ -1,7 +1,7 @@
 # BLS12-381 hash-to-curve fixtures
 
 `hash-vectors.sexp` contains all 220 records from these DATA files in
-`~/clempo-infra/goempo-ref/internal/crypto/bls12381/testdata/`:
+goempo's repository, `internal/crypto/bls12381/testdata/`:
 
 - `bls12_381_h2c_g1.json` and `bls12_381_h2c_g2.json`: RFC 9380
   BLS12381G1/G2_XMD:SHA-256_SSWU_RO_ vectors, including their exact QUUX DSTs.

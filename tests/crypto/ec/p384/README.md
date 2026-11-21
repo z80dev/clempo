@@ -12,7 +12,7 @@ The generic production engine is removed. Fp and scalar N use six little-endian 
 
 `make-p384-scratch :memoize t` opts into a bounded, positive-only 64-entry FIFO cache keyed by the complete public coordinates, digest and r/s. Mutable digest bytes are copied into preallocated storage. Default contexts do not memoize. Only the pure mathematical predicate is cached: Nitro timestamp/expiry, chain/root/path constraints, parsing, policy and gas checks still execute every time. This follows the stateless prehashed reference verifier in `crates/nitro-attestation/src/aws_lc.rs`; no attestation/certificate result is cached.
 
-An instrumented Recent replay on `6c0f9d2` still executed all 9,030 original verifications (7,224 certificate, 1,806 attestation). It observed 1,854 distinct tuples, identical answers on every repetition, and 6,093 potential positive hits in a simulated 64-entry FIFO (67.5%). Evidence is `~/scratch/clempo/p384/repetitions.json`. The separate uninstrumented baseline completed all 40,000 blocks in 36.364805 s replay wall / 37.733447 s CPU (`baseline-recent.json` in the same directory).
+An instrumented Recent replay on `6c0f9d2` still executed all 9,030 original verifications (7,224 certificate, 1,806 attestation). It observed 1,854 distinct tuples, identical answers on every repetition, and 6,093 potential positive hits in a simulated 64-entry FIFO (67.5%). Evidence is `logs/p384/repetitions.json`. The separate uninstrumented baseline completed all 40,000 blocks in 36.364805 s replay wall / 37.733447 s CPU (`baseline-recent.json` in the same directory).
 
 Use `speed.lisp` in this directory for the uncached arithmetic microbenchmark; its default context does not memoize, so repeated input cannot turn that measurement into a cache-hit timing. The generic baseline was 1,476.173 µs CPU / 1,475.947 µs wall and 2,930,154 bytes per call over 1,000 calls.
 
@@ -24,7 +24,7 @@ Recent isolation (`828674f` versus parent `4c2db4d`, B-A-A-B order): B wall
 blocks (18,733 transactions, 3,768,403,621 gas). Mean wall/CPU fell 43.9%/36.2%;
 allocation fell 72.8%, while peak RSS and GC increased in these observations.
 Full process/replay metrics are in [BENCH](../../../../docs/BENCH.md#native-p-384-and-repeated-nitro-signatures)
-and `~/scratch/clempo/p384/recent-{A1,A2,B1,B2}/replay.json`.
+and `logs/p384/recent-{A1,A2,B1,B2}/replay.json`.
 
 The real portable field source branch was also recompiled with `:arm64`
 disabled; all 28 P384 tests passed, including uncached, cold-cache and warm-cache

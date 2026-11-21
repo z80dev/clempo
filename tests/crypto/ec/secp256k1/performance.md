@@ -126,7 +126,7 @@ fresh pubkeys are never claimed to allocate zero bytes.
 
 ExecSpeedAgent ran two alternating, sequential pairs on the same pipelined
 replay baseline: A=`d3aace8`, B=`53adb01` (A plus `217b0c1`). The four replay
-JSON/log artifacts were inspected under `~/scratch/clempo/busy/es/`:
+JSON/log artifacts were inspected under `logs/busy/es/`:
 
 | Arm | Replay wall time | Replay CPU time |
 |---|---:|---:|
@@ -146,7 +146,7 @@ other agents' replay/pipeline changes and must not be attributed solely to crypt
 The standalone `217b0c1` Busy run using the standard runner with only its
 checkout root changed completed in **28.467858 s replay wall / 61.244520 s CPU**,
 1,106.487 Mgas/s, 1.999 GB peak RSS. Its result is
-`~/scratch/clempo/busy/20261121-085152-217b0c1-1/replay.json`; it completed the
+`logs/busy/20261121-085152-217b0c1-1/replay.json`; it completed the
 same 20,000 blocks, 659,246 transactions and 31,499,321,696 gas. The wrapper's
 39.64-s process wall time also includes release compilation and initialization,
 which are outside the replay interval. This is not an isolated comparison

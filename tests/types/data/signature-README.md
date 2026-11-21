@@ -1,6 +1,6 @@
 # Signature fixtures
 
-Source data: `~/clempo-infra/goempo-ref/internal/types/testdata/txs.jsonl`, with provenance in its adjacent README. These are transaction envelopes recorded on 2026-11-17 from `https://rpc.tempo.xyz` and `https://rpc.moderato.tempo.xyz`, paired with RPC `from` and receipt `keyId`. No Go source was read or used.
+Source data: goempo's repository, `internal/types/testdata/txs.jsonl`, with provenance in its adjacent README. These are transaction envelopes recorded on 2026-11-17 from `https://rpc.tempo.xyz` and `https://rpc.moderato.tempo.xyz`, paired with RPC `from` and receipt `keyId`. No Go source was read or used.
 
 - `signature-mainnet-moderato.json`: all fifteen Tempo transactions in that corpus, spanning untyped secp256k1, P256 and WebAuthn approvals, keychain V1/V2, sponsorship, key authorization, and AA authorization lists. Each entry retains the source network, block, variant label, raw signature, reconstructed unsigned transaction preimage, and independently recorded RPC sender/key ID. Embedded authorizations are retained as exact RLP bytes.
 - `signature-p256.json`: the primitive P256 approval extracted from the moderato block 4688660 V1 keychain fixture. V1 uses the original transaction signing hash, so its inner signature is also a valid standalone P256 fixture. Its expected sender is the original independently recorded RPC key ID.
