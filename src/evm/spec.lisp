@@ -49,7 +49,10 @@
                                   (loop for (fork value) in changes
                                         do (setf form `(if (>= f ,(fork-index fork)) ,value ,form)))
                                   form))))))
-       (defparameter *gas-param-names* ',names))))
+       (defparameter *gas-param-names* ',names)
+       (eval-when (:compile-toplevel :load-toplevel :execute)
+         (export ',(mapcar (lambda (n) (intern (format nil "GAS-PARAMS-~A" n) :clempo.evm)) names)
+                 :clempo.evm)))))
 
 (define-gas-params
   ;; state access
