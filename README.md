@@ -13,7 +13,7 @@ clempo is an independent implementation of the Tempo reference node, alongside o
 | R3 Replay | executing mainnet from genesis: gas, receipts root, bloom, state root of every block | **50,049,999** (end of the local archive), no healed blocks | 49,399,999 |
 | R3e EVM | execution-spec-tests v5.4.0 state tests, Istanbul..Osaka | 61,903/61,903 | 61,903/61,903 |
 | R3p Precompiles | reference-oracle corpus of Tempo precompile calls, T0..T14 | 4,986/4,992 | 4,986/4,992 |
-| R4 Follow | live tip: executed, certified, RPC probed independently | 47,451 blocks executed and certified in the historical hour run; peak sampled lag 4 | yes |
+| R4 Follow | live tip: executed, certified, RPC probed independently | 74,779 blocks executed and certified; latest recorded hour failed the RPC gap limit (20.0195 s vs 20 s) | yes |
 | R5 RPC | recorded reference answers, separated by comparison mode | see the [RPC evidence](FRONTIER.md#evidence) for verdicts and coverage | see [goempo's frontier](https://github.com/gakonst/goempo/blob/main/FRONTIER.md) |
 | R6 Validator | Simplex and DKG; independent signers with Rust validators | seeded sims (4/5/7 validators, faults, reshares); devnet where clempo signers are required for quorum | seeded simulations and mixed-validator devnet |
 | R7 Speed | timed replay/import wall throughput vs Rust on the same Mac | 6.65× (Early), 1.58× (Busy), 2.86× (Recent) | 17.65× (Early), 1.36× (Busy); no same-host Recent result |

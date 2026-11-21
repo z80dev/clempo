@@ -10,7 +10,7 @@ These measurements are revision-specific. Paths under `logs/` describe local art
 | R3 Replay | **50,049,999** (the archive tip; goempo's frontier 49,399,999): every mainnet block 1..50,049,999 executed from genesis matches gas used, receipts root, logs bloom and state root, state on disk, no heals, no skips, through every fork T0..T13 | `d1d277e` (replay), `0fad06f` | 2026-11-21 |
 | R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `750c66b` | 2026-11-21 |
 | R3p Precompiles | 4,986/4,992 (goempo's frontier; every Tempo precompile T0..T14; the 6 differences are T14 keychain grants where clempo follows tempo c8b89f9, newer than the corpus: +2,600 gas root-retirement probe) | `fd2d4cf` | 2026-11-21 |
-| R4 Follow | Historical hour: 47,451 mainnet blocks executed and certified through 50,097,450; 62m10s independently sampled RPC after catchup, peak lag 4, p95 3, no incorrect responses. See the rerun command and original verdict below. | `15c118d` | 2026-11-21 |
+| R4 Follow | No: 74,779 mainnet blocks executed and certified through 50,124,778; 3,783.9 s independently sampled, peak lag 4, p95 1, no incorrect responses. The longest gap between valid samples was 20.0195 s (limit 20 s). | `6763415` | 2026-11-21 |
 | R5 RPC | See the RPC evidence below. The legacy aggregate included negative-test labels, shape-only cases and reference timeouts; it does not establish value parity. | `4c2db4d` (legacy report) | 2026-11-21 |
 | R6 Validator | Sims: 4, 5 and 7 validators, three epochs each. Mixed devnet: one clempo signer necessary through two reshares, two clempo signers necessary through three. | `b680aaf`, `dbe14d1` | 2026-11-21 |
 | R7 Speed | Same Mac, clempo vs Rust timed wall / CPU seconds: Early **8.83 / 9.65 vs 58.71 / 36.41**; Busy **22.75 / 58.20 vs 35.93 / 45.76**; Recent **19.97 / 23.82 vs 57.13 / 24.42**. Goempo replay wall: **3.33 s** Early, **26.51 s** Busy. Early after `3327105` (paired with goempo, median of 3): **2.77 s vs goempo 3.29 s** (1.19×; 21.2× Rust), [evidence](docs/BENCH.md#early-after-the-per-block-work-3327105-measured-on-f5f79c5). See the [benchmark methodology](docs/BENCH.md#results-on-the-shared-dev-host); root checks differ and clempo's run predates the disk-backed store migration. | clempo `4940311`, goempo `92e996c`, Rust `568b4fb4258c` | 2026-11-21 |
@@ -150,6 +150,22 @@ between successful samples was 10.020 s. Observed lag was at most 4 blocks
 was 2 blocks, and its last sample saw 3. The committed harness uses the
 criteria in [GOAL.md](GOAL.md), without an extra cutoff. It writes `r4.json`,
 `node.json`, `node.log` and `rpc.jsonl` in the supplied run directory.
+
+R4 rerun with the committed harness (`6763415`):
+
+```sh
+CLEMPO_R4_PORT=38545 CLEMPO_RPC=http://127.0.0.1:8545 \
+  scripts/r4/run-hour.sh "$STOPPED_STATE" "$NEW_RUN_DIR"
+```
+
+From the same anchor at 50,049,999 the node executed and certified all
+74,779 blocks through 50,124,778 (9,384 blocks during the node's 3,839 s
+live window). The independent RPC window lasted 3,783.879 s: 750 of 757
+attempts matched and none returned an incorrect value. Peak lag was 4
+blocks, p95 was 1, and 446 samples had no lag. The seven failed probes
+requested storage at a head the node had already advanced past; that
+revision did not retain the earlier state. The longest gap between valid
+samples was 20.019501 s against the 20 s limit, so the verdict was **no**.
 
 R4 certificates (bba3dfe): `CLEMPO_RPC=http://127.0.0.1:8545 CLEMPO_BUILD=release bin/clempo-dev certify -from 49995000 -to 50015000 -threads 16`
 verified all 20,001 consecutive mainnet finalization certificates across the epoch 2314/2315
