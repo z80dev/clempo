@@ -56,8 +56,8 @@
   (policy-id-counter u64)
   (policy-records (mapping u64 policy-record))
   (policy-set (mapping u64 (mapping address bool)))
-  (receive-policies (mapping address receive-policy))
-  (token-transfer-policies (mapping address token-transfer-policy)))
+  (receive-policies (mapping address receive-policy) :since :t6)
+  (token-transfer-policies (mapping address token-transfer-policy) :since :t9))
 
 (deferror unauthorized "Unauthorized()")
 (deferror policy-not-found "PolicyNotFound()")
