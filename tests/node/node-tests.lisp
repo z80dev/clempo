@@ -140,7 +140,8 @@ those requests fail, as during an upstream outage."
            (sb-thread:join-thread thread :timeout 30 :default nil)
            (is report)
            (when report
-             (is (eq t (json:jget report "stopped")))
+             (is (eq :true (json:jget report "stopped")))
+             (is (search "\"stopped\":true" (json:to-json-string report)))
              (is= 5 (json:jget report "head")))
            ;; Closed and unlocked: the store opens again, and the ports are free.
            (store:close-store (store:open-store datadir))

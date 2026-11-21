@@ -585,7 +585,7 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
                              "certified" (follow:follower-certified follower)
                              "uncertified" (if certifier (certs:certifier-uncertified certifier) 0)
                              "archivedChunks" (follow:follower-chunks follower)
-                             "stopped" (if *stop-requested* t :false)
+                             "stopped" (if *stop-requested* :true :false)
                              "liveSeconds" (floor elapsed)
                              "liveBlocks" (if live-base (- (follow:head-number last) live-base) 0)
                              "maxLagAfterCatchup" max-lag)))
