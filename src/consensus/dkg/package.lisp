@@ -52,6 +52,20 @@ Tempo:
   (boundary-outcome output next-players &key epoch next-full-dkg-epoch) -> outcome
   height-epoch epoch-first-height epoch-last-height boundary-height-p
 
+The DKG manager (Tempo's dkg actor, consensus/src/dkg/manager/actor, as a pure state machine):
+  (open-dkg-manager &key seed store epoch-length t12-time t15-time header-at
+                         last-finalized-height initial-share) -> (values manager actions)
+  (dkg-finalized-block m dkg-block) -> actions     every finalized block, in height order
+  (dkg-receive m from epoch octets) -> actions      a DKG channel message (after the mux)
+  (dkg-dealer-log m epoch) -> octets | NIL           extraData of a non-boundary proposal
+  (dkg-verify-dealer-log m epoch timestamp octets) -> dealer | NIL
+  (dkg-notarized-block m dkg-block)                   blocks of unfinalized branches
+  (dkg-ceremony-output m parent) -> output | (values NIL :needs-ancestor height digest view)
+  (dkg-boundary-extra-data m parent next-players next-full-dkg-epoch) -> octets | (same)
+  Actions: (:send recipient epoch octets) (:exit epoch) (:enter epoch output share).
+  DKG-STORE (generic functions; MAKE-MEMORY-DKG-STORE) persists Tempo's State and Event
+  encodings (ENCODE-EPOCH-STATE, ENCODE-DKG-EVENT) per epoch.
+
 Malformed bytes signal CW-ERROR (a subclass of ERROR); refused protocol input signals
 DKG-ERROR (reason keyword in DKG-ERROR-REASON); a round that cannot produce an output signals
 DKG-FAILURE (a DKG-ERROR).")
@@ -101,4 +115,18 @@ DKG-FAILURE (a DKG-ERROR).")
    #:deal
    ;; Tempo integration
    #:height-epoch #:epoch-first-height #:epoch-last-height #:boundary-height-p
-   #:extra-data-dealer-log #:collect-dealer-logs #:conclude-ceremony #:boundary-outcome))
+   #:extra-data-dealer-log #:collect-dealer-logs #:conclude-ceremony #:boundary-outcome
+   #:resume-player #:scalar-from-ikm #:epoch-phase #:latest-boundary-at-or-before
+   ;; the DKG manager (Tempo's dkg actor as a state machine)
+   #:open-dkg-manager #:dkg-manager #:dkg-finalized-block #:dkg-receive #:dkg-dealer-log
+   #:dkg-verify-dealer-log #:dkg-notarized-block #:dkg-ceremony-output
+   #:dkg-boundary-extra-data #:dkg-next-unrecorded-height
+   #:dkg-manager-current-epoch #:dkg-manager-output #:dkg-manager-share
+   #:dkg-manager-next-players #:dkg-manager-dealer-p #:dkg-manager-player-p #:dkg-manager-key
+   #:dkg-block #:make-dkg-block #:dkg-block-height #:dkg-block-digest #:dkg-block-parent
+   #:dkg-block-timestamp #:dkg-block-extra-data #:dkg-block-parent-view
+   #:dkg-store-states #:dkg-store-events #:dkg-store-put-state #:dkg-store-append-event
+   #:dkg-store-prune #:make-memory-dkg-store #:memory-dkg-store
+   #:epoch-state #:make-epoch-state #:state-epoch #:state-seed #:state-output #:state-share
+   #:state-players #:state-is-full-dkg #:encode-epoch-state #:decode-epoch-state
+   #:dkg-event #:encode-dkg-event #:decode-dkg-event))

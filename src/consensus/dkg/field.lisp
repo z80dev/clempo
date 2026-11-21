@@ -45,9 +45,24 @@ of unity of order next_power_of_two(TOTAL)."
        (let ((lg (integer-length (1- total))))
          (fr-expt (or (root-of-unity lg) (dkg-fail :domain-too-large)) index))))))
 
-(defun random-scalar ()
-  "Scalar::random: a uniformly random non-zero scalar, from clempo.io:*entropy*."
-  (1+ (clempo.io:random-below (1- +group-order+))))
+(defparameter *keygen-salt*
+  (clempo.sha2:sha256 (string->octets "BLS-SIG-KEYGEN-SALT-")))
+
+(defun scalar-from-ikm (ikm)
+  "Scalar::from_ikm (blst_keygen, the IETF BLS KeyGen / EIP-2333 HKDF_mod_r): a non-zero
+scalar from at least 32 bytes of input keying material."
+  (invariant (>= (length ikm) 32) "keygen needs at least 32 bytes of IKM")
+  (loop for salt = *keygen-salt* then (clempo.sha2:sha256 salt)
+        for okm = (clempo.sha2:hkdf-sha256-expand
+                   (clempo.sha2:hkdf-sha256-extract salt (octets-concat ikm (octets-of 0)))
+                   (octets-of 0 48) 48)
+        for sk = (mod (octets->integer okm) +group-order+)
+        unless (zerop sk) return sk))
+
+(defun random-scalar (&optional (rng #'clempo.io:random-octets))
+  "Scalar::random: Scalar::from_ikm over 64 bytes from RNG (a function of a byte count, by
+default clempo.io:*entropy*'s random-octets)."
+  (scalar-from-ikm (funcall rng 64)))
 
 (defun lagrange-weights (points)
   "Interpolator::new: for distinct evaluation POINTS, the weights w_i with

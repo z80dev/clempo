@@ -11,7 +11,8 @@
                (:file "info")
                (:file "group")
                (:file "protocol")
-               (:file "tempo")))
+               (:file "tempo")
+               (:file "manager")))
 
 (defsystem "clempo-consensus-dkg/tests"
   :depends-on ("clempo-consensus-dkg")
@@ -21,4 +22,5 @@
                (:file "info-tests")
                (:file "protocol-tests")
                (:file "ceremony-tests")
-               (:file "tempo-tests")))
+               (:file "tempo-tests")
+               (:file "manager-tests")))

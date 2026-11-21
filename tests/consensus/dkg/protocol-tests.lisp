@@ -84,3 +84,37 @@
             (is= (hex (sharing-partial-public (output-public output) (share-index share)))
                  (hex (clempo.dkg::g2-octets (clempo.dkg::g2-base-mul
                                               (share-private share)))))))))))
+
+(deftest dkg-player-resume ()
+  ;; Player::resume over Rust's fresh round: replaying the persisted dealings gives the same
+  ;; acks; a log carrying our ack for a dealing we lost is :missing-player-dealing.
+  (let* ((round (first (rust-rounds)))
+         (epoch (clempo.json:jget round "epoch"))
+         (info (rust-round-info round))
+         (seed (first (rust-seeds)))
+         (messages '()) (rust-acks '()) (logs '()))
+    (loop for m across (clempo.json:jget round "messages")
+          for dealer = (nth (clempo.json:jget m "dealer") (rust-keys))
+          do (cond ((clempo.json:jget m "signed_log")
+                    (multiple-value-bind (d log)
+                        (check-signed-dealer-log
+                         (decode-signed-dealer-log (hex->octets (clempo.json:jget m "signed_log")) 4)
+                         info)
+                      (push (cons d log) logs)))
+                   ((eql 0 (clempo.json:jget m "player"))
+                    (destructuring-bind (tag pub scalar)
+                        (decode-channel (clempo.json:jget m "dealer_bytes") epoch)
+                      (declare (ignore tag))
+                      (push (list dealer pub scalar) messages)
+                      (push (cons dealer (cdr (decode-channel (clempo.json:jget m "ack_bytes") epoch)))
+                            rust-acks)))))
+    (multiple-value-bind (player acks) (resume-player info seed logs (reverse messages))
+      (is player)
+      (is (equalp (reverse rust-acks) acks)))
+    (handler-case (progn (resume-player info seed logs (rest (reverse messages))) (is nil))
+      (dkg-error (e) (is (eq :missing-player-dealing (dkg-error-reason e)))))
+    (handler-case (progn (resume-player info seed logs
+                                        (list (destructuring-bind (d p s) (first messages)
+                                                (list d p (mod (1+ s) +group-order+)))))
+                         (is nil))
+      (dkg-error (e) (is (eq :invalid-persisted-dealing (dkg-error-reason e)))))))

@@ -61,17 +61,17 @@ append_dealer_log)."
 
 ;;; Concluding a ceremony and the boundary outcome.
 
-(defun conclude-ceremony (logs previous-output &key player)
+(defun conclude-ceremony (logs previous-output &key player previous-share)
   "The actor's conclude_ceremony: (values output share succeeded). With PLAYER, finalize its
-share; when its local state cannot give one, observe instead. When the logs cannot give an
-output, PREVIOUS-OUTPUT carries forward (and SUCCEEDED is NIL)."
+share; when its local state cannot give one, observe instead (no share). When the logs cannot
+give an output, PREVIOUS-OUTPUT and PREVIOUS-SHARE carry forward and SUCCEEDED is NIL."
   (flet ((observed ()
            (handler-case (values (observe logs) nil t)
-             (dkg-failure () (values previous-output nil nil)))))
+             (dkg-failure () (values previous-output previous-share nil)))))
     (if player
         (handler-case (multiple-value-bind (output share) (finalize-player player logs)
                         (values output share t))
-          (dkg-failure () (values previous-output nil nil))
+          (dkg-failure () (values previous-output previous-share nil))
           (dkg-error () (observed)))
         (observed))))
 

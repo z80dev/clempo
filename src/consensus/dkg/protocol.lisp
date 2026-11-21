@@ -220,18 +220,20 @@ when the logs cannot produce one."
 (defstruct (dealer (:constructor %make-dealer))
   seed public-key info pub-msg results transcript)
 
-(defun start-dealer (info seed &key share)
+(defun start-dealer (info seed &key share (rng #'clempo.io:random-octets))
   "Dealer::start: deal a polynomial of the round's degree whose constant is SHARE (this
 dealer's previous share, an integer or a SHARE struct; required for a reshare, random for a
-fresh DKG). Returns (values dealer pub-msg priv-msgs), PRIV-MSGS ((player . scalar) ...)."
+fresh DKG). RNG (a function of a byte count) supplies the polynomial's randomness exactly as
+Rust draws it from its CryptoRng. Returns (values dealer pub-msg priv-msgs), PRIV-MSGS
+\((player . scalar) ...)."
   (let ((me (clempo.ed25519:ed25519-public-key seed)))
     (unless (info-dealer-index info me)
       (dkg-fail :dealer-not-in-round "~A" (octets->hex me)))
     (let* ((constant (cond ((share-p share) (share-private share))
                            (share share)
                            ((info-previous info) (dkg-fail :missing-dealer-share))
-                           (t (random-scalar))))
-           (poly (cons constant (loop repeat (info-degree info) collect (random-scalar))))
+                           (t (random-scalar rng))))
+           (poly (cons constant (loop repeat (info-degree info) collect (random-scalar rng))))
            (priv-msgs (mapcar (lambda (p) (cons p (scalar-poly-eval poly (info-player-scalar info p))))
                               (info-players info)))
            (pub-msg (make-dealer-pub-msg :commitment (commit-scalars poly))))
@@ -297,6 +299,34 @@ and return the ack signature; NIL when this dealer was already processed. Signal
       (push (list* dealer pub-msg priv-msg) (player-view player))
       ack)))
 
+(defun log-ack (log player)
+  "DealerLog::get_ack: PLAYER's ack signature in LOG, if it acked."
+  (let ((entry (find player (log-results log) :key #'car :test #'octets=)))
+    (and entry (eq (cadr entry) :ack) (cddr entry))))
+
+(defun resume-player (info seed logs messages)
+  "Player::resume: a player rebuilt from its persisted MESSAGES ((dealer pub-msg scalar) ...),
+checked against the verified LOGS ((dealer . log) ...) published so far. Returns
+\(values player acks), ACKS ((dealer . ack) ...) for the replayed messages. Signals DKG-ERROR
+:invalid-persisted-dealing when a message no longer verifies, :missing-player-dealing when a
+log carries a valid ack of ours for a dealing we do not have."
+  (let ((player (make-player info seed))
+        (acks '()))
+    (loop for (dealer pub-msg scalar) in messages
+          do (let ((ack (handler-case (player-dealer-message player dealer pub-msg scalar)
+                          (dkg-error ()
+                            (dkg-fail :invalid-persisted-dealing "~A" (octets->hex dealer))))))
+               (when ack (push (cons dealer ack) acks))))
+    (loop for (dealer . log) in logs
+          for ack = (log-ack log (player-public-key player))
+          when (and ack
+                    (transcript-verify (ack-transcript (player-transcript player) dealer
+                                                      (dealer-log-pub-msg log))
+                                       (player-public-key player) ack)
+                    (not (assoc dealer (player-view player) :test #'octets=)))
+            do (dkg-fail :missing-player-dealing))
+    (values player (nreverse acks))))
+
 (defun player-dealing (player dealer log)
   "The scalar this player uses from DEALER's selected LOG: its own persisted dealing when it
 matches the log's commitment, else the log's reveal of it."
@@ -323,16 +353,16 @@ matches the log's commitment, else the log's reveal of it."
 
 ;;; The trusted dealer.
 
-(defun deal (players &key (mode :nonzero-counter))
+(defun deal (players &key (mode :nonzero-counter) (rng #'clempo.io:random-octets))
   "deal::<N3f1>: shares of a random polynomial for PLAYERS (a sorted key list) without a
 protocol. Returns (values output shares), SHARES ((player . share) ...)."
   (when (null players) (dkg-fail :num-players "0"))
   (let* ((n (length players))
-         (poly (loop repeat (quorum n) collect (random-scalar)))
+         (poly (loop repeat (quorum n) collect (random-scalar rng)))
          (shares (loop for p in players for i from 0
                        collect (cons p (make-share :index i
                                                    :private (scalar-poly-eval poly (mode-scalar mode n i)))))))
-    (values (make-output :summary (clempo.io:random-octets 32)
+    (values (make-output :summary (funcall rng 32)
                          :public (make-sharing :mode mode :total n
                                                :coefficients (commit-scalars poly))
                          :dealers players :players players :revealed '())
