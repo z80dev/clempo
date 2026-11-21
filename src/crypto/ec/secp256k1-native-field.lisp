@@ -9,7 +9,7 @@
 (defconstant +secp256k1-p+ #xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f)
 (defconstant +secp256k1-n+ #xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141)
 (deftype secp-words () '(simple-array (unsigned-byte 64) (*)))
-(declaim (maybe-inline sf-mul! sf-add! sf-sub! sf-neg!))
+(declaim (sb-ext:maybe-inline sf-mul! sf-add! sf-sub! sf-neg!))
 
 (defmacro integer-limb (integer index)
   `(if (typep ,integer 'fixnum) ,(if (zerop index) integer 0)
