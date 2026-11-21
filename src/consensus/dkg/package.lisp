@@ -57,4 +57,13 @@ Malformed bytes signal CW-ERROR (a subclass of ERROR); protocol failures signal 
    #:signed-dealer-log-dealer #:signed-dealer-log-log #:signed-dealer-log-sig
    #:decode-signed-dealer-log
    #:share #:make-share #:share-p #:share-index #:share-private
-   #:dkg-message #:summary #:ed25519-public-key #:ed25519-signature #:g2-point #:scalar))
+   #:dkg-message #:summary #:ed25519-public-key #:ed25519-signature #:g2-point #:scalar
+   ;; transcripts (commonware transcript.rs)
+   #:transcript #:new-transcript #:resume-transcript #:transcript-commit #:transcript-append
+   #:transcript-fork #:transcript-noise #:transcript-summarize #:transcript-sign
+   #:transcript-verify #:sign-summary #:verify-summary
+   ;; round info
+   #:info #:make-round-info #:info-summary #:info-round #:info-previous #:info-mode
+   #:info-reveal #:info-dealers #:info-players #:info=
+   ;; Tempo
+   #:+tempo-namespace+ #:round-info-from-outcome))

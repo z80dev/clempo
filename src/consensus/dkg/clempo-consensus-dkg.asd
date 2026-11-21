@@ -5,10 +5,15 @@
   :depends-on ("clempo-base" "clempo-io" "clempo-crypto" "clempo-codec")
   :serial t
   :components ((:file "package")
-               (:file "codec")))
+               (:file "codec")
+               (:file "field")
+               (:file "transcript")
+               (:file "info")
+               (:file "tempo")))
 
 (defsystem "clempo-consensus-dkg/tests"
   :depends-on ("clempo-consensus-dkg")
   :pathname "../../../tests/consensus/dkg/"
   :serial t
-  :components ((:file "codec-tests")))
+  :components ((:file "codec-tests")
+               (:file "info-tests")))
