@@ -482,7 +482,7 @@ vector; PairDoesNotExist past its end."
 (defun preserve-storage-credits ()
   "dispatch::preserve_storage_credits: Preserve mode for the DEX from T7."
   (fork-if (:since :t7 :doc "TIP-1060 storage credits")
-      (funcall 'clempo.storage-credits:set-mode +dex+ 1)))
+      (clempo.storage-credits:set-mode +dex+ 1)))
 
 (defun credit-dex-storage-slots (user slots)
   "Add SLOTS reusable order-storage credits to USER's counter. Creating the counter spends
@@ -494,7 +494,7 @@ one of the DEX's own credits from the slots just granted."
          (updated (min u64-max (+ current slots))))
     (if (/= current 0)
         (write p updated)
-        (let ((delta (nth-value 1 (funcall 'clempo.storage-credits:with-budget
+        (let ((delta (nth-value 1 (clempo.storage-credits:with-budget
                                       +dex+ 1 (lambda () (write p updated))))))
           (unless (= delta -1)
             (fatal "DEX storage credit bookkeeping spend mismatch: reserved 1, delta ~D" delta))))
@@ -502,16 +502,16 @@ one of the DEX's own credits from the slots just granted."
 
 (defun delete-order (order)
   "Delete ORDER's record; returns the DEX credits minted."
-  (nth-value 1 (funcall 'clempo.storage-credits:track-minted-credits
+  (nth-value 1 (clempo.storage-credits:track-minted-credits
                 +dex+ (lambda () (delete-order-record (order-order-id order))))))
 
 (defun rewrite-order (order book-id)
   "Rewrite ORDER's record; returns the DEX credits minted."
-  (nth-value 1 (funcall 'clempo.storage-credits:track-minted-credits
+  (nth-value 1 (clempo.storage-credits:track-minted-credits
                 +dex+ (lambda () (write-order (order-order-id order) order book-id)))))
 
 (defun unlink-neighbor-and-credit-maker (order-id update)
-  (let ((credits (nth-value 1 (funcall 'clempo.storage-credits:track-minted-credits +dex+ update))))
+  (let ((credits (nth-value 1 (clempo.storage-credits:track-minted-credits +dex+ update))))
     (unless (zerop credits)
       (credit-dex-storage-slots (record-maker order-id) credits))))
 
@@ -524,7 +524,7 @@ one of the DEX's own credits from the slots just granted."
         (write-order (order-order-id order) order book-id)
         (progn
           (delete p)
-          (let* ((delta (nth-value 1 (funcall 'clempo.storage-credits:with-budget
+          (let* ((delta (nth-value 1 (clempo.storage-credits:with-budget
                                          +dex+ credits
                                          (lambda ()
                                            (write-order (order-order-id order) order book-id)))))
@@ -568,24 +568,24 @@ one of the DEX's own credits from the slots just granted."
 ;;; Token movements.
 
 (defun transfer-out (token to amount)
-  (funcall 'clempo.tip20:from-address token)
-  (funcall 'clempo.tip20:transfer token +dex+ to amount))
+  (clempo.tip20:from-address token)
+  (clempo.tip20:transfer token +dex+ to amount))
 
 (defun transfer-in (token sender amount)
-  (funcall 'clempo.tip20:from-address token)
+  (clempo.tip20:from-address token)
   (fork-if (:since :t5 :doc "TIP-1035 system transfers")
-      (funcall 'clempo.tip20:system-transfer-from token +dex+ sender amount)
-      (funcall 'clempo.tip20:transfer-from token +dex+ sender +dex+ amount)))
+      (clempo.tip20:system-transfer-from token +dex+ sender amount)
+      (clempo.tip20:transfer-from token +dex+ sender +dex+ amount)))
 
 (defun decrement-balance-or-transfer-from (sender token amount check-pause)
   "Take AMOUNT of TOKEN from SENDER's DEX balance, pulling the shortfall from the wallet."
-  (funcall 'clempo.tip20:from-address token)
-  (funcall 'clempo.tip20:ensure-transfer-authorized token sender +dex+)
+  (clempo.tip20:from-address token)
+  (clempo.tip20:ensure-transfer-authorized token sender +dex+)
   (let ((balance (balance-of sender token)))
     (if (>= balance amount)
         (progn
           (when (and check-pause (fork-if (:since :t4) t nil))
-            (funcall 'clempo.tip20:check-not-paused token))
+            (clempo.tip20:check-not-paused token))
           (sub-balance sender token amount))
         (progn
           (transfer-in token sender (checked- amount balance))
@@ -600,11 +600,11 @@ one of the DEX's own credits from the slots just granted."
 ;;; Pairs.
 
 (defun create-pair (base)
-  (unless (funcall 'clempo.tip20-factory:tip20-p base) (revert 'invalid-base-token))
-  (funcall 'clempo.tip20:from-address base)
-  (let ((quote (funcall 'clempo.tip20:quote-token base)))
-    (funcall 'clempo.tip20:validate-usd-currency base)
-    (funcall 'clempo.tip20:validate-usd-currency quote)
+  (unless (clempo.tip20-factory:tip20-p base) (revert 'invalid-base-token))
+  (clempo.tip20:from-address base)
+  (let ((quote (clempo.tip20:quote-token base)))
+    (clempo.tip20:validate-usd-currency base)
+    (clempo.tip20:validate-usd-currency quote)
     (let ((book-key (compute-book-key base quote)))
       (when (book-initialized-p (read-book book-key)) (revert 'pair-already-exists))
       (write (book-place book-key)
@@ -661,16 +661,16 @@ record (spending maker credits for placements from T7; crediting rewrites from T
           (t (write-order (order-order-id order) order book-id)))))
 
 (defun place-order (sender token amount bid-p tick)
-  (funcall 'clempo.tip20:from-address token)
-  (let* ((quote (funcall 'clempo.tip20:quote-token token))
+  (clempo.tip20:from-address token)
+  (let* ((quote (clempo.tip20:quote-token token))
          (book-key (compute-book-key token quote)))
     (validate-or-create-pair (read-book book-key) token)
     (validate-order-terms amount tick nil bid-p)
     (multiple-value-bind (escrow-token escrow-amount non-escrow) (escrow-of bid-p amount tick token quote)
-      (funcall 'clempo.tip20:from-address non-escrow)
-      (funcall 'clempo.tip20:ensure-transfer-authorized non-escrow +dex+ sender)
+      (clempo.tip20:from-address non-escrow)
+      (clempo.tip20:ensure-transfer-authorized non-escrow +dex+ sender)
       (fork-if (:since :t4 :doc "non-escrow token must not be paused")
-          (funcall 'clempo.tip20:check-not-paused non-escrow))
+          (clempo.tip20:check-not-paused non-escrow))
       (decrement-balance-or-transfer-from sender escrow-token escrow-amount t)
       (let ((order-id (read-next-order-id)))
         (increment-next-order-id)
@@ -682,22 +682,22 @@ record (spending maker credits for placements from T7; crediting rewrites from T
         order-id))))
 
 (defun place-flip (sender token amount bid-p tick flip-tick internal-balance-only)
-  (funcall 'clempo.tip20:from-address token)
-  (let* ((quote (funcall 'clempo.tip20:quote-token token))
+  (clempo.tip20:from-address token)
+  (let* ((quote (clempo.tip20:quote-token token))
          (book-key (compute-book-key token quote)))
     (with-checkpoint ()
       (validate-or-create-pair (read-book book-key) token)
       (validate-order-terms amount tick flip-tick bid-p)
       (multiple-value-bind (escrow-token escrow-amount non-escrow)
           (escrow-of bid-p amount tick token quote)
-        (funcall 'clempo.tip20:from-address non-escrow)
-        (funcall 'clempo.tip20:ensure-transfer-authorized non-escrow +dex+ sender)
-        (fork-if (:since :t4) (funcall 'clempo.tip20:check-not-paused non-escrow))
+        (clempo.tip20:from-address non-escrow)
+        (clempo.tip20:ensure-transfer-authorized non-escrow +dex+ sender)
+        (fork-if (:since :t4) (clempo.tip20:check-not-paused non-escrow))
         (if internal-balance-only
             (progn
-              (funcall 'clempo.tip20:from-address escrow-token)
-              (funcall 'clempo.tip20:ensure-transfer-authorized escrow-token sender +dex+)
-              (fork-if (:since :t4) (funcall 'clempo.tip20:check-not-paused escrow-token))
+              (clempo.tip20:from-address escrow-token)
+              (clempo.tip20:ensure-transfer-authorized escrow-token sender +dex+)
+              (fork-if (:since :t4) (clempo.tip20:check-not-paused escrow-token))
               (when (< (balance-of sender escrow-token) escrow-amount)
                 (revert 'insufficient-balance))
               (sub-balance sender escrow-token escrow-amount))
@@ -726,12 +726,12 @@ record (spending maker credits for placements from T7; crediting rewrites from T
         (let ((maker (order-maker flipped)))
           (when (< (balance-of maker escrow-token) escrow-amount)
             (revert 'insufficient-balance))
-          (funcall 'clempo.tip20:from-address escrow-token)
-          (funcall 'clempo.tip20:check-not-paused escrow-token)
-          (funcall 'clempo.tip20:ensure-transfer-authorized escrow-token maker +dex+)
-          (funcall 'clempo.tip20:from-address non-escrow)
-          (funcall 'clempo.tip20:check-not-paused non-escrow)
-          (funcall 'clempo.tip20:ensure-transfer-authorized non-escrow +dex+ maker)
+          (clempo.tip20:from-address escrow-token)
+          (clempo.tip20:check-not-paused escrow-token)
+          (clempo.tip20:ensure-transfer-authorized escrow-token maker +dex+)
+          (clempo.tip20:from-address non-escrow)
+          (clempo.tip20:check-not-paused non-escrow)
+          (clempo.tip20:ensure-transfer-authorized non-escrow +dex+ maker)
           (sub-balance maker escrow-token escrow-amount)
           (commit-order-to-book flipped nil)
           (emit +dex+ 'order-flipped (order-order-id flipped) maker base (order-amount flipped)
@@ -818,7 +818,7 @@ the next order to fill, or NIL when the book side is exhausted."
                 (values new-level (read-order (tick-level-head new-level) book-key))))))
         (let ((next-id (order-next order)))
           (setf (tick-level-head level) next-id)
-          (let ((credits (nth-value 1 (funcall 'clempo.storage-credits:track-minted-credits
+          (let ((credits (nth-value 1 (clempo.storage-credits:track-minted-credits
                                        +dex+ (lambda () (delete (record-field next-id :prev)))))))
             (fork-if (:before :t12)
                 (setf (tick-level-total-liquidity level)
@@ -853,8 +853,8 @@ the next order to fill, or NIL when the book side is exhausted."
 (defun find-path-to-root (token)
   (let ((path (list token)))
     (loop until (= token +path-usd-address+)
-          do (funcall 'clempo.tip20:from-address token)
-             (setf token (funcall 'clempo.tip20:quote-token token))
+          do (clempo.tip20:from-address token)
+             (setf token (clempo.tip20:quote-token token))
              (push token path))
     (nreverse path)))
 
@@ -863,15 +863,15 @@ the next order to fill, or NIL when the book side is exhausted."
   (loop for (token-in token-out) on path
         while token-out
         collect (progn
-                  (funcall 'clempo.tip20:from-address token-in)
+                  (clempo.tip20:from-address token-in)
                   (fork-if (:since :t3 :doc "route tokens must not be paused")
-                      (funcall 'clempo.tip20:check-not-paused token-in))
+                      (clempo.tip20:check-not-paused token-in))
                   (multiple-value-bind (base quote)
-                      (if (= (funcall 'clempo.tip20:quote-token token-in) token-out)
+                      (if (= (clempo.tip20:quote-token token-in) token-out)
                           (values token-in token-out)
                           (progn
-                            (funcall 'clempo.tip20:from-address token-out)
-                            (if (= (funcall 'clempo.tip20:quote-token token-out) token-in)
+                            (clempo.tip20:from-address token-out)
+                            (if (= (clempo.tip20:quote-token token-out) token-in)
                                 (values token-out token-in)
                                 (revert 'pair-does-not-exist))))
                     (let ((book-key (compute-book-key base quote)))
@@ -882,10 +882,10 @@ the next order to fill, or NIL when the book side is exhausted."
 (defun find-trade-path (token-in token-out)
   (when (= token-in token-out) (revert 'identical-tokens))
   (unless (and (tip20-address-p token-in) (tip20-address-p token-out)) (revert 'invalid-token))
-  (funcall 'clempo.tip20:from-address token-in)
-  (let ((in-quote (funcall 'clempo.tip20:quote-token token-in)))
-    (funcall 'clempo.tip20:from-address token-out)
-    (let ((out-quote (funcall 'clempo.tip20:quote-token token-out)))
+  (clempo.tip20:from-address token-in)
+  (let ((in-quote (clempo.tip20:quote-token token-in)))
+    (clempo.tip20:from-address token-out)
+    (let ((out-quote (clempo.tip20:quote-token token-out)))
       (when (or (= in-quote token-out) (= out-quote token-in))
         (return-from find-trade-path (validate-and-build-route (list token-in token-out))))))
   (let* ((path-in (find-path-to-root token-in))
@@ -1079,11 +1079,11 @@ the next order to fill, or NIL when the book side is exhausted."
 
 (defun authorized-for-token-p (token address role)
   "is_authorized_for_token: a failed policy lookup counts as unauthorized."
-  (funcall 'clempo.tip20:from-address token)
-  (let ((policy-id (funcall 'clempo.tip20:transfer-policy-id token)))
-    (handler-case (funcall 'clempo.tip403:authorized-as-p policy-id address role)
+  (clempo.tip20:from-address token)
+  (let ((policy-id (clempo.tip20:transfer-policy-id token)))
+    (handler-case (clempo.tip403:authorized-as-p policy-id address role)
       (precompile-revert (c)
-        (if (funcall 'clempo.tip403:policy-lookup-error-p c) nil (error c))))))
+        (if (clempo.tip403:policy-lookup-error-p c) nil (error c))))))
 
 (defun maker-authorized-p (order)
   (let ((book (read-book (order-book-key order))))
@@ -1118,8 +1118,8 @@ the next order to fill, or NIL when the book side is exhausted."
 
 (defun get-price-level (base tick bid-p)
   "getTickLevel; from T12 the liquidity is summed over the level's orders."
-  (funcall 'clempo.tip20:from-address base)
-  (let* ((book-key (compute-book-key base (funcall 'clempo.tip20:quote-token base)))
+  (clempo.tip20:from-address base)
+  (let* ((book-key (compute-book-key base (clempo.tip20:quote-token base)))
          (level (read-tick-level book-key tick bid-p)))
     (fork-if (:since :t12)
         (loop with id = (tick-level-head level)
