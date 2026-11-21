@@ -1,0 +1,242 @@
+(defpackage #:clempo.contract.tests
+  (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract)
+  (:shadowing-import-from #:clempo.contract #:read #:write #:delete)
+  (:shadow #:symbol))
+
+(in-package #:clempo.contract.tests)
+
+;;; The TIP-20 layout of docs/DEFCONTRACT.md, as a test contract.
+
+(defstorable user-reward-info
+  (reward-recipient address)
+  (reward-per-token u256)
+  (reward-balance u256))
+
+(defcontract test-token ()
+  (roles (mapping address (mapping b256 bool)))
+  (role-admins (mapping b256 b256))
+  (name string)
+  (symbol string)
+  (currency string)
+  (logo-uri string :since :t5)
+  (quote-token address)
+  (next-quote-token address)
+  (transfer-policy-id u64)
+  (total-supply u256)
+  (balances (mapping address u256))
+  (allowances (mapping address (mapping address u256)))
+  (permit-nonces (mapping address u256))
+  (paused bool)
+  (supply-cap u256)
+  (salts (mapping b256 bool) :reserved t)
+  (global-reward-per-token u256)
+  (opted-in-supply u128)
+  (user-reward-info (mapping address user-reward-info)))
+
+(defconstant +token+ #x20c0000000000000000000000000000000000000)
+
+(deftest tip20-layout-slots ()
+  (is= 9 +test-token/balances+)
+  (is= 7 +test-token/transfer-policy-id+)
+  (is= 20 (field-offset (layout-field 'test-token 'transfer-policy-id)))
+  (is= :packed (field-access (layout-field 'test-token 'next-quote-token)))
+  (is= :full (field-access (layout-field 'test-token 'paused)))
+  (is= 17 +test-token/user-reward-info+)
+  (is (some (lambda (s) (equal (fork-site-where s) '(test-token logo-uri))) (fork-sites :t5))))
+
+(deftest mapping-slots ()
+  ;; keccak256(leftpad32(key) || be32(slot)), outer key first
+  (let ((holder #x1111111111111111111111111111111111111111))
+    (is= (clempo.keccak:keccak256-integer
+          (octets-concat (integer->octets holder 32) (integer->octets 9 32)))
+         (place-slot (balances +token+ holder)))
+    (is= (clempo.keccak:keccak256-integer
+          (octets-concat (integer->octets 5 32)
+                         (integer->octets (clempo.keccak:keccak256-integer
+                                           (octets-concat (integer->octets holder 32) (integer->octets 10 32)))
+                                          32)))
+         (place-slot (allowances +token+ holder 5)))))
+
+(defun fresh-metered (&key (spec :t13) (gas 1000000))
+  (let ((host (make-memory-host)))
+    (values (make-metered-storage host :gas-limit gas) host spec)))
+
+(deftest read-write-roundtrip ()
+  (with-spec (:t13)
+    (with-storage ((make-hashmap-storage))
+      (write (name +token+) "pathUSD")
+      (is= "pathUSD" (read (name +token+)))
+      (let ((long (make-string 70 :initial-element #\x)))
+        (write (currency +token+) long)
+        (is= long (read (currency +token+)))
+        (is= 70 (string-length (currency +token+))))
+      (write (transfer-policy-id +token+) 7)
+      (write (next-quote-token +token+) #xabc)
+      (is= 7 (read (transfer-policy-id +token+)))
+      (is= #xabc (read (next-quote-token +token+)))
+      (write (balances +token+ 1) 100)
+      (is= 100 (read (balances +token+ 1)))
+      (write (user-reward-info +token+ 3)
+             (make-user-reward-info :reward-recipient 9 :reward-per-token 2 :reward-balance 3))
+      (let ((info (read (user-reward-info +token+ 3))))
+        (is= 9 (user-reward-info-reward-recipient info))
+        (is= 3 (user-reward-info-reward-balance info)))
+      (is= 2 (read (field (user-reward-info +token+ 3) 'reward-per-token)))
+      (write (roles +token+ 1 2) t)
+      (is (read (roles +token+ 1 2)))
+      (is (not (read (roles +token+ 1 3)))))))
+
+(deftest short-string-encoding ()
+  (with-spec (:t13)
+    (let ((b (make-hashmap-storage)))
+      (with-storage (b)
+        (write (name +token+) "USD")
+        (is= #x5553440000000000000000000000000000000000000000000000000000000006
+             (sload +token+ 2))
+        ;; invalid UTF-8 in storage is fatal
+        (sstore +token+ 2 #xff00000000000000000000000000000000000000000000000000000000000002)
+        (signals precompile-fatal (read (name +token+)))))))
+
+(deftest metered-sload-sstore-gas ()
+  (multiple-value-bind (b) (fresh-metered)
+    (with-spec (:t2)
+      (with-storage (b)
+        (read (balances +token+ 1))                         ; cold: 2,100
+        (is= 2100 (gas-used))
+        (read (balances +token+ 1))                         ; warm: 100
+        (is= 2200 (gas-used))
+        (write (balances +token+ 1) 5)                      ; warm 0 -> 5 at T1+: 100 + 250,000
+        (is= (+ 2200 100 250000) (gas-used))
+        (write (balances +token+ 1) 0)                      ; dirty, back to original: 100
+        (is= (+ 2200 100 250000 100) (gas-used))
+        (is= 0 (gas-refunded))))))                          ; refunds only recorded from T4
+
+(deftest metered-packed-write-loads-first ()
+  ;; a packed field write is an SLOAD then an SSTORE (storage/types/mod.rs)
+  (multiple-value-bind (b) (fresh-metered)
+    (with-spec (:t2)
+      (with-storage (b)
+        (write (transfer-policy-id +token+) 1)
+        ;; cold SLOAD 2,100, then warm SSTORE 0 -> x: 100 + 250,000
+        (is= (+ 2100 100 250000) (gas-used))))))
+
+(deftest metered-t7-storage-credits ()
+  ;; TIP-1060: a 0 -> x SSTORE in refund mode pays the 245,000 creditable part through the
+  ;; hook (after a cold load of the credit slot) and the 5,000 residual through SSTORE.
+  (multiple-value-bind (b host) (fresh-metered)
+    (declare (ignore host))
+    (with-spec (:t7)
+      (with-storage (b)
+        (write (balances +token+ 1) 5)
+        (is= (+ 100 2100 100 2000 245000 5000) (gas-used))))))
+
+(deftest metered-out-of-gas-and-static ()
+  (multiple-value-bind (b) (fresh-metered :gas 2000)
+    (with-spec (:t2)
+      (with-storage (b)
+        (signals precompile-halt (read (balances +token+ 1))))))
+  (let ((b (make-metered-storage (make-memory-host) :static t)))
+    (with-spec (:t2)
+      (with-storage (b)
+        (signals precompile-halt (write (balances +token+ 1) 1))))))
+
+(deftest checkpoint-rolls-back ()
+  (let* ((host (make-memory-host))
+         (b (make-metered-storage host)))
+    (with-spec (:t2)
+      (with-storage (b)
+        (write (balances +token+ 1) 1)
+        (ignore-errors
+         (with-checkpoint ()
+           (write (balances +token+ 1) 2)
+           (error "boom")))
+        (is= 1 (read (balances +token+ 1)))
+        (with-checkpoint ()
+          (write (balances +token+ 1) 3))
+        (is= 3 (read (balances +token+ 1)))))))
+
+(defstorable small-pair (a u64) (b u64))
+(defcontract vec-holder ()
+  (items (vec u64))
+  (records (vec user-reward-info))
+  (members (set address)))
+
+(deftest vecs-and-sets ()
+  (with-spec (:t13)
+    (with-storage ((make-hashmap-storage))
+      (let ((items (items +token+)))
+        (vec-push items 1) (vec-push items 2) (vec-push items 3) (vec-push items 4) (vec-push items 5)
+        (is= 5 (vec-length items))
+        (is= '(1 2 3 4 5) (read items))
+        (is= 5 (vec-pop items))
+        (is= '(1 2 3 4) (read items))
+        (write items '(9))
+        (is= '(9) (read items)))
+      (let ((s (members +token+)))
+        (is (set-insert s 10))
+        (is (set-insert s 11))
+        (is (not (set-insert s 10)))
+        (is (set-insert s 12))
+        (is (set-remove s 10))
+        (is= '(12 11) (read s))
+        (is (set-contains s 11))
+        (is (not (set-contains s 10)))))))
+
+(deferror insufficient-balance "InsufficientBalance(uint256 available, uint256 required, address token)")
+(defevent transfer-event "Transfer(address indexed from, address indexed to, uint256 amount)")
+
+(defcontract toy () (counter u256))
+
+(defcall toy get-counter () (:sol "counter()" :returns "uint256")
+  (read (counter self)))
+
+(defcall toy bump (by) (:sol "bump(uint256)" :mutates t)
+  (when (> by 100) (revert 'insufficient-balance 100 by self))
+  (write (counter self) (checked+ (read (counter self)) by))
+  (emit self 'transfer-event sender self by)
+  (values))
+
+(defcall toy later () (:sol "later()" :returns "bool" :since :t8)
+  t)
+
+(defdispatch toy (self input sender)
+  (charge-input-cost input)
+  (dispatch-calls))
+
+(defun call-toy (input &key static (spec :t13))
+  (with-spec (spec)
+    (with-storage ((make-hashmap-storage :static static))
+      (handler-case (values :success (toy/call #x1234 input 7))
+        (precompile-revert (c) (values :revert (precompile-revert-data c)))
+        (precompile-halt (c) (values :halt (precompile-halt-reason c)))))))
+
+(deftest dispatcher-steps ()
+  (is= (list :success 0)
+       (multiple-value-bind (s out) (call-toy (clempo.abi:abi-encode-call (clempo.abi:abi-selector "counter()") '() '()))
+         (list s (octets->integer out))))
+  ;; unknown selector
+  (multiple-value-bind (s out) (call-toy (octets-of #xaa #xaa #xaa #xaa))
+    (is= :revert s)
+    (is= (octets->hex (clempo.abi:abi-encode-error "UnknownFunctionSelector(bytes4)" #xaaaaaaaa)) (octets->hex out)))
+  ;; gated selector is unknown before its fork
+  (is= :revert (call-toy (clempo.abi:abi-encode-call (clempo.abi:abi-selector "later()") '() '()) :spec :t7))
+  (is= :success (call-toy (clempo.abi:abi-encode-call (clempo.abi:abi-selector "later()") '() '()) :spec :t8))
+  ;; missing selector: halt before T1, empty revert from T1
+  (is= :halt (call-toy (octets-of 1 2) :spec :t0))
+  (is= :revert (call-toy (octets-of 1 2) :spec :t1))
+  ;; static call to a mutating function: StaticCallNotAllowed before T12, halt from T12
+  (let ((bump (clempo.abi:abi-encode-call (clempo.abi:abi-selector "bump(uint256)") '((:uint 256)) '(1))))
+    (is= :revert (call-toy bump :static t :spec :t11))
+    (is= :halt (call-toy bump :static t :spec :t12))
+    (is= :success (call-toy bump))
+    ;; custom error
+    (multiple-value-bind (s out)
+        (call-toy (clempo.abi:abi-encode-call (clempo.abi:abi-selector "bump(uint256)") '((:uint 256)) '(101)))
+      (is= :revert s)
+      (is= (octets->hex (clempo.abi:abi-encode-error "InsufficientBalance(uint256,uint256,address)" 100 101 #x1234))
+           (octets->hex out)))
+    ;; trailing byte: fine before T11, an empty revert at T11, fine again from T12
+    (let ((trailing (octets-concat bump (octets-of 0))))
+      (is= :success (call-toy trailing :spec :t10))
+      (is= :revert (call-toy trailing :spec :t11))
+      (is= :success (call-toy trailing :spec :t12)))))

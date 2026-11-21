@@ -11,7 +11,7 @@ schedule Tempo layers over Osaka (crates/hardfork: constants.rs, gas_params.rs).
    ;; gating
    #:fork-if #:since #:until
    #:fork-site #:fork-site-fork #:fork-site-kind #:fork-site-where #:fork-site-doc
-   #:record-fork-site #:fork-sites #:*fork-site-context*
+   #:record-fork-site #:fork-sites #:*fork-site-context* #:with-fork-site-context
    ;; gas schedule
    #:gas-schedule #:gas #:schedule-for
    #:+sstore-create-cost+ #:+sstore-set-cost+ #:+storage-credit-value+
@@ -115,20 +115,27 @@ schedule Tempo layers over Osaka (crates/hardfork: constants.rs, gas_params.rs).
                                  (prin1-to-string (fork-site-where b)))))))))
 
 (defvar *fork-site-context* nil
-  "Bound by defining macros (DEFCALL, DEFUN-like wrappers) at macroexpansion time to name
-the definition a FORK-IF sits in.")
+  "Names the definition a FORK-IF sits in when no lexical context does.")
 
-(defmacro fork-if ((relation fork &key doc) then &optional (else nil else-p))
+(defmacro with-fork-site-context ((where) &body body)
+  "Make FORK-IFs lexically inside BODY record WHERE (e.g. (tip20-token transfer))."
+  `(symbol-macrolet ((%fork-site% ',where)) ,@body))
+
+(defun site-context (env)
+  (multiple-value-bind (expansion expanded-p) (macroexpand-1 '%fork-site% env)
+    (or (and expanded-p (second expansion))
+        *fork-site-context*
+        (and *compile-file-truename* (pathname-name *compile-file-truename*)))))
+
+(defmacro fork-if ((relation fork &key doc) then &optional (else nil else-p) &environment env)
   "Run THEN when the active fork satisfies RELATION (:since or :before) FORK, else ELSE.
 Records the site at load time so FORK-SITES finds it."
   (check-type fork fork)
   (let ((test (ecase relation
                 (:since `(fork>= *spec* ,fork))
-                (:before `(fork< *spec* ,fork))))
-        (where (or *fork-site-context*
-                   (and *compile-file-truename* (pathname-name *compile-file-truename*)))))
+                (:before `(fork< *spec* ,fork)))))
     `(progn
-       (load-time-value (record-fork-site ,fork :branch ',where ,doc) t)
+       (load-time-value (record-fork-site ,fork :branch ',(site-context env) ,doc) t)
        (if ,test ,then ,@(when else-p (list else))))))
 
 (defmacro since (fork) `(fork>= *spec* ,fork))
