@@ -201,8 +201,16 @@ K's previous digest state is discarded."
     (cond ((or (= size 32) (= size 64))
            (when k (keccak-reset k))
            (fixed-into data start size out out-start))
+          (k
+           (keccak-reset k)
+           (keccak-update k data :start start :end end)
+           (finalize-into k out out-start))
           (t
-           (let ((k (if k (keccak-reset k) (%make-keccak))))
+           ;; a context on the stack: receipts, headers and trie nodes hash here every block
+           (let* ((state (make-array 25 :element-type '(unsigned-byte 64) :initial-element 0))
+                  (buffer (make-array 136 :element-type '(unsigned-byte 8) :initial-element 0))
+                  (k (%make-keccak :state state :buffer buffer)))
+             (declare (dynamic-extent state buffer k))
              (keccak-update k data :start start :end end)
              (finalize-into k out out-start))))))
 

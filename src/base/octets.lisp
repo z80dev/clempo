@@ -34,9 +34,16 @@
       (incf pos (length p)))))
 
 (defun octets= (a b)
-  (declare (type octets a b))
-  (and (= (length a) (length b))
-       (loop for x across a for y across b always (= x y))))
+  "Whether A and B hold the same octets: a word at a time (hashes, roots and 256-byte
+blooms are compared in every block), then the tail."
+  (declare (type octets a b) (optimize (speed 3)))
+  (let ((n (length a)))
+    (and (= n (length b))
+         (let ((words (floor n 8)))
+           (and (loop for i of-type fixnum below words
+                      always (= (sb-kernel:%vector-raw-bits a i) (sb-kernel:%vector-raw-bits b i)))
+                (loop for i of-type fixnum from (* 8 words) below n
+                      always (= (aref a i) (aref b i))))))))
 
 ;;; Hex
 

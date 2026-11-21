@@ -34,11 +34,27 @@ for inputs that are not 32 or 64 bytes."
       (bloom-accrue bloom (integer-into-octets (event-log-address log) address 0 20) k)
       (dolist (topic (event-log-topics log)) (bloom-accrue bloom topic k)))))
 
+(defvar +zero-bloom+ (make-octets 256)
+  "The bloom of no logs; read, never written (a receipt without logs has a NIL bloom).")
+
+(declaim (inline receipt-bloom*))
+(defun receipt-bloom* (receipt)
+  "RECEIPT's bloom, computed from its logs when not stored; shared and read-only when empty."
+  (or (receipt-bloom receipt)
+      (let ((logs (receipt-logs receipt))) (if logs (logs-bloom logs) +zero-bloom+))))
+
 (defun receipts-bloom (receipts)
+  (declare #.clempo.base:*hot*)
   (let ((bloom (make-octets 256)))
+    (declare (type (octets 256) bloom))
     (dolist (receipt receipts bloom)
-      (let ((other (or (receipt-bloom receipt) (logs-bloom (receipt-logs receipt)))))
-        (dotimes (i 256) (setf (aref bloom i) (logior (aref bloom i) (aref other i))))))))
+      (unless (and (null (receipt-bloom receipt)) (null (receipt-logs receipt))) ; adds nothing
+        (let ((other (receipt-bloom* receipt)))
+          (declare (type octets other))
+          (invariant (= (length other) 256) "a bloom is 256 bytes, not ~D" (length other))
+          (dotimes (i 32)               ; a 64-bit word at a time
+            (setf (sb-kernel:%vector-raw-bits bloom i)
+                  (logior (sb-kernel:%vector-raw-bits bloom i) (sb-kernel:%vector-raw-bits other i)))))))))
 
 (defun log-items (log)
   (list (integer->octets (event-log-address log) 20) (event-log-topics log) (event-log-data log)))
@@ -53,7 +69,7 @@ for inputs that are not 32 or 64 bytes."
   "Consensus encoding excludes RPC-only feeToken and feePayer metadata."
   (let ((body (clempo.rlp:rlp-encode
                (list (receipt-status receipt) (receipt-cumulative-gas-used receipt)
-                     (or (receipt-bloom receipt) (logs-bloom (receipt-logs receipt)))
+                     (receipt-bloom* receipt)
                      (mapcar #'log-items (receipt-logs receipt))))))
     (if (zerop (receipt-type receipt)) body
         (octets-concat (octets-of (receipt-type receipt)) body))))
@@ -86,5 +102,33 @@ for inputs that are not 32 or 64 bytes."
                                          :topics (map 'list #'hex->octets (clempo.json:jget log "topics"))
                                          :data (hex->octets (clempo.json:jget log "data")))))))
 
+(defvar *last-receipts-root* (cons nil nil)
+  "(key . root) of the last RECEIPTS-ROOT, replaced whole, never mutated: consecutive blocks
+often have identical receipts (early mainnet's are one system transaction's each), and the
+trie costs more than comparing them. The key is a vector of (type status cumulative-gas)
+triples when no receipt has logs or a stored bloom (they then determine the encodings), else
+the list of encodings.")
+
+(defun plain-receipts-key (receipts)
+  "RECEIPTS' (type status cumulative-gas ...) vector when none has logs or a stored bloom."
+  (when (every (lambda (r) (and (null (receipt-logs r)) (null (receipt-bloom r)))) receipts)
+    (let ((key (make-array (* 3 (length receipts)))) (i 0))
+      (dolist (r receipts key)
+        (setf (svref key i) (receipt-type r)
+              (svref key (+ i 1)) (receipt-status r)
+              (svref key (+ i 2)) (receipt-cumulative-gas-used r))
+        (incf i 3)))))
+
 (defun receipts-root (receipts)
-  (clempo.trie:ordered-trie-root (mapcar #'encode-receipt receipts)))
+  (let ((last *last-receipts-root*)
+        (plain (and receipts (plain-receipts-key receipts))))
+    (if (and plain (equalp plain (car last)))
+        (copy-seq (cdr last))
+        (let ((encodings (mapcar #'encode-receipt receipts)))
+          (if (and (not plain) encodings (listp (car last))
+                   (= (length encodings) (length (car last)))
+                   (every #'octets= encodings (car last)))
+              (copy-seq (cdr last))
+              (let ((root (clempo.trie:ordered-trie-root encodings)))
+                (setf *last-receipts-root* (cons (or plain encodings) (copy-seq root)))
+                root))))))

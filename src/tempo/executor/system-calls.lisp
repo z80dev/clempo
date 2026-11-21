@@ -20,6 +20,28 @@
 
 ;;; One system call (evm2 Evm::system_call).
 
+(defun absent-target-p (world target)
+  "Whether a system call to TARGET has no effect beyond loading it: no account (so no code
+or delegation), not a precompile, and no observer recording the frame's accesses. EIP-4788
+and, until its deployment, EIP-2935 are such calls in every early mainnet block."
+  (and (null (state:world-observer world))
+       (state:account-absent-p world target)
+       (not-precompile-p target)))
+
+(defvar *not-precompiles* (list nil)
+  "(precompiles address ...): system-call targets known not to be precompiles of that
+precompile set, replaced whole: the lookup costs more than the rest of an empty block's
+system call.")
+
+(defun not-precompile-p (address)
+  (let* ((precompiles (evm:spec-precompiles evm:*spec*))
+         (memo *not-precompiles*)
+         (known (and (eq (car memo) precompiles) (cdr memo))))
+    (cond ((member address known) t)
+          ((evm:find-precompile precompiles address) nil)
+          (t (setf *not-precompiles* (list* precompiles address (subseq known 0 (min 3 (length known)))))
+             t))))
+
 (defun run-system-call (ctx caller target input gas-limit)
   "evm2 Evm::system_call: one top-level CALL from CALLER to TARGET with INPUT, zero value and
 GAS-LIMIT gas, outside any user transaction: no validation, nonce, fee or refund. Only
@@ -39,12 +61,18 @@ Returns (values success-p output)."
                  (*non-creditable* nil)
                  (*tx-index* nil))
              (state:warm-address world target)
-             (multiple-value-bind (status gas-left output)
-                 (run-initial-frame caller 0 target input 0 gas-limit)
-               (declare (ignore gas-left))
-               (state:finalize-tx world)
-               (setf done t)
-               (values (evm:success-p status) output)))
+             (if (absent-target-p world target)
+                 ;; what the call would do: touch an absent account, run no code and succeed;
+                 ;; finalizing drops the touch (EIP-161), so the block is unchanged
+                 (progn (state:finalize-tx world)
+                        (setf done t)
+                        (values t state:+empty-code+))
+                 (multiple-value-bind (status gas-left output)
+                     (run-initial-frame caller 0 target input 0 gas-limit)
+                   (declare (ignore gas-left))
+                   (state:finalize-tx world)
+                   (setf done t)
+                   (values (evm:success-p status) output))))
         (unless done (state:discard-tx world))))))
 
 ;;; EIP-4788 and EIP-2935, every block.
@@ -52,14 +80,30 @@ Returns (values success-p output)."
 (defun ethereum-fork-active-p (key timestamp)
   "Whether the Ethereum fork whose genesis config key is KEY (\"cancunTime\", \"pragueTime\")
 is active at TIMESTAMP on *CHAIN* (reth is_*_active_at_timestamp)."
-  (let ((at (clempo.json:jget (chainspec:chain-config *chain*) key)))
-    (and at (not (eq at :null))
-         (<= (etypecase at
-               (integer at)
-               (string (if (and (> (length at) 2) (string-equal "0x" at :end2 2))
-                           (hex->integer at)
-                           (parse-integer at))))
-             timestamp))))
+  (let ((at (ethereum-fork-time key)))
+    (and at (<= at timestamp))))
+
+(defvar *fork-times* (list nil)
+  "(chain (key . time-or-nil) ...) for the last *CHAIN* ETHEREUM-FORK-TIME read, replaced
+whole: two lookups run in every block. CHAIN is compared with EQ, so a chain given as a
+fresh string or pathname each time is read again.")
+
+(defun ethereum-fork-time (key)
+  "The activation timestamp under *CHAIN*'s genesis config key KEY, or NIL."
+  (let* ((chain *chain*)
+         (cache *fork-times*)
+         (hit (and (eq (car cache) chain) (assoc key (cdr cache) :test #'string=))))
+    (if hit
+        (cdr hit)
+        (let* ((at (clempo.json:jget (chainspec:chain-config chain) key))
+               (time (and at (not (eq at :null))
+                          (etypecase at
+                            (integer at)
+                            (string (if (and (> (length at) 2) (string-equal "0x" at :end2 2))
+                                        (hex->integer at)
+                                        (parse-integer at)))))))
+          (setf *fork-times* (cons chain (acons key time (and (eq (car cache) chain) (cdr cache)))))
+          time))))
 
 (defun apply-history-and-beacon-calls
     (ctx &key (parent-beacon-block-root (block-env-parent-beacon-block-root (ctx-env ctx))))

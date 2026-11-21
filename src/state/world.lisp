@@ -56,6 +56,17 @@
   "A world state over BACKEND, empty of changes."
   (%make-world backend))
 
+(defun reset-world (world)
+  "Empty WORLD of accounts and changes, drained or not, for a block over the same backend,
+keeping its tables' storage: a replay executes millions of blocks, most touching a handful
+of accounts, and a fresh world per block costs more than such a block's execution."
+  (reset-tx-state world)
+  (clrhash (world-accounts world))
+  (setf (world-block-accounts world) '()
+        (world-observer world) nil
+        (world-last-account world) nil)
+  world)
+
 (defmethod print-object ((a account) s)
   (print-unreadable-object (a s :type t)
     (format s "~(~40,'0x~) n=~D b=~D~:[~; exists~]" (account-address a) (account-nonce a)
@@ -93,6 +104,14 @@ OBSERVER, when set, is called as (observer account nil nil) on every access."
          (observer (world-observer world)))
     (when observer (funcall observer account nil nil))
     account))
+
+(defun account-absent-p (world address)
+  "Whether WORLD has no account at ADDRESS, found without loading one (GET-ACCOUNT would
+make and keep an object for it and tell the observer)."
+  (let ((a (gethash address (world-accounts world))))
+    (if a
+        (not (account-exists a))
+        (not (backend-account (world-backend world) address)))))
 
 (defun account-code (world account)
   (declare (type account account))

@@ -84,3 +84,22 @@
           (clempo.keccak:keccak256 (clempo.rlp:rlp-encode nil))
           (clempo.headers:ethereum-header-withdrawals-root inner) nil)
     (is= '((:withdrawals-present-p nil t)) (clempo.blocks:block-body-mismatches block))))
+
+(deftest receipts-root-reuse-matches-the-trie ()
+  ;; the last root is reused for equal receipts; every answer equals the trie's
+  (flet ((plain (&rest gas) (loop for g in gas for i from 0
+                                  collect (clempo.receipts:make-receipt :type (if (evenp i) 0 2) :status 1
+                                                                        :cumulative-gas-used g)))
+         (direct (receipts) (clempo.trie:ordered-trie-root
+                             (mapcar #'clempo.receipts:encode-receipt receipts))))
+    (let* ((log (clempo.receipts:make-event-log :address 7 :topics (list (make-octets 32))))
+           (logged (list (clempo.receipts:make-receipt :type 2 :status 1 :cumulative-gas-used 5
+                                                       :logs (list log))))
+           (zero-bloom (list (clempo.receipts:make-receipt :type 0 :status 1 :cumulative-gas-used 0
+                                                           :bloom (make-octets 256))))
+           (cases (list (plain 0) (plain 0) (plain 21000) (plain 0 21000) (plain 0 21000) logged logged
+                        (plain 0) zero-bloom (plain 0) (plain 5) logged '())))
+      (dolist (receipts cases)
+        (is-equalp (direct receipts) (clempo.receipts:receipts-root receipts)))
+      (is-equalp (clempo.receipts:receipts-bloom logged) (clempo.receipts:logs-bloom (list log)))
+      (is (every #'zerop (clempo.receipts:receipts-bloom (plain 0 1)))))))

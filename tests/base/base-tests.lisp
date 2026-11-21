@@ -18,3 +18,15 @@
   (is= -1 (u256->s256 +u256-max+))
   (is= +u256-max+ (s256->u256 -1))
   (is= 0 (wrap256 +u256-modulus+)))
+
+(deftest octets=-compares-every-byte ()
+  ;; word-at-a-time comparison: every length around a word boundary, every differing position
+  (dotimes (n 20)
+    (let ((a (make-octets n)))
+      (dotimes (i n) (setf (aref a i) (mod (* 37 (1+ i)) 256)))
+      (is (octets= a (copy-seq a)))
+      (is (not (octets= a (subseq (octets-concat a (octets-of 0)) 0 (1+ n)))))
+      (dotimes (i n)
+        (let ((b (copy-seq a)))
+          (setf (aref b i) (logxor (aref b i) 1))
+          (is (not (octets= a b)) "length ~D, differing at ~D" n i))))))

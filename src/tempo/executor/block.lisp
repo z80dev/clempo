@@ -59,6 +59,62 @@ even parity): TEMPO_SYSTEM_TX_SIGNATURE."
        (let ((v (tx:transaction-v tx)))
          (if (>= v 35) (evenp (- v 35)) (= v 27)))))
 
+(defun rlp-list-p (data end)
+  "Whether DATA below END is exactly one well-formed RLP list: what (LISTP (RLP-DECODE DATA
+:END END)) accepts, with RLP-ITEM-BOUNDS's canonical-form checks and RLP:*RLP-MAX-DEPTH*'s
+nesting bound, but checked in place without building the items (every block from genesis
+carries one such list)."
+  (declare (type octets data) (type fixnum end) #.*hot*)
+  (invariant (<= end (length data)) "end ~D beyond ~D octets" end (length data))
+  (labels ((long-length (pos ll end)
+             ;; the payload length after a long-form header at POS, or -1
+             (declare (type fixnum pos ll end))
+             (if (or (> (+ pos 1 ll) end) (zerop (aref data (1+ pos))))
+                 -1
+                 (let ((n 0))
+                   (declare (type fixnum n))
+                   (loop for i fixnum from (+ pos 1) below (+ pos 1 ll)
+                         do (setf n (logior (ash n 8) (aref data i)))
+                            (when (> n end) (return-from long-length -1)))
+                   (if (<= n 55) -1 n))))
+           (children (start stop depth)
+             ;; a list's items, or -1; DEPTH lists may still nest below this one
+             (declare (type fixnum start stop depth))
+             (let ((p start))
+               (declare (type fixnum p))
+               (when (minusp depth) (return-from children -1))
+               (loop while (< p stop)
+                     do (setf p (walk p stop depth))
+                        (when (minusp p) (return-from children -1)))
+               stop))
+           (walk (pos end depth)
+             ;; the position after the item at POS, or -1 when it is malformed
+             (declare (type fixnum pos end depth))
+             (if (>= pos end)
+                 -1
+                 (let ((b (aref data pos)))
+                   (cond ((< b #x80) (1+ pos))
+                         ((<= b #xb7)
+                          (let ((stop (+ pos 1 (- b #x80))))
+                            (if (or (> stop end)
+                                    (and (= b #x81) (< (1+ pos) end) (< (aref data (1+ pos)) #x80)))
+                                -1
+                                stop)))
+                         ((< b #xc0)
+                          (let* ((ll (- b #xb7)) (n (long-length pos ll end)))
+                            (if (or (minusp n) (> (+ pos 1 ll n) end)) -1 (+ pos 1 ll n))))
+                         ((<= b #xf7)
+                          (let ((stop (+ pos 1 (- b #xc0))))
+                            (if (> stop end) -1 (children (1+ pos) stop (1- depth)))))
+                         (t
+                          (let* ((ll (- b #xf7)) (n (long-length pos ll end)))
+                            (if (or (minusp n) (> (+ pos 1 ll n) end))
+                                -1
+                                (children (+ pos 1 ll) (+ pos 1 ll n) (1- depth))))))))))
+    (let ((depth rlp:*rlp-max-depth*))
+      (declare (type fixnum depth))
+      (and (plusp end) (>= (aref data 0) #xc0) (= (walk 0 end depth) end)))))
+
 (defun validate-system-transaction (env tx index)
   "block.rs validate_system_tx: only the end-of-block subblocks metadata transaction, a call
 to the zero address whose input is RLP(Vec<SubBlockMetadata>) ++ be32(block number); none
@@ -70,8 +126,10 @@ from T4."
       (fail-tx 'invalid-transaction index "subblocks are disabled in T4+"))
     (let ((n (length input)))
       (unless (and (>= n 32)
-                   (octets= (subseq input (- n 32)) (integer->octets (block-env-number env) 32))
-                   (handler-case (listp (rlp:rlp-decode input :end (- n 32))) (error () nil)))
+                   (let ((number (block-env-number env)))
+                     (loop for i from 0 below 32
+                           always (= (aref input (- n 1 i)) (ldb (byte 8 (* 8 i)) number))))
+                   (rlp-list-p input (- n 32)))
         (fail-tx 'invalid-transaction index "invalid subblocks metadata system transaction")))
     (unless (and (zerop (tx:transaction-gas-limit tx)) (zerop (tx:transaction-gas-price tx))
                  (zerop (tx:transaction-value tx)) (zerop (tx:transaction-nonce tx))
@@ -86,7 +144,9 @@ with SYSTEM_CALL_GAS_LIMIT; its receipt reports success and no gas. The zero add
 no code on Tempo chains, so the call runs no instruction and changes no state; a tracer sees
 one empty CALL frame."
   (validate-system-transaction env tx index)
-  (when (plusp (state:code-size evm:*world* 0))
+  (when (and (not (and (null (state:world-observer evm:*world*))
+                       (state:account-absent-p evm:*world* 0)))
+             (plusp (state:code-size evm:*world* 0)))
     (fail-tx 'unsupported-transaction index "system call into code at the zero address"))
   (when evm:*tracer*
     (evm:trace-unstarted :call 0 0 0 0 (tx:transaction-input tx) state:+empty-code+
@@ -139,9 +199,10 @@ so)."
 
 ;;; The block
 
-(defun execute-block (db block &key senders (chain *chain*))
+(defun execute-block (db block &key senders (chain *chain*) world)
   "Execute BLOCK on DB (opening a block on it) and return a BLOCK-RESULT. SENDERS, when
-given, is the list of recovered senders in transaction order."
+given, is the list of recovered senders in transaction order. WORLD, when given, is a
+clempo.state world over DB that the block may reuse; it is reset first."
   (let* ((*chain* chain)
          ;; a replay binds one cache for its whole range
          (contract:*mapping-slot-cache* (or contract:*mapping-slot-cache*
@@ -149,7 +210,7 @@ given, is the list of recovered senders in transaction order."
          (env (header-block-env (blocks:block-header block) :chain chain))
          (txs (blocks:block-transactions block))
          (senders (or senders (mapcar #'tx:transaction-sender txs)))
-         (ctx (begin-block db env :block block)))
+         (ctx (begin-block db env :block block :world (and world (state:reset-world world)))))
     (loop for tx in txs for sender in senders do (apply-transaction ctx tx sender))
     (finish-block ctx)))
 

@@ -9,7 +9,8 @@
 (defstruct block
   header (transactions nil :type list) (ommers nil :type list)
   (withdrawals nil :type list) (withdrawals-present-p nil :type boolean)
-  (raw nil :type (or null octets)))
+  (raw nil :type (or null octets))
+  (%hash nil :type (or null octets)))   ; BLOCK-HASH's memo; a block's header is never replaced
 
 (defun decode-block (raw)
   "Decode body items directly from RAW, retaining only owned envelope byte strings."
@@ -84,7 +85,10 @@
     (invariant (= position (length out)) "block encoding size mismatch")
     out))
 
-(defun block-hash (block) (clempo.headers:header-hash (block-header block)))
+(defun block-hash (block)
+  "The header's hash, computed once (a replay's block reader computes it ahead of execution)."
+  (or (block-%hash block)
+      (setf (block-%hash block) (clempo.headers:header-hash (block-header block)))))
 
 (defun transactions-root (transactions)
   (clempo.trie:ordered-trie-root (mapcar #'clempo.transactions:encode-transaction transactions)))

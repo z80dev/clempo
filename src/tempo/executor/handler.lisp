@@ -12,6 +12,7 @@
 
 (defstruct (block-context (:conc-name ctx-))
   db env block-env-evm world host
+  evm-spec                              ; (tempo-evm-spec (block-env-spec env)), looked up once
   (section :start)                      ; :start :non-shared :system
   (non-shared-left 0) (non-payment-left 0)
   (cumulative 0) (block-gas 0) (receipts '()) (index 0)
@@ -436,7 +437,8 @@ into a precompile that runs out of gas ends :PRECOMPILE-OUT-OF-GAS (evm2 Precomp
   (let ((c (gensym "CTX")))
     `(let* ((,c ,ctx)
             (forks:*spec* (block-env-spec (ctx-env ,c)))
-            (evm:*spec* (tempo-evm-spec forks:*spec*))
+            (evm:*spec* (or (ctx-evm-spec ,c)
+                            (setf (ctx-evm-spec ,c) (tempo-evm-spec forks:*spec*))))
             (evm:*world* (ctx-world ,c))
             (evm:*block* (ctx-block-env-evm ,c))
             (*host* (ctx-host ,c))
@@ -459,10 +461,11 @@ into a precompile that runs out of gas ends :PRECOMPILE-OUT-OF-GAS (evm2 Precomp
    :non-shared-left (- (block-env-gas-limit env) (block-env-shared-gas-limit env))
    :non-payment-left (block-env-general-gas-limit env)))
 
-(defun begin-block (db env &key block (db-block t))
+(defun begin-block (db env &key block (db-block t) world)
   "Open a block on DB for ENV (unless DB-BLOCK is NIL: the caller opened it) and apply the
-pre-execution system changes; returns the context APPLY-TRANSACTION and FINISH-BLOCK take."
-  (let ((ctx (make-context db env)))
+pre-execution system changes; returns the context APPLY-TRANSACTION and FINISH-BLOCK take.
+WORLD, when given, is an empty clempo.state world over DB to reuse (STATE:RESET-WORLD)."
+  (let ((ctx (make-context db env :world world)))
     (when db-block (store:db-begin-block db))
     (with-block-context (ctx)
       (when (and block (blocks:block-withdrawals block)) (invalid "withdrawals are not permitted"))
@@ -508,11 +511,13 @@ INVALID-TRANSACTION with the block as it was before TX."
         (incf (ctx-block-gas ctx) (tx-outcome-block-gas outcome))
         (incf (ctx-index ctx))
         ;; the bloom is computed once here for both the receipts root and the block bloom
+        ;; (none for no logs: the receipts code reads a shared zero bloom)
         (push (receipts:make-receipt :type (tx:transaction-type tx)
                                      :status (if (tx-outcome-status outcome) 1 0)
                                      :cumulative-gas-used (ctx-cumulative ctx)
                                      :logs (tx-outcome-logs outcome)
-                                     :bloom (receipts:logs-bloom (tx-outcome-logs outcome)))
+                                     :bloom (and (tx-outcome-logs outcome)
+                                                 (receipts:logs-bloom (tx-outcome-logs outcome))))
               (ctx-receipts ctx))
         outcome))))
 

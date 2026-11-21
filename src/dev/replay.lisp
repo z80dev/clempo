@@ -23,12 +23,16 @@
 ;;; Blocks from the archive, one chunk cached.
 
 (defun make-archive-source ()
+  "A function of a block number that returns the decoded block, or with MODE :CHUNK the
+archive chunk holding it (immutable: CHUNK-BLOCK may read it from any thread)."
   (let ((chunk nil) (first -1))
-    (lambda (n)
+    (lambda (n &optional mode)
       (let ((want (* clempo.archive:+chunk-blocks+ (floor n clempo.archive:+chunk-blocks+))))
         (unless (= want first)
           (setf chunk (clempo.archive:read-chunk want) first want))
-        (clempo.blocks:decode-block (clempo.archive:chunk-block chunk n))))))
+        (if (eq mode :chunk)
+            chunk
+            (clempo.blocks:decode-block (clempo.archive:chunk-block chunk n)))))))
 
 ;;; The datadir's history: was every committed block matched?
 

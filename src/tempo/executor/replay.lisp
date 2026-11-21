@@ -36,6 +36,7 @@ Returns a REPLAY-RESULT."
   (let ((result (make-replay-result :from from :to to :last (1- from) :matched-through (1- from)))
         (contract:*mapping-slot-cache* (or contract:*mapping-slot-cache*
                                            (contract:make-mapping-slot-cache)))
+        (world (state:make-world db))   ; reused by every block (STATE:RESET-WORLD)
         (contiguous t)
         (executed nil)                  ; the current block ran to its end
         (n from))
@@ -53,7 +54,7 @@ Returns a REPLAY-RESULT."
                (let* ((header (blocks:block-header block))
                       (outcome
                         (handler-case
-                            (execute-block db block :chain chain
+                            (execute-block db block :chain chain :world world
                                                     :senders (when senders-fn (funcall senders-fn block)))
                           (execution-failure (c)
                             (signal-mismatch n (list (list :execution nil (type-of c)))
