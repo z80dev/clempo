@@ -64,3 +64,37 @@
   (is= 10500000000 (next-block-base-fee 1783605600 :mainnet 12000000000 0))
   (is= 600000007 (next-block-base-fee 1783605600 :mainnet 600000000 10000001))
   (is= 600000000 (next-block-base-fee 1783605600 :mainnet 600000000 0)))
+
+(deftest custom-genesis-file ()
+  (let ((path (format nil "/tmp/clempo-genesis-~A.json"
+                      (octets->hex (clempo.io:random-octets 8)))))
+    (unwind-protect
+         (progn
+           (clempo.io:write-file-octets
+            path (string->octets
+                  "{\"config\":{\"chainId\":31337,\"epochLength\":60,\"generalGasLimit\":913,
+                      \"londonBlock\":0,\"shanghaiTime\":0,\"cancunTime\":0,\"pragueTime\":0,
+                      \"t13Time\":0,\"t14Time\":5,\"t15Time\":null},
+                    \"timestamp\":\"0x0\",\"extraData\":\"0xaabbcc\",\"gasLimit\":\"0x1dcd6500\",
+                    \"alloc\":{\"0x0000000000000000000000000000000000000001\":{\"balance\":\"0x1\"}}}"))
+           (let* ((chain (load-chainspec (pathname path)))
+                  (root (genesis-state-root chain))
+                  (inner (fourth (genesis-header chain :state-root root))))
+             (is= 31337 (chain-id chain))
+             (is= 60 (chain-epoch-length chain))
+             (is= 913 (general-gas-limit-at 0 chain 500000000))
+             (is= 0 (shared-gas-limit-at 0 chain 500000000))
+             (is (eq :t13 (fork-at 0 chain)))
+             (is (eq :t14 (fork-at 5 chain)))
+             (is (null (fork-activation :t15 chain)))
+             (is= 21 (length inner))
+             (is= 1000000000 (genesis-base-fee chain))
+             (is-equalp (octets-of #xaa #xbb #xcc) (genesis-extra-data chain))
+             (is-equalp root (fourth inner))
+             (is-equalp (genesis-block-hash chain :state-root root) (genesis-block-hash path)))
+           (clempo.io:write-file-octets
+            path (string->octets "{\"config\":{\"chainId\":31337},\"alloc\":{}}"))
+           (let ((chain (load-chainspec path)))
+             (is (null (genesis-base-fee chain)))
+             (is= 15 (length (fourth (genesis-header chain))))))
+      (when (probe-file path) (delete-file path)))))
