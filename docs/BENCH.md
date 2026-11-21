@@ -964,3 +964,51 @@ At 20,000 requests an HTTP-bound round lasts about 40 ms, so the two HTTP-bound 
 were run again for longer: `-total 300000 -rounds 7`, load average 3.6 to 2.8, 800 of 800
 answers identical (`rpc-load-pinned-4`). `eth_getBalance` gave **1.09 / 1.21 / 1.14** and
 `eth_getBlockByNumber` **1.50 / 1.79 / 1.79**.
+
+### A slow call no longer holds its worker's other connections
+
+Before this change, a call that ran long, such as an 18 s `debug_executionWitness` or a
+call waiting on the trie-state cursor lock, held up every other connection on its worker:
+a fresh `web3_clientVersion` waited 17 s. Now, once one event has run for
+`*stall-ms*` (100 ms), the reaper hands that worker's poller to a spare thread, starting
+one if needed (at most `*extra-workers-max*`, 64, are started). The new thread first runs
+each connection of the poller once. The stalled thread finishes its call and becomes a
+spare. A connection is never run by two threads at once: an event that finds it running
+marks it to run once more. The test `a-slow-call-delays-no-other-connection` runs, on a
+single-worker server, a slow call that holds a lock, a call waiting on that lock, and a
+call pipelined behind the slow one. All 32 fresh calls made meanwhile answer in under
+2 s. On the old server all 32 timed out at 20 s.
+
+The stall threshold is measured by the clock. A first version counted the reaper's looks,
+and the reaper's wait often ends early (a GC stops every thread), so under load it handed
+pollers over about 50 times a second. That cost up to 23% on `debug_traceTransaction`
+and 17% on `eth_call` at 16 and 64 clients. With the clock, a 2-minute run of the whole
+table handed over twice.
+
+The trie cursor (`clempo.rpc.tries`) is still one per backend, so calls that need it
+(`debug_intermediateRoots`, `debug_executionWitness`, `debug_stateRootWithUpdates`,
+historical `eth_getProof`) run one at a time. A call waiting for the cursor now holds only
+its own connection, and no other method takes that lock. A writer waiting behind a long
+cursor read does not block new reads either: they may start while it waits, as before.
+
+Answers are unchanged: the 116-case raw HTTP diff and the 629-case envelope diff against
+`a4cd527` show 0 differences. Mac, unpinned, load average 7-14, `-total 20000 -rounds 5`,
+2,400 of 2,400 answers identical in each run. clempo after/before is `hol-fixed-old`;
+after/Rust is `hol-fixed-rust`; before/Rust is `hol-old-rust`:
+
+| Method | after/before 1 | 16 | 64 | after/Rust 1 | 16 | 64 | before/Rust 1 | 16 | 64 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `eth_getBalance` | 1.01 | 1.03 | 0.96 | 1.21 | 0.97 | 0.98 | 1.18 | 0.96 | 0.96 |
+| `eth_call` | 0.98 | 0.99 | 1.01 | 1.66 | 1.40 | 1.42 | 1.85 | 1.60 | 1.62 |
+| `eth_getBlockByNumber` | 0.99 | 0.99 | 1.01 | 1.55 | 1.04 | 1.09 | 1.61 | 1.04 | 1.01 |
+| `eth_getLogs` | 1.01 | 1.00 | 0.99 | 3.64 | 2.04 | 2.00 | 3.85 | 2.40 | 2.63 |
+| `debug_traceTransaction` | 1.00 | 1.03 | 1.03 | 1.73 | 2.17 | 2.27 | 1.81 | 2.09 | 2.22 |
+| `eth_getProof` | 1.01 | 1.02 | 0.98 | 3.22 | 5.45 | 5.79 | 3.33 | 5.32 | 5.87 |
+
+- **After/before** is the direct comparison, with rounds interleaved: every method is within
+  0.96-1.03, which is run noise. An earlier direct run had `eth_getBalance` at 64 at 1.07.
+- **Against Rust**, the before and after runs were made 20 minutes apart, so the host's load
+  moved Rust's own figures too.
+- **`eth_getBalance` at 16 and 64** sits at the load client's ceiling (about 160k req/s) for
+  both servers, as noted above, so its 0.96-0.98 there is noise. newphy's pinned
+  setup was deleted, so this run was on the Mac only.

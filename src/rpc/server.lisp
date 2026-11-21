@@ -49,9 +49,10 @@ first byte, and a response or notification must be taken by the client within
 (defparameter *request-seconds* 30
   "How long a request's head and body (or a websocket frame) may take to arrive once begun.")
 (defparameter *write-seconds* 60 "How long a client may take to accept a response.")
-(defparameter *stall-ms* 20
+(defparameter *stall-ms* 100
   "How long one event may run on a worker before its poller is handed to another thread (the
-reaper looks this often, so a hand-over comes after one to two periods).")
+reaper looks this often, so a hand-over comes after one to two periods). Long enough that a
+worker merely preempted by the host under load is not taken for a stalled one.")
 (defparameter *extra-workers-max* 64
   "Threads a server may start beyond its workers to take over the pollers of stalled ones.")
 
@@ -869,7 +870,8 @@ when it is done, so no event is lost and no connection is run by two threads at 
   shard
   poller                                ; the poller it serves; NIL while it is a spare
   (state 0)                             ; events run (odd while one runs), or :RETIRED
-  (seen nil)                            ; its STATE when the reaper last looked
+  (seen nil)                            ; its STATE when the reaper first saw it so
+  (seen-at 0 :type fixnum)              ; and when (monotonic milliseconds)
   (sweep nil))                          ; run every connection of the poller before waiting
 
 (defun run-event (server w c)
@@ -963,12 +965,15 @@ spare thread, or a new one while fewer than *EXTRA-WORKERS-MAX* were started."
               (spare (push spare (server-spares server))))))))
 
 (defun relieve-stalls (server)
-  (let ((crew (server-crew server)))
+  ;; by the clock, not by looks: a wait on the reaper's queue may end early (a GC's stop)
+  (let ((crew (server-crew server)) (now (now-ms)))
     (dotimes (i (length crew))
       (let* ((w (svref crew i)) (state (worker-state w)))
-        (if (and (typep state 'fixnum) (oddp state) (eql state (worker-seen w)))
-            (hand-on server i w state)
-            (setf (worker-seen w) state))))))
+        (cond ((not (eql state (worker-seen w)))
+               (setf (worker-seen w) state (worker-seen-at w) now))
+              ((and (typep state 'fixnum) (oddp state)
+                    (>= (- now (worker-seen-at w)) *stall-ms*))
+               (hand-on server i w state)))))))
 
 (defun reap-loop (server)
   "Every *STALL-MS*, give the poller of a worker stalled in one event to another thread; about
