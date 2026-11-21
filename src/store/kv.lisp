@@ -158,18 +158,19 @@ PATH durably; COUNT bounds their number (it sizes the bloom filter)."
   (let ((n 0))
     (dotimes (i width n) (setf n (logior (ash n 8) (sb-sys:sap-ref-8 sap (+ pos i)))))))
 
+(declaim (inline sap-u32))
+(defun sap-u32 (sap pos)
+  "The big-endian u32 at SAP+POS."
+  (declare (type sb-sys:system-area-pointer sap) (type fixnum pos))
+  (logior (ash (sb-sys:sap-ref-8 sap pos) 24) (ash (sb-sys:sap-ref-8 sap (+ pos 1)) 16)
+          (ash (sb-sys:sap-ref-8 sap (+ pos 2)) 8) (sb-sys:sap-ref-8 sap (+ pos 3))))
+
 (defun sap-octets* (sap start n)
   (declare #.*hot* (type sb-sys:system-area-pointer sap) (type fixnum start n))
   (let ((o (make-octets n)))
-    (dotimes (i n o) (setf (aref o i) (sb-sys:sap-ref-8 sap (+ start i))))))
-
-(defun crc32c-sap (sap start end)
-  (declare #.*hot* (type sb-sys:system-area-pointer sap) (type fixnum start end))
-  (let ((c #xFFFFFFFF) (table +crc32c-table+))
-    (declare (type (unsigned-byte 32) c))
-    (loop for i of-type fixnum from start below end
-          do (setf c (logxor (aref table (logand (logxor c (sb-sys:sap-ref-8 sap i)) #xFF)) (ash c -8))))
-    (logxor c #xFFFFFFFF)))
+    (sb-sys:with-pinned-objects (o)
+      (sb-kernel:system-area-ub8-copy sap start (sb-sys:vector-sap o) 0 n))
+    o))
 
 (defun map-segment-file (path)
   (let ((fd (sb-posix:open (namestring path) sb-posix:o-rdonly)))
@@ -234,14 +235,13 @@ PATH durably; COUNT bounds their number (it sizes the bloom filter)."
                           :bloom (sap-octets* sap (+ bloom-offset 9) (/ bits 8))
                           :bits bits :records records))))))))
 
-(defun kseg-maybe-p (seg kb)
-  "False when SEG's bloom filter rules out the key whose bytes are KB."
-  (declare #.*hot* (type octets kb))
+(defun kseg-maybe-p (seg h1 h2)
+  "False when SEG's bloom filter rules out the key whose KEY-HASHES are H1 and H2."
+  (declare #.*hot* (type (unsigned-byte 64) h1 h2))
   (let ((bloom (kseg-bloom seg)) (bits (kseg-bits seg)))
-    (multiple-value-bind (h1 h2) (key-hashes kb)
-      (dotimes (j +bloom-hashes+ t)
-        (let ((bit (bloom-bit h1 h2 j bits)))
-          (unless (logbitp (logand bit 7) (aref bloom (ash bit -3))) (return nil)))))))
+    (dotimes (j +bloom-hashes+ t)
+      (let ((bit (bloom-bit h1 h2 j bits)))
+        (unless (logbitp (logand bit 7) (aref bloom (ash bit -3))) (return nil))))))
 
 (defun kseg-block-floor (seg key)
   "The index of the last block whose first key is at or before KEY, or NIL."
@@ -261,11 +261,11 @@ first time, against its checksum."
          (data-end (kseg-data-end seg)))
     (declare (type fixnum off data-end))
     (unless (<= (+ off 4) data-end) (segment-damaged seg "block header past the data"))
-    (let* ((len (sap-be sap off 4)) (start (+ off 4)) (end (+ start len)))
+    (let* ((len (sap-u32 sap off)) (start (+ off 4)) (end (+ start len)))
       (declare (type fixnum len start end))
       (unless (<= (+ end 4) data-end) (segment-damaged seg "block past the data"))
       (when (zerop (sbit (kseg-verified seg) i))
-        (unless (= (sap-be sap end 4) (crc32c-sap sap start end))
+        (unless (= (sap-u32 sap end) (crc32c-sap sap start end))
           (segment-damaged seg (format nil "checksum of block ~D" i)))
         (setf (sbit (kseg-verified seg) i) 1))
       (values start end))))
@@ -300,27 +300,47 @@ first time, against its checksum."
       (dotimes (i suffix) (setf (aref buf (+ shared i)) (sb-sys:sap-ref-8 sap (+ pos i))))
       (+ pos suffix))))
 
-(defun kseg-get (seg key kb)
-  "The value of KEY (bytes KB) in SEG: octets (empty for a tombstone), or NIL when absent."
-  (declare #.*hot* (type octets kb))
-  (when (kseg-maybe-p seg kb)
+(defun kseg-get (seg key kb h1 h2)
+  "The value of KEY (bytes KB, KEY-HASHES H1 and H2) in SEG: octets (empty for a tombstone),
+or NIL when absent.
+
+The scan compares no byte twice: M counts the leading bytes the previous record (smaller
+than KEY) shares with KEY. A record sharing fewer than M bytes with its predecessor differs
+from it, upward, where the predecessor still matched KEY, so it is past KEY; one sharing more
+than M is still below KEY; one sharing exactly M is compared from byte M on."
+  (declare #.*hot* (type octets kb) (type (unsigned-byte 64) h1 h2))
+  (when (kseg-maybe-p seg h1 h2)
     (let ((i (kseg-block-floor seg key)))
       (when i
         (multiple-value-bind (pos end) (kseg-block seg i)
           (declare (type fixnum pos end))
-          (let ((sap (kseg-sap seg)) (buf (make-octets +key-bytes+)) (first-p t))
-            (declare (dynamic-extent buf))
+          (let ((sap (kseg-sap seg)) (m 0) (first-p t))
+            (declare (type fixnum m))
             (loop while (< pos end)
-                  do (setf pos (kseg-read-key seg sap pos end buf first-p) first-p nil)
-                     (with-record-reader (seg sap pos end)
-                       (let ((vlen (varint))
-                             (cmp (let ((d (mismatch buf kb)))
-                                    (cond ((null d) 0) ((< (aref buf d) (aref kb d)) -1) (t 1)))))
-                         (declare (type fixnum vlen))
-                         (need vlen)
-                         (cond ((zerop cmp) (return (sap-octets* sap pos vlen)))
-                               ((plusp cmp) (return nil)))
-                         (incf pos vlen))))))))))
+                  do (with-record-reader (seg sap pos end)
+                       (let* ((shared (byte*)) (suffix (byte*)) (keys pos))
+                         (declare (type fixnum shared suffix keys))
+                         (unless (and (= (+ shared suffix) +key-bytes+) (or (not first-p) (zerop shared)))
+                           (segment-damaged seg "bad key prefix"))
+                         (need suffix)
+                         (incf pos suffix)
+                         (let ((vlen (varint)))
+                           (declare (type fixnum vlen))
+                           (need vlen)
+                           (cond ((< shared m) (return nil))
+                                 ((= shared m)
+                                  ;; compare the suffix from byte M
+                                  (let ((j m))
+                                    (declare (type fixnum j))
+                                    (loop while (and (< j +key-bytes+)
+                                                     (= (sb-sys:sap-ref-8 sap (+ keys (- j shared))) (aref kb j)))
+                                          do (incf j))
+                                    (cond ((= j +key-bytes+) (return (sap-octets* sap pos vlen)))
+                                          ((> (sb-sys:sap-ref-8 sap (+ keys (- j shared))) (aref kb j))
+                                           (return nil))
+                                          (t (setf m j))))))
+                           (setf first-p nil)
+                           (incf pos vlen)))))))))))
 
 ;;; Cursors: one source's records in key order from a start key. A source is a segment, or a
 ;;; batch still being written (a hash table key -> value), read as its sorted entries.
@@ -481,9 +501,10 @@ SB-POSIX:SYSCALL-ERROR (read again)."
       (let ((v (gethash key b)))
         (when v (return-from kv-get (if (plusp (length v)) v nil))))))
   (let ((kb (key-octets key)))
-    (dolist (seg (kv-segments kv) nil)
-      (let ((v (kseg-get seg key kb)))
-        (when v (return (if (plusp (length v)) v nil)))))))
+    (multiple-value-bind (h1 h2) (key-hashes kb)
+      (dolist (seg (kv-segments kv) nil)
+        (let ((v (kseg-get seg key kb h1 h2)))
+          (when v (return (if (plusp (length v)) v nil))))))))
 
 (defun kv-map-range (kv lo hi fn)
   "Call FN with (key value) for every live key in [LO, HI), ascending."

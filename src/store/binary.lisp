@@ -168,26 +168,53 @@
             (when (< byte 128) (return n))
             (incf shift 7)))))
 
-;;; CRC-32C (Castagnoli), the checksum of log records and segment blocks.
+;;; CRC-32C (Castagnoli), the checksum of log records and segment blocks, eight bytes a step
+;;; (slicing-by-8: table K maps a byte to its CRC contribution K bytes further on).
 
-(declaim (type (simple-array (unsigned-byte 32) (256)) +crc32c-table+))
-(sb-ext:defglobal +crc32c-table+
-    (let ((table (make-array 256 :element-type '(unsigned-byte 32))))
-      (dotimes (i 256 table)
+(declaim (type (simple-array (unsigned-byte 32) (2048)) +crc32c-tables+))
+(sb-ext:defglobal +crc32c-tables+
+    (let ((tables (make-array 2048 :element-type '(unsigned-byte 32))))
+      (dotimes (i 256)
         (let ((c i))
           (dotimes (k 8) (setf c (if (logbitp 0 c) (logxor #x82F63B78 (ash c -1)) (ash c -1))))
-          (setf (aref table i) c)))))
+          (setf (aref tables i) c)))
+      (loop for k from 1 below 8
+            do (dotimes (i 256)
+                 (let ((prev (aref tables (+ (* 256 (1- k)) i))))
+                   (setf (aref tables (+ (* 256 k) i))
+                         (logxor (ash prev -8) (aref tables (logand prev #xFF)))))))
+      tables))
+
+(defun crc32c-sap (sap start end &optional (crc 0))
+  "CRC-32C of the bytes at SAP[START, END), continuing from CRC. The caller keeps the bytes
+alive and in place (a mapping, or a pinned vector) and has checked the range."
+  (declare #.*hot* (type sb-sys:system-area-pointer sap) (type fixnum start end)
+           (type (unsigned-byte 32) crc))
+  (let ((c (logxor crc #xFFFFFFFF))
+        (tb +crc32c-tables+)
+        (i start))
+    (declare (type (unsigned-byte 32) c) (type fixnum i))
+    (macrolet ((tab (k x) `(aref tb (+ ,(* 256 k) (logand ,x #xFF)))))
+      #+little-endian
+      (loop while (<= (+ i 8) end)
+            do (let* ((w (sb-sys:sap-ref-64 sap i))
+                      (lo (logxor c (logand w #xFFFFFFFF)))
+                      (hi (ash w -32)))
+                 (declare (type (unsigned-byte 64) w) (type (unsigned-byte 32) lo hi))
+                 (setf c (logxor (tab 7 lo) (tab 6 (ash lo -8)) (tab 5 (ash lo -16)) (tab 4 (ash lo -24))
+                                 (tab 3 hi) (tab 2 (ash hi -8)) (tab 1 (ash hi -16)) (tab 0 (ash hi -24))))
+                 (incf i 8)))
+      (loop while (< i end)
+            do (setf c (logxor (tab 0 (logxor c (sb-sys:sap-ref-8 sap i))) (ash c -8)))
+               (incf i)))
+    (logxor c #xFFFFFFFF)))
 
 (defun crc32c (octets &optional (start 0) (end (length octets)) (crc 0))
   "CRC-32C of OCTETS[START, END), continuing from CRC."
-  (declare #.*hot* (type octets octets) (type fixnum start end) (type (unsigned-byte 32) crc))
+  (declare (type octets octets) (type fixnum start end) (type (unsigned-byte 32) crc))
   (invariant (<= 0 start end (length octets)))
-  (let ((c (logxor crc #xFFFFFFFF))
-        (table +crc32c-table+))
-    (declare (type (unsigned-byte 32) c))
-    (loop for i of-type fixnum from start below end
-          do (setf c (logxor (aref table (logand (logxor c (aref octets i)) #xFF)) (ash c -8))))
-    (logxor c #xFFFFFFFF)))
+  (sb-sys:with-pinned-objects (octets)
+    (crc32c-sap (sb-sys:vector-sap octets) start end crc)))
 
 ;;; Files
 
