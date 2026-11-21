@@ -409,10 +409,13 @@ in the disk-backed KV store; they do not produce a `checkpoint-N.state` file
 at each flush. The store can import stopped format-1 datadirs, and explicit
 exports via `clempo.store:write-checkpoint` remain available.
 
-Datadir `replay` and `bench` use `(:every-ms 1000)`: the WAL syncs on
-the one-second interval, at a flush, and on close. The replay can resume
-from its last durable block (`clempo.store:store-durable-number`). This
-differs from the node's default `:block` sync policy.
+Datadir `replay` and `bench` use `(:every-ms 1000)`: once a second the replay
+thread writes the WAL buffer to the file and posts it to a background syncer
+thread, which syncs it (F_FULLFSYNC on macOS) and only then advances
+`clempo.store:store-durable-number`, so the replay never waits on the drive.
+A flush and close sync on the calling thread. A crash resumes from the last
+durable block. The node's default `:block` policy syncs each block on the
+committing thread before `store-commit-block` returns.
 The measured interval includes archive reads, decoding, execution, WAL
 writes and final sync, but excludes state preparation, copying/opening the
 datadir and writing the result. CPU and GC are interval deltas; peak RSS
@@ -592,6 +595,14 @@ execution boundaries (`Pipeline::execute_stage_to_completion`), not after
 each executed block. Its default execution commit limits are 500,000 blocks
 or 5,000,000 changes. Clempo's current time-based replay/bench WAL sync
 and Rust's stage commits are different durability workloads.
+
+goempo keeps no log: its state database writes a segment and syncs it
+(`File.Sync`, which is F_FULLFSYNC on darwin) only when it flushes, and
+writes since the last flush are lost in a crash. `goempo-dev replay`
+flushes every `-checkpoint` blocks (default 100,000); the R7 runs pass
+`-checkpoint` equal to the range's last block, so a Busy or Recent run syncs
+once, at its end. Clempo's replay is durable to within about a second
+throughout, with the syncs off the replay thread.
 
 For the separate read-only Busy cross-check reported in `FRONTIER.md`:
 

@@ -259,59 +259,83 @@ head root (through storage roots too)."
               (if (= got 8) (push (octets->integer buf) acks) (return)))))
     (nreverse acks)))
 
-(defun crash-child (dir seed write-fd)
-  "The child: commit blocks forever, acknowledging each on WRITE-FD."
+(defun crash-child (dir seed write-fd policy)
+  "The child: commit blocks forever under sync POLICY, acknowledging on WRITE-FD after each
+block what the store says is durable (the block itself under :BLOCK)."
   (handler-case
-      (let ((store (open-test-store dir :sync :block :interval 5 :cache *tiny-cache*))
+      (let ((store (open-test-store dir :sync policy :interval 5 :cache *tiny-cache*))
             (rng (sb-ext:seed-random-state seed))
             (buf (make-octets 8)))
         (loop for n from 1 to 100000
               do (random-block (store-db store) rng n)
                  (store-commit-block store (db-commit-block (store-db store) n (block-hash n)))
-                 (replace buf (integer->octets n 8))
+                 (replace buf (integer->octets (max 0 (store-durable-number store)) 8))
                  (sb-sys:with-pinned-objects (buf)
                    (sb-unix:unix-write write-fd buf 0 8))))
     (error () nil))
   (sb-ext:exit :code 1 :abort t))
 
-(deftest killed-writers-lose-no-acknowledged-block ()
+(defun kill-rounds (policy rounds)
+  "Kill a writer under POLICY at random points; every block it was told was durable must be
+in the reopened datadir, whose state must be exactly its blocks'."
   (let ((kill-rng (sb-ext:seed-random-state 77)))
-    (dotimes (round 4)
+    (dotimes (round rounds)
       (with-temp-dir (dir)
         (let ((seed (+ 100 round)))
           (multiple-value-bind (read-fd write-fd) (sb-posix:pipe)
             (let ((pid (sb-posix:fork)))
               (when (zerop pid)
                 (sb-posix:close read-fd)
-                (crash-child dir seed write-fd))
+                (crash-child dir seed write-fd policy))
               (sb-posix:close write-fd)
-              ;; let it acknowledge a few blocks, then kill it wherever it is
-              (let ((want (+ 3 (random 12 kill-rng))) (buf (make-octets 8)) (seen 0))
+              ;; let it commit a few blocks, then kill it wherever it is
+              (let ((want (+ 3 (random 12 kill-rng))) (buf (make-octets 8)) (seen 0) (last 0))
                 (sb-sys:with-pinned-objects (buf)
                   (loop while (< seen want)
                         do (if (plusp (or (sb-unix:unix-read read-fd (sb-sys:vector-sap buf) 8) 0))
-                               (incf seen)
+                               (setf seen (1+ seen) last (octets->integer buf))
                                (return))))
                 (sleep (/ (random 30 kill-rng) 1000))
                 (sb-posix:kill pid sb-posix:sigkill)
                 (sb-posix:waitpid pid 0)
                 (let* ((rest (read-acks read-fd))
-                       (acked (if rest (car (last rest)) seen)))
+                       (acked (if rest (reduce #'max rest) last)))
                   (sb-posix:close read-fd)
-                  (is (>= acked want) "round ~D: ~D acknowledged" round acked)
+                  (when (eq policy :block)
+                    (is (>= acked want) "round ~D: ~D acknowledged" round acked))
                   (let* ((store (open-test-store dir))
                          (db (store-db store))
                          (mirror (mirror-db))
                          (rng (sb-ext:seed-random-state seed)))
                     (unwind-protect
                          (progn
-                           (is (>= (db-number db) acked) "round ~D: head ~D below acknowledged ~D"
-                               round (db-number db) acked)
+                           (is (>= (db-number db) acked) "~S round ~D: head ~D below durable ~D"
+                               policy round (db-number db) acked)
                            (loop for n from 1 to (db-number db)
                                  do (random-block mirror rng n) (db-commit-block mirror n (block-hash n)))
                            (is-equalp (db-root-hash mirror) (db-root-hash db) "round ~D" round)
                            (is (equal (snapshot mirror) (snapshot db)) "round ~D state" round))
                       (close-store store))))))))))))
+
+(deftest killed-writers-lose-no-acknowledged-block ()
+  (kill-rounds :block 4))
+
+(deftest killed-writers-lose-no-block-the-background-syncer-made-durable ()
+  (kill-rounds '(:every-ms 3) 4))
+
+(deftest the-background-syncer-catches-up-without-a-caller ()
+  (with-temp-dir (dir)
+    (let ((rng (sb-ext:seed-random-state 54))
+          (store (open-test-store dir :sync '(:every-ms 1) :cache (make-cache-limits))))
+      (unwind-protect
+           (progn
+             (is (clempo.store::store-syncer store))
+             (loop for n from 1 to 30 do (commit-random store rng n) (sleep 0.002))
+             ;; the last posted sync lands without store-sync
+             (loop repeat 500 until (>= (store-durable-number store) 29) do (sleep 0.01))
+             (is (>= (store-durable-number store) 29) "durable ~D" (store-durable-number store)))
+        (close-store store))
+      (is (null (clempo.store::store-syncer store)) "syncer joined on close"))))
 
 ;;; Bounded RAM over a state far larger than the caches: thousands of accounts and slots,
 ;;; replayed on a backed database whose caches hold a few hundred, every root checked

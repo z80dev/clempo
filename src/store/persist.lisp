@@ -297,10 +297,87 @@ bad record with valid ones after it signals STORE-CORRUPT-LOG."
   (sync-policy :block)                ; :BLOCK, (:GROUP n) or (:EVERY-MS t)
   wal-stream wal-sink
   (logged-number -1 :type integer)    ; last block appended to the log
-  (durable-number -1 :type integer)   ; last block a crash cannot lose
+  (durable -1 :type integer)          ; last block a crash cannot lose (under SYNC-LOCK)
   (unsynced 0 :type fixnum)
-  (synced-at 0 :type integer)         ; internal real time of the last sync
-  (lock-fd nil))
+  (synced-at 0 :type integer)         ; monotonic ticks of the last sync request
+  (lock-fd nil)
+  ;; The background syncer (policies other than :BLOCK): the writer flushes the log's
+  ;; buffer and posts the block it ends with; the syncer syncs the file and then, only then,
+  ;; raises DURABLE-NUMBER. Under SYNC-LOCK.
+  (syncer nil)
+  (sync-lock (sb-thread:make-mutex :name "store sync"))
+  (sync-cv (sb-thread:make-waitqueue :name "store sync"))
+  (sync-request nil)                  ; block number to make durable, or NIL
+  (sync-busy nil)
+  (sync-stop nil)
+  (sync-error nil))
+
+(defun store-durable-number (store)
+  "The last committed block on stable storage (in the log or the KV store)."
+  (sb-thread:with-mutex ((store-sync-lock store)) (store-durable store)))
+
+(defun set-durable (store n)
+  "Raise the durable block to N (under SYNC-LOCK)."
+  (setf (store-durable store) (max n (store-durable store))))
+
+(defun syncer-loop (store)
+  (let ((lock (store-sync-lock store)) (cv (store-sync-cv store)))
+    (loop
+      (let ((target nil) (fd nil))
+        (sb-thread:with-mutex (lock)
+          (loop until (or (store-sync-request store) (store-sync-stop store))
+                do (sb-thread:condition-wait cv lock))
+          (when (and (store-sync-stop store) (null (store-sync-request store)))
+            (return))
+          (setf target (shiftf (store-sync-request store) nil)
+                (store-sync-busy store) t
+                fd (sb-sys:fd-stream-fd (store-wal-stream store))))
+        (let ((failure (handler-case (progn (sync-fd fd) nil) (error (e) e))))
+          (sb-thread:with-mutex (lock)
+            (if failure
+                (setf (store-sync-error store) failure)
+                (set-durable store target))
+            (setf (store-sync-busy store) nil)
+            (sb-thread:condition-broadcast cv)))))))
+
+(defun start-syncer (store)
+  "Start the background syncer unless the policy syncs each block on the writer."
+  (unless (eq (store-sync-policy store) :block)
+    (setf (store-syncer store)
+          (sb-thread:make-thread #'syncer-loop :name "store log syncer" :arguments (list store)))))
+
+(defun stop-syncer (store)
+  (let ((thread (store-syncer store)))
+    (when thread
+      (sb-thread:with-mutex ((store-sync-lock store))
+        (setf (store-sync-stop store) t)
+        (sb-thread:condition-broadcast (store-sync-cv store)))
+      (sb-thread:join-thread thread :default nil)
+      (setf (store-syncer store) nil))))
+
+(defun quiesce-syncer (store)
+  "Wait until the syncer has no sync posted or running (it is about to lose its file)."
+  (when (store-syncer store)
+    (sb-thread:with-mutex ((store-sync-lock store))
+      (loop while (or (store-sync-request store) (store-sync-busy store))
+            do (sb-thread:condition-wait (store-sync-cv store) (store-sync-lock store)))))
+  (check-sync-error store))
+
+(defun check-sync-error (store)
+  (let ((e (sb-thread:with-mutex ((store-sync-lock store)) (shiftf (store-sync-error store) nil))))
+    (when e (error e))))
+
+(defun post-sync (store)
+  "Hand the log written so far to the syncer: the writer flushes its buffer to the file
+\(cheap) and goes on; the syncer makes it durable."
+  (check-sync-error store)
+  (sink-flush (store-wal-sink store))
+  (finish-output (store-wal-stream store))
+  (sb-thread:with-mutex ((store-sync-lock store))
+    (setf (store-sync-request store) (store-logged-number store))
+    (sb-thread:condition-broadcast (store-sync-cv store)))
+  (setf (store-unsynced store) 0
+        (store-synced-at store) (clempo.io:monotonic-ticks)))
 
 (defun check-sync-policy (policy)
   (unless (or (eq policy :block)
@@ -357,7 +434,8 @@ a format string and arguments for progress notes."
          (store nil))
     (unwind-protect
          (progn (setf store (open-locked-store dir genesis interval log sync cache))
-                (setf (store-lock-fd store) fd))
+                (setf (store-lock-fd store) fd)
+                (start-syncer store))
       (unless store (unlock-datadir fd)))
     store))
 
@@ -408,7 +486,7 @@ its RAM and never reach DIR."
            (invariant (zerop (db-number db)) "genesis must commit block 0")
            (flush-db store)))
     (setf (store-logged-number store) (db-number db)
-          (store-durable-number store) (db-number db))
+          (store-durable store) (db-number db))
     (unless (store-wal-stream store) (start-wal store))
     store))
 
@@ -444,12 +522,14 @@ its RAM and never reach DIR."
     count))
 
 (defun store-sync (store)
-  "Write buffered log records and sync them to stable storage."
+  "Write buffered log records and sync them to stable storage before returning."
+  (quiesce-syncer store)
   (sink-flush (store-wal-sink store))
   (sync-stream (store-wal-stream store))
   (setf (store-unsynced store) 0
-        (store-synced-at store) (clempo.io:monotonic-ticks)
-        (store-durable-number store) (store-logged-number store)))
+        (store-synced-at store) (clempo.io:monotonic-ticks))
+  (sb-thread:with-mutex ((store-sync-lock store))
+    (set-durable store (store-logged-number store))))
 
 (defun flush-db (store)
   "Hand the database's unflushed state to the KV store and start a new log. The batch is
@@ -464,9 +544,10 @@ segment is in MANIFEST)."
         (kv-write-async (store-kv store) batch
                         (lambda () (dolist (p old) (when (probe-file p) (delete-file p)))))))
     (setf (store-logged-number store) (db-number db)
-          (store-durable-number store) (db-number db)
           (store-synced-at store) (clempo.io:monotonic-ticks)
           (store-unsynced store) 0)
+    (sb-thread:with-mutex ((store-sync-lock store))
+      (set-durable store (db-number db)))
     (db-number db)))
 
 (defun store-flush (store)
@@ -484,7 +565,8 @@ the interval or the cache limit says so."
     (put-wal-record (store-wal-sink store) (encode-block-diff diff))
     (setf (store-logged-number store) (block-diff-number diff))
     (incf (store-unsynced store))
-    (when (sync-due-p store) (store-sync store))
+    (when (sync-due-p store)
+      (if (store-syncer store) (post-sync store) (store-sync store)))
     (let ((k (store-interval store)))
       (when (and (db-flush-ready-p db)
                  (or (and (plusp k) (zerop (mod (block-diff-number diff) k)))
@@ -499,9 +581,11 @@ the interval or the cache limit says so."
          (if (and checkpoint (db-flush-ready-p (store-db store)))
              (flush-db store)
              (store-sync store))
+         (stop-syncer store)
          (close (store-wal-stream store))
          (setf (store-wal-stream store) nil)
          (kv-close (store-kv store)))
+    (stop-syncer store)
     (unlock-datadir (shiftf (store-lock-fd store) nil)))
   store)
 
