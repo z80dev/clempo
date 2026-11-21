@@ -2,19 +2,23 @@
 
 ## Components and representation
 
-`clempo-crypto-ec` loads `bls12-381`, `bls12-381-hash`, then
-`bls12-381-signatures`, after SHA-256. No external library, FFI, subprocess,
-filesystem, clock, or entropy is used by these source components.
+`clempo-crypto-ec` loads `bls12-381`, its raw field/tower/group/pairing files,
+then `bls12-381-hash` and `bls12-381-signatures`, after SHA-256. No external
+library, FFI, subprocess, filesystem, clock, or entropy is used by these sources.
 The complete subsystem export list is declared once in the core DEFPACKAGE;
 hash/signature components do not mutate it. Forced/repeated ASDF loads therefore
 keep the same package contract under strict package-variance checks.
 
 The package is `clempo.bls12-381`. `+p+` and `+r+` are the base-field modulus
-and prime subgroup order. Fp elements are canonical integers in `[0,p)`; Fp2
-is a cons `(real . imaginary)` with `i^2=-1`. Affine points are `(x . y)`;
-NIL is infinity. Treat points as immutable. The curve equations are
-`y^2=x^3+4` and `y^2=x^3+(4+4i)`. Arithmetic uses Jacobian coordinates
-internally and one inverse at each affine boundary. MSM uses window buckets.
+and prime subgroup order. At public boundaries Fp elements are canonical
+integers in `[0,p)`; Fp2 is a cons `(real . imaginary)` with `i^2=-1`.
+Affine points are `(x . y)`; NIL is infinity. Treat points as immutable.
+The curve equations are `y^2=x^3+4` and `y^2=x^3+(4+4i)`. Internally each Fp
+occupies six little-endian 64-bit Montgomery limbs; Jacobian groups, the
+Fp2/Fp6/Fp12 tower, projective Miller loop and cyclotomic final exponent use
+caller-owned word arenas without allocating per operation. MSM is Pippenger
+with reused buckets. See [field](field-performance.md), [group](group-performance.md)
+and [end-to-end measurements](performance.md) for contracts and tradeoffs.
 Neither scalar multiplication nor MSM reduces the scalar modulo r: this is
 necessary for cofactor clearing and subgroup checks on arbitrary curve points.
 
@@ -42,9 +46,9 @@ or EIP-2537 octets. It returns **`(values boolean valid-p)`**: a valid but false
 pairing equation is `(NIL,T)`, invalid input is `(NIL,NIL)`. Every point is
 subgroup checked. An empty mathematical list has product one; empty encoded
 precompile input is invalid. Pairings use the negative BLS loop parameter,
-denominator elimination in the M twist, and final exponentiation in
-`Fp2[w]/(w^6-(1+i))`, split into easy and hard factors. All pairs share the
-Miller squarings and final exponentiation.
+projective denominator elimination in the M twist and the tower
+`Fp2[v,w]/(v^3-(1+i),w^2-v)`. All pairs share Miller squarings and one exact
+final exponentiation: Frobenius easy factors and a cyclotomic short-x hard chain.
 
 ## EIP-2537 byte APIs
 
@@ -67,9 +71,9 @@ Hash-to-curve and signature contracts are in `hash-README.md` and
 Curve, twist, generators, encodings and subgroup boundaries follow EIP-2537:
 <https://eips.ethereum.org/EIPS/eip-2537>. The local specification sources read
 were Rust `commonware-cryptography-2026.10.1` and the bundled blst 0.3.17
-C mathematical specification (`consts.c`, `e1.c`, `e2.c`, `pairing.c`). The Lisp
-implementation is independently written with ordinary integers, not copied
-library code. No Go source was read or copied.
+C mathematical specification (`consts.c`, `e1.c`, `e2.c`, `pairing.c`), and the
+Arkworks subgroup criteria cited in `group-performance.md`. The Lisp implementation
+is independently written, not copied library code. No Go source was read or copied.
 
 All 15 `bls*.sexp` / `fail-bls*.sexp` files are DATA ONLY converted from every
 `.json.gz` in `~/clempo-infra/goempo-ref/internal/crypto/bls12381/testdata/`.

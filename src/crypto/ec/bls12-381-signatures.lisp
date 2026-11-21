@@ -73,12 +73,13 @@
   (if (bls-min-sig-p variant) (cons hash public) (cons public hash)))
 
 (defun bls-check (variant terms signature)
-  (multiple-value-bind (ok valid)
-      (pairing-check
-       (cons (if (bls-min-sig-p variant)
-                 (cons (g1-neg signature) (g2-generator))
-                 (cons (g1-neg (g1-generator)) signature)) terms))
-    (and valid ok)))
+  ;; Private boundary: callers supply subgroup-checked decompressions, hashes
+  ;; cleared into the subgroup, or sums/scalar multiples of those points.
+  ;; The public PAIRING-CHECK still validates arbitrary caller points.
+  (pairing-product-p
+   (cons (if (bls-min-sig-p variant)
+             (cons (g1-neg signature) (g2-generator))
+             (cons (g1-neg (g1-generator)) signature)) terms)))
 
 (defun bls-verify (variant public message signature &key namespace dst)
   (handler-case
