@@ -210,7 +210,7 @@
    ("STORAGE-NONEMPTY-P" 2 "Existence predicates have no iteration-dependent result.")
    ("TAKE-TRANSIENT-STORAGE" 1 "Produces an alist of independent transient keys."))
   ("src/store/backed.lisp"
-   ("DB-FLUSH-ENTRIES" 2 "Collects independent account and slot records into a sorted flush batch.")
+   ("DB-FLUSH-ENTRIES" 3 "Collects independent account and slot records and the changed accounts' new trie nodes into a flush batch keyed (and later sorted) by store key.")
    ("EVICT" 3 "Drops clean objects according to usage bits or clears whole caches.")
    ("SORTED-ENTRIES" 1 "Sorts by the store key before serializing entries.")
    ("WRITE-NODES" 2 "Applies independent node values/counts to a batch keyed by node hash."))
@@ -246,6 +246,7 @@
    "Listener and peer sessions join in the listener's cleanup.")
   ("src/sync/archive.lisp" "FETCH-RANGE" 1 "FETCH-RANGE" "Joins the archive worker group before returning.")
   ("src/store/kv.lisp" "KV-MERGE-TIERS" 1 "KV-WAIT-MERGES" "Waits for the tracked segment merge worker before compaction or close.")
+  ("src/store/kv.lisp" "KV-WRITE-ASYNC" 1 "KV-WAIT-BATCH" "The next batch, KV-WAIT-MERGES and close join the tracked batch writer.")
   ("src/sync/metrics.lisp" "START-METRICS-SERVER" 1 "STOP-METRICS-SERVER" "Metrics service joins its listener.")
   ("src/rpc/chain.lisp" "BUILD-INDEX" 1 "BUILD-INDEX" "Joins index worker group before publishing the index.")
   ("src/rpc/sender.lisp" "BUILD-SENDER-INDEX" 1 "BUILD-SENDER-INDEX" "Joins sender-index workers before writing the index.")
