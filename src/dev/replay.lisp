@@ -174,22 +174,23 @@ get the restarts in the debugger)."
                     (incf skips) (invoke-restart 'clempo.executor:skip-block))
                    (t (invoke-restart 'clempo.executor:abort-replay c)))))
       (unwind-protect
-           (flet ((run (recover)
+           (flet ((run (block-fn senders-fn)
                     (clempo.executor:replay-blocks
                      db from to
                      :chain chain
-                     :block-fn source
-                     :senders-fn recover
+                     :block-fn block-fn
+                     :senders-fn senders-fn
                      :commit-fn (when store (lambda (diff) (clempo.store:store-commit-block store diff)))
                      :heal-fn (lambda (db n block)
                                 (clempo.executor:heal-block db block (reference-prestate-diff n) :chain chain))
                      :progress-fn #'progress)))
              (setf result
-                   (call-with-recovered-senders
-                    (lambda (recover)
+                   (call-with-block-pipeline
+                    (lambda (block-fn senders-fn)
                       (if interactive
-                          (run recover)
-                          (handler-bind ((error #'choose)) (run recover))))
+                          (run block-fn senders-fn)
+                          (handler-bind ((error #'choose)) (run block-fn senders-fn))))
+                    source
                     sender-threads))
              ;; Opcode diagnosis of the stopping block, on the parent state the abort restored.
              (let ((c (clempo.executor:replay-result-stopped result)))

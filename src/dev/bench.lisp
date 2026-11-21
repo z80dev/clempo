@@ -17,24 +17,25 @@
 (defun bench-seconds (ticks)
   (/ ticks (float internal-time-units-per-second 1d0)))
 
-(defun bench-run (db store from to profile sender-threads)
+(defun bench-run (db store from to profile sender-threads &key (profile-mode :cpu) (profile-threads :all))
   (let* ((wall (get-internal-real-time)) (cpu (get-internal-run-time))
          (gc sb-ext:*gc-run-time*) (bytes (sb-ext:get-bytes-consed))
          (result nil))
     (when profile
       (sb-sprof:reset)
-      (sb-sprof:start-profiling :mode :cpu :sample-interval 0.005 :max-samples 120000
-                               :threads :all))
+      (sb-sprof:start-profiling :mode profile-mode :sample-interval 0.005 :max-samples 400000
+                               :threads (if (eq profile-threads :main) (list sb-thread:*current-thread*) :all)))
     (unwind-protect
          (handler-bind ((error (lambda (condition)
                                  (let ((restart (find-restart 'clempo.executor:abort-replay condition)))
                                    (when restart (invoke-restart restart condition))))))
-           (setf result (call-with-recovered-senders
-                         (lambda (recover)
+           (setf result (call-with-block-pipeline
+                         (lambda (block-fn senders-fn)
                            (clempo.executor:replay-blocks
-                            db from to :chain :mainnet :block-fn (make-archive-source)
-                            :senders-fn recover
+                            db from to :chain :mainnet :block-fn block-fn
+                            :senders-fn senders-fn
                             :commit-fn (when store (lambda (diff) (clempo.store:store-commit-block store diff)))))
+                         (make-archive-source)
                          sender-threads))
            (when store (clempo.store:store-sync store)))
       (when profile (sb-sprof:stop-profiling)))
@@ -46,13 +47,15 @@
       (when profile
         (ensure-directories-exist profile)
         (with-open-file (out profile :direction :output :if-exists :supersede)
-          (sb-sprof:report :type :graph :max 60 :stream out)))
+          (sb-sprof:report :type :graph :max 150 :stream out)))
       (values result secs cpu-secs gc-secs consed rss))))
 
 (defcommand "bench" (args)
-  "R7: bench -range busy|early|recent [-parent SAVED_DIR -datadir FRESH_DIR] [-sender-threads N] [-result FILE] [-profile FILE]"
+  "R7: bench -range busy|early|recent [-parent SAVED_DIR -datadir FRESH_DIR] [-sender-threads N] [-result FILE] [-profile FILE [-profile-mode cpu|alloc] [-profile-threads all|main]]"
   (let* ((range (arg args :range)) (spec (assoc range *bench-ranges* :test #'equal))
          (parent (arg args :parent)) (datadir (arg args :datadir)) (profile (arg args :profile))
+         (profile-mode (if (equal (arg args :profile-mode "cpu") "alloc") :alloc :cpu))
+         (profile-threads (if (equal (arg args :profile-threads "all") "main") :main :all))
          (sender-threads (arg-int args :sender-threads +default-sender-threads+)))
     (unless spec (error "Expected -range busy, early or recent, got ~S" range))
     (check-type sender-threads (integer 1 16))
@@ -83,7 +86,8 @@
                             (octets= (clempo.blocks:block-hash parent-block) (clempo.store:db-hash db)))
                  (error "Saved state does not match canonical parent ~D" parent-height))
                (multiple-value-bind (result secs cpu gc consed peak)
-                   (bench-run db store from to (and profile (expand-home profile)) sender-threads)
+                   (bench-run db store from to (and profile (expand-home profile)) sender-threads
+                              :profile-mode profile-mode :profile-threads profile-threads)
                  (let* ((blocks (clempo.executor:replay-result-blocks result))
                         (gas (clempo.executor:replay-result-gas result))
                         (stop (clempo.executor:replay-result-stop-reason result))

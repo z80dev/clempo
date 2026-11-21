@@ -53,9 +53,6 @@
                  (clempo.history:history-refresh history)
                  (let ((next (next-seed-after history job)))
                    (when next (setf stop (min stop (1- next)))))))
-             (block-at (n)
-               (when (> n stop) (throw 'history-stop nil))
-               (funcall source n))
              (progress (n outcome)
                (declare (ignore outcome))
                (let ((now (get-internal-real-time)))
@@ -67,15 +64,20 @@
                    (setf last-log now last-n n)))))
       (let ((result
               (catch 'history-stop
-               (call-with-recovered-senders
-               (lambda (recover)
+              (call-with-block-pipeline
+               (lambda (block-fn senders-fn)
                  (handler-bind ((error (lambda (c)
                                          (log-line "history: stopping: ~A" c)
                                          (let ((r (find-restart 'clempo.executor:abort-replay c)))
                                            (when r (invoke-restart r c))))))
                    (clempo.executor:replay-blocks db (1+ (clempo.store:db-number db)) stop
-                                                  :chain chain :block-fn #'block-at :senders-fn recover
+                                                  :chain chain
+                                                  :block-fn (lambda (n)
+                                                              (when (> n stop) (throw 'history-stop nil))
+                                                              (funcall block-fn n))
+                                                  :senders-fn senders-fn
                                                   :commit-fn #'commit :progress-fn #'progress)))
+               source
                sender-threads))))
         (clempo.history:history-flush history :db db)
         (log-line "history: job ~D at ~D (~A) in ~,0F s; covers ~S" job (clempo.store:db-number db)
