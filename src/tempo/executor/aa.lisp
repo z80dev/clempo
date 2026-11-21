@@ -77,12 +77,26 @@
 
 ;;; Intrinsic gas
 
+(defun call-access-gas (v gp fork)
+  "Account access for the calls after the first (the 21,000 base covers the first target):
+before T14 a cold access per call; from T14, which warms the transaction's accounts first, a
+cold access per distinct target outside the warm set and a warm read for every other call."
+  (let ((rest (rest (txv-calls v))))
+    (if (forks:fork>= fork :t14)
+        (let ((first-to (first (first (txv-calls v)))) (targeted '()))
+          (loop for (to) in rest
+                when to
+                  sum (if (or (eql to first-to) (state:address-warm-p evm:*world* to)
+                              (member to targeted))
+                          (evm:gas-params-warm-read gp)
+                          (progn (push to targeted) (evm:gas-params-cold-account gp)))))
+        (* (evm:gas-params-cold-account gp) (length rest)))))
+
 (defun aa-intrinsic-gas (v gp fork)
-  "handler.rs intrinsic_gas (pre-T14): (values regular floor)."
+  "handler.rs intrinsic_gas: (values regular floor)."
   (let ((regular (+ (evm:gas-params-tx-base gp) (signature-gas (txv-signature v))))
         (tokens 0))
-    (when (forks:fork>= fork :t14) (fail-tx 'unsupported-transaction *tx-index* "T14 AA intrinsic gas"))
-    (incf regular (* (evm:gas-params-cold-account gp) (max 0 (1- (length (txv-calls v))))))
+    (incf regular (call-access-gas v gp fork))
     (dolist (a (txv-authorizations v))
       (incf regular (+ (evm:gas-params-auth-empty-account gp) (signature-gas (fourth a))))
       (when (and (forks:fork>= fork :t1) (zerop (rlp:rlp-decode-integer (third a) :max-bytes 8)))
@@ -117,7 +131,8 @@
          (caller (txv-sender v))
          (account (state:get-account world caller))
          (code (state:account-code world account)))
-    (when (and (not (ctx-skip-eip3607 *ctx*)) (plusp (length code)) (not (state:delegation-target code)))
+    (when (and (not (ctx-skip-eip3607 *ctx*)) (plusp (length code)) (not (state:delegation-target code))
+               (not (configurable-sender-p v account)))
       (invalid "sender has code"))
     (state:touch-account world account)
     (let ((protocol-nonce (state:account-nonce account)))
@@ -158,7 +173,7 @@
 (defstruct (keychain-state (:conc-name kc-)) access-key same-tx-p fee-key loaded-key)
 
 (defun signature-type-code (kind)
-  (ecase kind (:secp256k1 0) (:p256 1) (:webauthn 2)))
+  (ecase kind (:secp256k1 0) (:p256 1) (:webauthn 2) (:configurable-account 3)))
 
 (defun check-t6-key-authorization-signer (v kc)
   "prepare_keychain, T6: a key authorization signed by someone other than the root must be
@@ -199,7 +214,8 @@ signed by the transaction's own access key, an active admin key of the same sign
                  v (make-keychain-state :access-key access-key :same-tx-p t :fee-key fee-key)))
               (let* ((expected-type (when (or auth (forks:spec>= :t1))
                                       (ecase (clempo.signatures:signature-inner-kind signature)
-                                        (:secp256k1 0) (:p256 1) (:webauthn 2))))
+                                        (:secp256k1 0) (:p256 1) (:webauthn 2)
+                                        (:configurable-account 3))))
                      (key (handler-case
                               (with-protocol-storage ()
                                 (prog1 (clempo.keychain:validate-keychain-authorization
@@ -352,7 +368,11 @@ alone."
          (timestamp (block-env-timestamp env))
          (*ctx* ctx))
     (setf (ctx-key-expiry ctx) nil)
-    (when (forks:fork>= fork :t14) (fail-tx 'unsupported-transaction *tx-index* "T14 AA transactions"))
+    ;; A configurable-account quorum cannot sign an EIP-7702 delegation.
+    (when (some (lambda (a) (eq (clempo.signatures:signature-inner-kind (fourth a))
+                                :configurable-account))
+                (txv-authorizations v))
+      (invalid "configurable account: invalid signature context"))
     (when (and (txv-authorizations v) (null (first (first (txv-calls v)))))
       (invalid "calls cannot contain CREATE when the authorization list is non-empty"))
     (let ((kind (clempo.signatures:signature-kind (txv-signature v))))
@@ -389,26 +409,34 @@ alone."
             (before (txv-valid-before v)))
         (when (and after (< timestamp after)) (invalid "not valid before ~D" after))
         (when (and before (>= timestamp before)) (invalid "expired at ~D" before)))
-      (multiple-value-bind (intrinsic floor) (aa-intrinsic-gas v gp fork)
-        (let ((nonce-gas (nonce-intrinsic-gas v gp fork)))
-          (when (forks:fork>= fork :t0) (incf intrinsic nonce-gas))
-          (when (< gas-limit intrinsic) (invalid "intrinsic gas too low"))
-          (when (< gas-limit floor) (invalid "gas limit below the calldata floor"))
-          (unless (forks:fork>= fork :t0) (incf intrinsic nonce-gas))
-          (when (and (/= 0 (txv-nonce-key v)) (null (first (first (txv-calls v))))
-                     (multiple-value-bind (found nonce) ; account_info_untracked: the committed state
-                         (state:backend-account (state:world-backend world) caller)
-                       (or (not found) (zerop nonce))))
-            (incf intrinsic (evm:gas-params-new-account gp))
-            (when (< gas-limit intrinsic) (invalid "intrinsic gas too low")))
-          ;; warm_aa_accounts, warm_beneficiary
-          (state:warm-address world caller)
-          (let ((first-to (first (first (txv-calls v))))) (when first-to (state:warm-address world first-to)))
-          (dolist (a (evm:precompile-addresses (evm:spec-precompiles evm:*spec*))) (state:warm-address world a))
-          (dolist (entry (txv-access-list v))
-            (state:warm-address world (first entry))
-            (dolist (slot (rest entry)) (state:warm-slot world (first entry) slot)))
-          (state:warm-address world (block-env-beneficiary env))
+      (flet ((warm-aa-accounts ()
+               (state:warm-address world caller)
+               (let ((first-to (first (first (txv-calls v))))) (when first-to (state:warm-address world first-to)))
+               (dolist (a (evm:precompile-addresses (evm:spec-precompiles evm:*spec*))) (state:warm-address world a))
+               (dolist (entry (txv-access-list v))
+                 (state:warm-address world (first entry))
+                 (dolist (slot (rest entry)) (state:warm-slot world (first entry) slot)))))
+        ;; From T14 the configurable-account state checks load accounts, so the transaction's
+        ;; warmth comes first and the beneficiary's after the intrinsic gas.
+        (when (forks:fork>= fork :t14) (warm-aa-accounts))
+        (let ((configurable-gas (validate-configurable-state v)))
+          (multiple-value-bind (intrinsic floor) (aa-intrinsic-gas v gp fork)
+            (when (forks:fork>= fork :t14) (state:warm-address world (block-env-beneficiary env)))
+            (incf intrinsic configurable-gas)
+            (let ((nonce-gas (nonce-intrinsic-gas v gp fork)))
+              (when (forks:fork>= fork :t0) (incf intrinsic nonce-gas))
+              (when (< gas-limit intrinsic) (invalid "intrinsic gas too low"))
+              (when (< gas-limit floor) (invalid "gas limit below the calldata floor"))
+              (unless (forks:fork>= fork :t0) (incf intrinsic nonce-gas))
+              (when (and (/= 0 (txv-nonce-key v)) (null (first (first (txv-calls v))))
+                         (multiple-value-bind (found nonce) ; account_info_untracked: the committed state
+                             (state:backend-account (state:world-backend world) caller)
+                           (or (not found) (zerop nonce))))
+                (incf intrinsic (evm:gas-params-new-account gp))
+                (when (< gas-limit intrinsic) (invalid "intrinsic gas too low")))
+              (when (forks:fork< fork :t14)
+                (warm-aa-accounts)
+                (state:warm-address world (block-env-beneficiary env)))
           (let* ((fee (resolve-fee-context ctx v fee-payer))
                  (create-nonce (apply-aa-nonce v))
                  (kc (prepare-keychain v fee)))
@@ -434,6 +462,7 @@ alone."
                   (let ((execution-gas (progn (incf intrinsic key-gas)
                                               (if (and (forks:fork< fork :t0) (> intrinsic gas-limit))
                                                   +max-u64+ (- gas-limit intrinsic)))))
+                    (register-commitments v)
                     (multiple-value-bind (ok gas-left status output)
                         (execute-batch v caller (kc-access-key kc) create-nonce price execution-gas)
                       (multiple-value-bind (used validator-fee refunded)
@@ -442,4 +471,4 @@ alone."
                                          :fee-token (fee-token fee) :fallback-fee-token-p (fee-fallback-p fee)
                                          :fee-payer (fee-payer fee) :key-expiry (ctx-key-expiry ctx)
                                          :validator-fee validator-fee :refunded refunded
-                                         :output (or output (make-octets 0)) :halt (halt-kind status)))))))))))))
+                                         :output (or output (make-octets 0)) :halt (halt-kind status)))))))))))))))

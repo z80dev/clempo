@@ -224,8 +224,7 @@ on its own gas (unlimited unless GAS-LIMIT) without TIP-1060 accounting. Returns
     (setf *non-creditable* nil)
     (with-protocol-storage ()
       (clempo.keychain:set-tx-origin (txv-sender v))
-      (when (forks:spec>= :t14)
-        (fail-tx 'unsupported-transaction *tx-index* "T14 upgrade-authority seeding"))
+      (when (forks:spec>= :t14) (seed-upgrade-authority v))
       ;; A transient write only TIP20ChannelReserve (T5) reads, inside this transaction: before
       ;; T5 nothing can observe it.
       (when (forks:spec>= :t5)
@@ -382,8 +381,10 @@ into a precompile that runs out of gas ends :PRECOMPILE-OUT-OF-GAS (evm2 Precomp
       (invalid "initcode too large"))
     (when (= (txv-nonce v) +max-u64+) (invalid "nonce overflow"))
     (multiple-value-bind (intrinsic floor) (ethereum-intrinsic-gas gp v)
-      ;; adjust_intrinsic_gas (T1+): new accounts for a zero nonce and zero-nonce authorizations
+      ;; adjust_intrinsic_gas (T1+): T14's retired-root check (no gas for the sender), then new
+      ;; accounts for a zero nonce and zero-nonce authorizations
       (when (forks:spec>= :t1)
+        (incf intrinsic (validate-configurable-state v))
         (incf intrinsic (* (evm:gas-params-new-account gp)
                            (+ (if (zerop (txv-nonce v)) 1 0)
                               (count-if (lambda (a) (zerop (rlp:rlp-decode-integer (third a))))

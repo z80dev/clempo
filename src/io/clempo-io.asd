@@ -1,10 +1,9 @@
 (defsystem "clempo-io"
-  :description "Clock, entropy, files, processes and http behind special variables"
+  :description "Clock, entropy, files and processes behind special variables"
   :depends-on ("clempo-base" (:require "sb-bsd-sockets") (:require "sb-posix"))
   :serial t
   :components ((:file "io")
-               (:file "clock")
-               (:file "http")))
+               (:file "clock")))
 
 (defsystem "clempo-io/tests"
   :depends-on ("clempo-io")

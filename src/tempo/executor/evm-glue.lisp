@@ -9,8 +9,9 @@
 (defmethod state:backend-account ((db store:statedb) address)
   (let ((a (store:db-account db address)))
     (if a
-        (values t (store:account-nonce a) (store:account-balance a) (store:account-code-hash a))
-        (values nil 0 0 state:+empty-code-hash+))))
+        (values t (store:account-nonce a) (store:account-balance a) (store:account-code-hash a)
+                (store:account-commitment a))
+        (values nil 0 0 state:+empty-code-hash+ 0))))
 
 (defmethod state:backend-storage ((db store:statedb) address slot)
   (store:db-storage db address slot))
@@ -32,7 +33,8 @@
              (let ((code (state:account-change-code c)))
                (when (and code (plusp (length code))) (store:db-put-code db code)))
              (store:db-set-account db address (state:account-change-nonce c)
-                                   (state:account-change-balance c) (state:account-change-code-hash c))
+                                   (state:account-change-balance c) (state:account-change-code-hash c)
+                                   (state:account-change-commitment c))
              (loop for (slot . value) in (state:account-change-storage c)
                    do (store:db-set-storage db address slot value)))))))
 
@@ -142,7 +144,9 @@ evm2's journaled semantics (crates/precompiles/src/storage/evm.rs sload_journal 
   (when (state:account-exists account)
     (contract:make-account-info :nonce (state:account-nonce account)
                                 :balance (state:account-balance account)
-                                :code (state:account-code world account))))
+                                :code (state:account-code world account)
+                                :code-hash (octets->integer (state:account-code-hash account))
+                                :commitment (state:account-commitment account))))
 
 (defmethod contract:host-account ((h world-host) address skip-cold)
   (let* ((world evm:*world*)
@@ -163,6 +167,17 @@ evm2's journaled semantics (crates/precompiles/src/storage/evm.rs sload_journal 
     (state:warm-address world address)
     (state:set-code world account code)
     was-empty))
+
+(defmethod contract:host-set-config-commitment ((h world-host) address commitment)
+  "storage/evm.rs set_config_commitment's write: a first commitment installs the 0xef
+marker code (TIP-1114); the commitment becomes the account extension."
+  (let* ((world evm:*world*)
+         (account (state:get-account world address))
+         (previous (state:account-commitment account))
+         (was-empty (state:account-dead-p account)))
+    (when (zerop previous) (state:set-code world account (octets-of #xef)))
+    (state:set-commitment world account commitment)
+    (values previous was-empty)))
 
 (defmethod contract:host-log ((h world-host) address topics data)
   (let ((entry (state:make-log-entry address topics data)))
@@ -192,6 +207,39 @@ evm2's journaled semantics (crates/precompiles/src/storage/evm.rs sload_journal 
                                        (block-env-timestamp-millis-part env))))
            (values (1+ sp) nil))))
 
+(defun configurable-account-op (frame stack sp)
+  "instructions.rs configurable_account (T14, TIP-1114): code that is exactly the 0xef marker
+of an account with a configuration commitment runs the account shim (isValidSignature,
+onERC721Received) statically on the frame's gas and ends the frame with its output. Any other
+0xef stays an invalid opcode."
+  (declare (ignore stack) (type fixnum sp))
+  (let ((code (evm:frame-code frame)))
+    (unless (and (= (length code) 1) (= (aref code 0) #xef)
+                 (/= 0 (state:account-commitment
+                        (state:get-account evm:*world* (evm:frame-code-address frame)))))
+      (return-from configurable-account-op (values sp :invalid-opcode))))
+  (let ((input (evm:frame-input frame)))
+    (when (< (evm:frame-gas frame) (forks:input-cost forks:*spec* (length input)))
+      (setf (evm:frame-gas frame) 0)
+      (return-from configurable-account-op (values sp :out-of-gas)))
+    (let ((storage (contract:make-metered-storage *host* :gas-limit (evm:frame-gas frame)
+                                                         :static t
+                                                         :non-creditable *non-creditable*)))
+      (flet ((spend () (decf (evm:frame-gas frame) (contract:metered-storage-spent storage))))
+        (handler-case
+            (let ((output (let ((contract:*storage* storage))
+                            (clempo.configurable-account:shim-call (evm:frame-address frame) input))))
+              (spend)
+              (values sp :return output))
+          (contract:precompile-revert (c)
+            (spend)
+            (values sp :revert (contract:precompile-revert-data c)))
+          (contract:precompile-halt (c)
+            (setf (evm:frame-gas frame) 0)
+            (values sp (if (eq (contract:precompile-halt-reason c) :out-of-gas)
+                           :out-of-gas
+                           :precompile-failure))))))))
+
 (defvar *evm-specs* (make-hash-table :synchronized t) "fork -> clempo.evm spec")
 
 (defun storage-credit-sstore-hook (frame key original present new cold)
@@ -220,6 +268,8 @@ always mint). Returns NIL or the halt status."
                                               :ext fork)))
               (when (forks:fork< fork :t1c)
                 (setf (svref (evm:spec-extra-opcodes spec) #x4f) #'millis-timestamp-op))
+              (when (forks:fork>= fork :t14)
+                (setf (svref (evm:spec-extra-opcodes spec) #xef) #'configurable-account-op))
               (when (forks:fork>= fork :t7)
                 (setf (evm:spec-sstore-hook spec) #'storage-credit-sstore-hook))
               spec))))

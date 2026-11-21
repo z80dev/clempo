@@ -33,7 +33,7 @@ missing piece.")
            #:estimate-request-gas #:copy-call-request #:req-valid-before #:req-valid-after
            #:req-fee-payer-signature #:req-tempo-authorizations #:req-key-authorization
            #:req-account-simulation #:req-key-authorization-simulation #:req-key-type
-           #:aa-sim-transaction))
+           #:aa-sim-transaction #:req-key-id #:mock-webauthn-signature #:mock-primitive-signature))
 
 (in-package #:clempo.rpc.calls)
 
@@ -75,6 +75,7 @@ missing piece.")
               (serde:do-array (i src)
                 (push (serde:read-integer src 0 255 "u8") bytes))
               (coerce (nreverse bytes) 'octets)))
+    (:object (serde:refuse-map src "a variable number of bytes represented as a hex string, an array of u8, or raw bytes"))
     (t (serde:invalid-type src "a variable number of bytes represented as a hex string, an array of u8, or raw bytes"))))
 
 (defparam tx-kind (src) "alloy TxKind: an address, or null for a creation (:create)"

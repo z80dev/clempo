@@ -2,7 +2,7 @@
 
 Numbered, never renumbered.
 
-1. **TLS through curl.** clempo has no TLS stack. `clempo.http` speaks plain HTTP/1.1 itself (pooled keep-alive sockets) and runs `curl` for `https://` URLs. Upstreams on localhost (the private reference node) take the native path.
+1. **TLS through curl.** Resolved: clempo has its own TLS 1.3 client (`src/net/tls.lisp`: X25519, or P-256 after a HelloRetryRequest; AES-128/256-GCM and ChaCha20-Poly1305; RSA-PSS, ECDSA and Ed25519 CertificateVerify) and validates server chains itself (`src/crypto/pki/x509.lisp`) against the system roots: `CLEMPO_CA_FILE` if set, else macOS's `SystemRootCertificates.keychain` (exported once per process with `/usr/bin/security`), else the usual Linux CA bundles. `clempo.http` and the `wss://` client in `rpcdiff` use it; curl is not used. Still different from a full TLS stack: no TLS 1.2 (every server clempo uses speaks 1.3), no session resumption or 0-RTT, no client certificates (an empty Certificate answers a CertificateRequest), no revocation checking, certificate policies are not processed, and a critical name constraint on a form other than DNS names rejects the chain.
 
 2. **Simplex voter without a journal.** Resolved: `clempo.simplex` journals votes, certificates and certification verdicts before publishing and replays them on restart, as commonware's voter does (the journal is a protocol; the validator supplies the file backend). Still different: missing-certificate requests are retried with each nullify rebroadcast instead of the resolver's fetch timers, and the voter blocks no peers itself (it reports :invalid resolver responses through `voter-deliver`; the network layer blocks).
 

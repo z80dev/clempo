@@ -47,7 +47,8 @@ the error depends on the reference's load, not on the request."
           (t class))))
 
 (defun json-shape-equal (a b)
-  "Same JSON types and object keys; error objects must share their code."
+  "Same JSON types and object keys; error objects must share their code; an empty array
+matches only an empty array."
   (cond ((clempo.json:jobject-p a)
          (and (clempo.json:jobject-p b)
               (= (length (cdr a)) (length (cdr b)))
@@ -57,7 +58,8 @@ the error depends on the reference's load, not on the request."
                                   (if (string= k "code") (equal v (cdr cell)) (json-shape-equal v (cdr cell))))))))
         ((and (vectorp a) (not (stringp a)))
          (and (vectorp b) (not (stringp b))
-              (or (zerop (length a)) (zerop (length b)) (json-shape-equal (aref a 0) (aref b 0)))))
+              (eq (zerop (length a)) (zerop (length b)))
+              (or (zerop (length a)) (json-shape-equal (aref a 0) (aref b 0)))))
         ((stringp a) (stringp b))
         ((numberp a) (numberp b))
         (t (eq a b))))
@@ -74,6 +76,17 @@ eth_capabilities answer recorded at the reference's head, compared at clempo's."
                      ((vectorp v) (map 'vector #'walk v))
                      (t v))))
       (walk want))))
+
+(defun case-category (c)
+  "How case C is graded: \"value\" (the recorded answer, compared exactly), \"shape\" (it
+follows the head or the moment: same keys, types and error code), \"node\" (it depends on
+the reference node itself: compared by shape, never counted toward R5), or
+\"reference-timeout\"."
+  (let ((class (case-compare-class c)))
+    (cond ((string= class "stable") "value")
+          ((string= class "node") "node")
+          ((string= class "reference-timeout") class)
+          (t "shape"))))
 
 (defun case-matches (c status response)
   "A reference-timeout case matches an answer with a result: the reference recorded none to
@@ -105,15 +118,13 @@ compare with. A \"headRelative\" case is value-checked after HEAD-RELATIVE."
 
 (defun call-with-rpc-websocket (url function)
   (multiple-value-bind (scheme host port path) (clempo.http:parse-url url)
-    (unless (member scheme '("http" "ws") :test #'string=)
-      (error "rpcdiff WebSocket replay requires a plain HTTP or WS target"))
-    (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (unless (member scheme '("http" "ws" "https" "wss") :test #'string=)
+      (error "rpcdiff WebSocket replay requires an http(s) or ws(s) target"))
+    (multiple-value-bind (stream socket)
+        (let ((clempo.http:*read-timeout* 10)) (clempo.http:open-connection scheme host port))
       (unwind-protect
            (progn
-             (sb-bsd-sockets:socket-connect socket (clempo.http::resolve host) port)
-             (with-open-stream (stream (sb-bsd-sockets:socket-make-stream
-                                        socket :input t :output t :timeout 10 :buffering :full
-                                        :element-type '(unsigned-byte 8)))
+             (progn
                (let ((key (clempo.websocket:base64-encode (clempo.io:random-octets 16)))
                      (crlf (coerce '(#\Return #\Newline) 'string)))
                  (write-sequence
@@ -129,6 +140,7 @@ compare with. A \"headRelative\" case is value-checked after HEAD-RELATIVE."
                                        (clempo.websocket:accept-key key)))
                      (error "WebSocket handshake refused: ~A" status)))
                  (funcall function stream))))
+        (ignore-errors (close stream :abort t))
         (ignore-errors (sb-bsd-sockets:socket-close socket))))))
 
 (defun ws-receive-json (stream)
@@ -210,20 +222,37 @@ compare with. A \"headRelative\" case is value-checked after HEAD-RELATIVE."
     (values (nreverse served) (nreverse missing))))
 
 (defun rpcdiff-summary (results)
-  "Per method: (method cases identical). Returns (values rows methods-ok cases-ok total)."
-  (let ((table (make-hash-table :test 'equal)))
+  "Per reference method: (method cases identical value-cases value-identical). Labels that
+are not method names (envelope, batch and unknown-method cases) count as cases, never as
+methods. Returns (values rows methods-ok categories), METHODS-OK counting the methods with
+at least one value case whose every case matches, CATEGORIES an alist category ->
+(identical . total)."
+  (let ((table (make-hash-table :test 'equal))
+        (known (reference-methods))
+        (categories (list (list "value" 0 0) (list "shape" 0 0) (list "node" 0 0)
+                          (list "reference-timeout" 0 0))))
     (dolist (r results)
-      (let* ((m (clempo.json:jget (first r) "method"))
-             (cell (or (gethash m table) (setf (gethash m table) (list 0 0)))))
-        (incf (first cell))
-        (when (fourth r) (incf (second cell)))))
+      (let* ((c (first r)) (ok (fourth r))
+             (category (assoc (case-category c) categories :test #'string=))
+             (m (clempo.json:jget c "method")))
+        (incf (third category))
+        (when ok (incf (second category)))
+        (when (member m known :test #'string=)
+          (let ((cell (or (gethash m table) (setf (gethash m table) (list 0 0 0 0)))))
+            (incf (first cell))
+            (when ok (incf (second cell)))
+            (when (string= (first category) "value")
+              (incf (third cell))
+              (when ok (incf (fourth cell))))))))
     (let ((rows (sort (loop for m being the hash-keys of table using (hash-value v)
-                            collect (list m (first v) (second v)))
+                            collect (cons m v))
                       #'string< :key #'first)))
       (values rows
-              (count-if (lambda (row) (= (second row) (third row))) rows)
-              (loop for r in results count (fourth r))
-              (length results)))))
+              (count-if (lambda (row) (destructuring-bind (m n ok vn vok) row
+                                        (declare (ignore m vok))
+                                        (and (= n ok) (plusp vn))))
+                        rows)
+              (loop for (name ok total) in categories collect (list* name ok total))))))
 
 (defun rpcdiff-suites (results)
   "Per suite, in corpus order: a JSON object of \"suite\": \"identical/total\"."
@@ -263,30 +292,47 @@ compare with. A \"headRelative\" case is value-checked after HEAD-RELATIVE."
   (let ((cases (corpus-cases :suite suite :method method)))
     (with-clempo-server (server-url server :url url :upstream upstream)
       (let ((results (run-rpcdiff server-url server cases)))
-        (multiple-value-bind (rows methods-ok cases-ok total) (rpcdiff-summary results)
+        (multiple-value-bind (rows methods-ok categories) (rpcdiff-summary results)
           (multiple-value-bind (served missing) (served-reference-methods server-url server)
-            (when verbose
-              (dolist (row rows)
-                (format t "~:[  ~;ok~] ~40A ~D/~D~%" (= (second row) (third row)) (first row) (third row) (second row)))
-              (let ((shown (make-hash-table :test 'equal)))
-                (dolist (r results)
-                  (destructuring-bind (c status response ok) r
-                    (let ((m (clempo.json:jget c "method")))
-                      (when (and (not ok) (< (gethash m shown 0) limit))
-                        (incf (gethash m shown 0))
-                        (format t "~&--- ~A [~A] ~A~%  want ~A ~A~%  got  ~A ~A~%  diff ~A~%"
-                                m (case-compare-class c) (short-json (clempo.json:jget c "request") 300)
-                                (clempo.json:jget c "status") (short-json (clempo.json:jget c "response"))
-                                status (short-json response)
-                                (json-difference (clempo.json:jget c "response") response)))))))
-              (format t "missing reference methods: ~{~A~^ ~}~%" missing))
-            (clempo.json:jobject
-             "score" (format nil "~D/~D methods, ~D/~D cases" methods-ok (length rows) cases-ok total)
-             "methods" methods-ok "methodsTotal" (length rows)
-             "cases" cases-ok "casesTotal" total
-             "referenceMethodsServed" (length served)
-             "referenceMethods" (+ (length served) (length missing))
-             "suites" (rpcdiff-suites results))))))))
+            (flet ((cat (name) (cdr (assoc name categories :test #'string=))))
+              (let* ((value (cat "value"))
+                     (known (reference-methods))
+                     ;; reference methods with no value case, recorded cases or not
+                     (unvalued (remove-if (lambda (m)
+                                            (let ((row (assoc m rows :test #'string=)))
+                                              (and row (plusp (fourth row)))))
+                                          known)))
+                (when verbose
+                  (dolist (row rows)
+                    (destructuring-bind (m n ok vn vok) row
+                      (format t "~:[  ~;ok~] ~40A ~D/~D (value ~D/~D)~%" (and (= n ok) (plusp vn)) m ok n vok vn)))
+                  (let ((shown (make-hash-table :test 'equal)))
+                    (dolist (r results)
+                      (destructuring-bind (c status response ok) r
+                        (let ((m (clempo.json:jget c "method")))
+                          (when (and (not ok) (< (gethash m shown 0) limit))
+                            (incf (gethash m shown 0))
+                            (format t "~&--- ~A [~A] ~A~%  want ~A ~A~%  got  ~A ~A~%  diff ~A~%"
+                                    m (case-compare-class c) (short-json (clempo.json:jget c "request") 300)
+                                    (clempo.json:jget c "status") (short-json (clempo.json:jget c "response"))
+                                    status (short-json response)
+                                    (json-difference (clempo.json:jget c "response") response)))))))
+                  (format t "methods without a value-checked case: ~{~A~^ ~}~%" unvalued)
+                  (format t "missing reference methods: ~{~A~^ ~}~%" missing))
+                (clempo.json:jobject
+                 ;; R5 is scored on value-identical cases only, as goempo excludes Live and
+                 ;; NodeLocal from its identical count; shape and node cases are reported apart.
+                 "score" (format nil "~D/~D value-identical cases; ~D/~D methods" (car value) (cdr value)
+                                 methods-ok (length known))
+                 "cases" (car value) "casesTotal" (cdr value)
+                 "methods" methods-ok "methodsTotal" (length known)
+                 "methodsWithoutValueCase" (coerce unvalued 'simple-vector)
+                 "categories" (cons :object (loop for (name ok . total) in categories
+                                                  when (plusp total)
+                                                    collect (cons name (format nil "~D/~D" ok total))))
+                 "referenceMethodsServed" (length served)
+                 "referenceMethods" (+ (length served) (length missing))
+                 "suites" (rpcdiff-suites results))))))))))
 
 (defcommand "rpcdiff" (args)
   "R5: replay the RPC corpus against clempo: rpcdiff [-v] [-suite S] [-method M] [-url U] [-limit N]"
@@ -301,10 +347,10 @@ compare with. A \"headRelative\" case is value-checked after HEAD-RELATIVE."
 
 (defcommand "rpc-index" (args)
   "build the block and transaction hash index over the archive: rpc-index [-threads N]"
-  (let ((start (get-internal-real-time)))
+  (let ((start (clempo.io:monotonic-ticks)))
     (multiple-value-bind (blocks txs) (clempo.rpc.chain:build-index :threads (arg-int args :threads 16))
       (format t "index: ~D blocks, ~D transactions in ~,1F s -> ~A~%" blocks txs
-              (/ (- (get-internal-real-time) start) internal-time-units-per-second)
+              (/ (- (clempo.io:monotonic-ticks) start) internal-time-units-per-second)
               (clempo.rpc.chain:index-dir))
       0)))
 

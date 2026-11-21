@@ -1,7 +1,7 @@
 (defsystem "clempo-sync"
   :description "Upstream JSON-RPC, raw block archive, authenticated follower, chain-attached
 transaction pool and the metrics registry"
-  :depends-on ("sb-bsd-sockets" "clempo-base" "clempo-io" "clempo-codec" "clempo-types"
+  :depends-on ("sb-bsd-sockets" "clempo-base" "clempo-io" "clempo-net" "clempo-codec" "clempo-types"
                "clempo-consensus" "clempo-tempo-chainspec" "clempo-tempo-executor"
                "clempo-tempo-txpool")
   :serial t
