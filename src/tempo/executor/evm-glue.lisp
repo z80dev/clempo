@@ -45,9 +45,12 @@
 ;;; (TempoHardfork::tx_gas_limit_cap).
 
 (defun tempo-gas-params (fork)
-  (let ((gp (evm:copy-gas-params (evm:gas-params-for-fork :osaka))))
+  "evm2's SstoreSetWithoutLoadCost excludes the 100-gas warm read its SSTORE charges first;
+clempo.evm's SSTORE-SET is the whole zero-to-nonzero cost, so Tempo's values gain that 100."
+  (let* ((gp (evm:copy-gas-params (evm:gas-params-for-fork :osaka)))
+         (warm (evm:gas-params-warm-read gp)))
     (when (forks:fork>= fork :t1)          ; apply_t1: TIP-1000
-      (setf (evm:gas-params-sstore-set gp) forks:+sstore-create-cost+
+      (setf (evm:gas-params-sstore-set gp) (+ warm forks:+sstore-create-cost+)
             (evm:gas-params-tx-create gp) 500000
             (evm:gas-params-create gp) 500000
             (evm:gas-params-new-account gp) 250000
@@ -56,7 +59,7 @@
             (evm:gas-params-auth-empty-account gp) 12500
             (evm:gas-params-auth-refund gp) 0))
     (when (forks:fork>= fork :t7)          ; apply_t7: TIP-1060
-      (setf (evm:gas-params-sstore-set gp) forks:+sstore-set-cost+
+      (setf (evm:gas-params-sstore-set gp) (+ warm forks:+sstore-set-cost+)
             (evm:gas-params-sstore-set-refund gp) forks:+sstore-set-cost+
             (evm:gas-params-sstore-clear-refund gp) 0
             (evm:gas-params-refund-quotient gp) 1))

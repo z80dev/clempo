@@ -122,7 +122,7 @@
     (let ((protocol-nonce (state:account-nonce account)))
       (cond
         ((zerop (txv-nonce-key v))
-         (when (/= protocol-nonce (txv-nonce v))
+         (when (and (not (ctx-skip-nonce-check *ctx*)) (/= protocol-nonce (txv-nonce v)))
            (if (< (txv-nonce v) protocol-nonce)
                (error 'invalid-transaction :tx-index *tx-index* :kind :nonce-too-low :reason "nonce too low")
                (error 'invalid-transaction :tx-index *tx-index* :kind :nonce-too-high :reason "nonce too high")))
@@ -156,7 +156,26 @@
 
 ;;; Keychain (prepare_keychain, apply_key_authorization)
 
-(defstruct (keychain-state (:conc-name kc-)) access-key same-tx-p fee-key)
+(defstruct (keychain-state (:conc-name kc-)) access-key same-tx-p fee-key loaded-key)
+
+(defun signature-type-code (kind)
+  (ecase kind (:secp256k1 0) (:p256 1) (:webauthn 2)))
+
+(defun check-t6-key-authorization-signer (v kc)
+  "prepare_keychain, T6: a key authorization signed by someone other than the root must be
+signed by the transaction's own access key, an active admin key of the same signature type."
+  (let ((raw (txv-key-authorization v)))
+    (when (and raw (forks:spec>= :t6))
+      (let ((signer (handler-case (clempo.signatures:key-authorization-signer raw)
+                      (clempo.signatures:signature-error () (invalid "key authorization signature recovery failed")))))
+        (unless (= signer (txv-sender v))
+          (let ((key (kc-loaded-key kc)))
+            (unless (and key (eql (kc-access-key kc) signer)
+                         (= (clempo.keychain:authorized-key-signature-type key)
+                            (signature-type-code (clempo.signatures:signature-kind (second raw))))
+                         (clempo.keychain:authorized-key-is-admin key))
+              (invalid "key authorization not signed by root"))))))
+    kc))
 
 (defun prepare-keychain (v fee)
   (let ((signature (txv-signature v)))
@@ -177,7 +196,8 @@
                                            (if limit (clempo.signatures:key-authorization-limit-amount limit) 0))
                                     (invalid "SpendingLimitExceeded")))
                                 access-key)))
-                (make-keychain-state :access-key access-key :same-tx-p t :fee-key fee-key))
+                (check-t6-key-authorization-signer
+                 v (make-keychain-state :access-key access-key :same-tx-p t :fee-key fee-key)))
               (let* ((expected-type (when (or auth (forks:spec>= :t1))
                                       (ecase (clempo.signatures:signature-inner-kind signature)
                                         (:secp256k1 0) (:p256 1) (:webauthn 2))))
@@ -189,11 +209,11 @@
                             (contract:precompile-condition (c) (invalid "keychain validation failed: ~A" c)))))
                 (when (and auth (not (clempo.keychain:authorized-key-is-admin key)))
                   (invalid "access key cannot authorize other keys"))
-                (when (forks:spec>= :t6) (fail-tx 'unsupported-transaction *tx-index* "T6 admin key authorizations"))
                 (setf (ctx-key-expiry *ctx*) (clempo.keychain:authorized-key-expiry key))
-                (make-keychain-state :access-key access-key
-                                     :fee-key (when (clempo.keychain:authorized-key-enforce-limits key)
-                                                access-key))))))))
+                (check-t6-key-authorization-signer
+                 v (make-keychain-state :access-key access-key :loaded-key key
+                                        :fee-key (when (clempo.keychain:authorized-key-enforce-limits key)
+                                                   access-key)))))))))
 
 (defun apply-key-authorization (v fee kc)
   "handler.rs apply_key_authorization: register the inline key (unmetered from T1B)."
@@ -201,9 +221,15 @@
     (when auth
       (when (and (forks:spec>= :t1) (forks:spec< :t1b))
         (fail-tx 'unsupported-transaction *tx-index* "T1/T1A metered key authorization"))
-      (when (forks:spec>= :t6) (fail-tx 'unsupported-transaction *tx-index* "T6 admin key authorizations"))
+      (when (and (clempo.signatures:key-authorization-is-admin auth) (forks:spec< :t6))
+        (invalid "T6 key authorization fields are not active before T6"))
       (handler-case
           (with-protocol-storage ()
+           (if (clempo.signatures:key-authorization-is-admin auth)
+            (clempo.keychain:authorize-admin-key
+             (txv-sender v) (clempo.signatures:key-authorization-key-id auth)
+             (clempo.signatures:key-authorization-key-type auth)
+             (clempo.signatures:key-authorization-witness auth))
             (let* ((limits (clempo.signatures:key-authorization-limits auth))
                    (calls (clempo.signatures:key-authorization-allowed-calls auth))
                    (expiry (clempo.signatures:key-authorization-expiry auth)))
@@ -226,7 +252,7 @@
                                                    (clempo.signatures:key-authorization-selector-rule-recipients r)))
                                            (clempo.signatures:key-authorization-call-scope-selector-rules s))))
                            calls))
-               (clempo.signatures:key-authorization-witness auth))))
+               (clempo.signatures:key-authorization-witness auth)))))
         (contract:precompile-condition (c) (invalid "keychain precompile: ~A" c)))
       (let ((expiry (clempo.signatures:key-authorization-expiry auth)))
         (setf (ctx-key-expiry *ctx*) expiry))

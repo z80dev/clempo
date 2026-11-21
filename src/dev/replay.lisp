@@ -55,6 +55,54 @@
                                  (clempo.json:jobject "tracer" "prestateTracer"
                                                       "tracerConfig" (clempo.json:jobject "diffMode" :true)))))
 
+;;; Opcode-level diagnosis: re-run the failing block on the parent state with a step recorder
+;;; and compare each step's pc and gas with debug_traceTransaction's struct logs.
+
+(defclass step-recorder ()
+  ((steps :initform (make-array 4096 :adjustable t :fill-pointer 0) :reader recorder-steps)))
+
+(defmethod clempo.evm:trace-step ((r step-recorder) frame pc op gas sp stack)
+  (declare (ignore sp stack))
+  (vector-push-extend (list pc op gas (clempo.evm:frame-depth frame)) (recorder-steps r)))
+
+(defun record-tx-steps (db block index chain)
+  "Steps of BLOCK's transaction INDEX executed on DB (the parent state); undoes the block."
+  (let* ((clempo.executor:*chain* chain)
+         (env (clempo.executor:header-block-env (clempo.blocks:block-header block) :chain chain))
+         (txs (clempo.blocks:block-transactions block))
+         (ctx (clempo.executor:begin-block db env :block block))
+         (recorder (make-instance 'step-recorder)))
+    (unwind-protect
+         (progn
+           (loop for tx in txs for i below index
+                 do (clempo.executor:apply-transaction ctx tx (clempo.transactions:transaction-sender tx)))
+           (let ((tx (nth index txs)) (clempo.evm:*tracer* recorder))
+             (ignore-errors (clempo.executor:apply-transaction ctx tx (clempo.transactions:transaction-sender tx)))))
+      (clempo.store:db-revert-block db))
+    (recorder-steps recorder)))
+
+(defun diagnose-opcodes (db block index &key (chain :mainnet))
+  "The first step where our run of BLOCK's tx INDEX leaves the reference's (pc or gas)."
+  (let* ((ours (record-tx-steps db block index chain))
+         (hash (octets->hex (clempo.transactions:transaction-hash (nth index (clempo.blocks:block-transactions block)))))
+         (trace (clempo.jsonrpc:rpc-call "debug_traceTransaction"
+                                         (list hash (clempo.json:jobject "disableStorage" :true "disableStack" :true
+                                                                         "disableMemory" :true))))
+         (theirs (clempo.json:jget trace "structLogs")))
+    (loop for i from 0
+          for mine across ours
+          for ref across theirs
+          do (destructuring-bind (pc op gas depth) mine
+               (unless (and (eql pc (clempo.json:jget ref "pc")) (eql gas (clempo.json:jget ref "gas")))
+                 (let ((prev (when (plusp i) (aref theirs (1- i)))))
+                   (return-from diagnose-opcodes
+                     (format nil "step ~D depth ~D: ours pc ~D op 0x~2,'0X gas ~D; reference pc ~A op ~A gas ~A; previous reference step ~A cost ~A, ours ~S"
+                             i depth pc op gas (clempo.json:jget ref "pc") (clempo.json:jget ref "op")
+                             (clempo.json:jget ref "gas") (and prev (clempo.json:jget prev "op"))
+                             (and prev (clempo.json:jget prev "gasCost"))
+                             (when (plusp i) (aref ours (1- i)))))))))
+    (format nil "all ~D of our steps agree with the reference's first ~D" (length ours) (length theirs))))
+
 (defun diagnose-receipts (c)
   "Name the first transaction whose receipt differs from the reference's."
   (let ((result (clempo.executor:block-mismatch-result c)))
@@ -89,6 +137,7 @@
   "Run a replay; returns the result JSON object. Callable from a REPL (pass :interactive t to
 get the restarts in the debugger)."
   (let* ((clempo.executor:*chain* chain)
+         (source (make-archive-source))
          (start (get-internal-real-time))
          (store (when datadir
                   (clempo.store:open-store (expand-home datadir)
@@ -128,14 +177,21 @@ get the restarts in the debugger)."
                     (clempo.executor:replay-blocks
                      db from to
                      :chain chain
-                     :block-fn (make-archive-source)
+                     :block-fn source
                      :commit-fn (when store (lambda (diff) (clempo.store:store-commit-block store diff)))
                      :heal-fn (lambda (db n block)
                                 (clempo.executor:heal-block db block (reference-prestate-diff n) :chain chain))
                      :progress-fn #'progress)))
              (setf result (if interactive
                               (run)
-                              (handler-bind ((error #'choose)) (run)))))
+                              (handler-bind ((error #'choose)) (run))))
+             ;; Opcode diagnosis of the stopping block, on the parent state the abort restored.
+             (let ((c (clempo.executor:replay-result-stopped result)))
+               (when (and diagnose diagnosis (typep c 'clempo.executor:block-mismatch))
+                 (log-line "diagnose: ~A"
+                           (handler-case (diagnose-opcodes db (funcall source (clempo.executor:block-mismatch-number c))
+                                                           (first diagnosis) :chain chain)
+                             (error (e) (format nil "opcode diagnosis failed: ~A" e)))))))
         (when store (clempo.store:close-store store))))
     (let* ((secs (max 1/1000 (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
            (r result)

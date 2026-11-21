@@ -231,8 +231,9 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
                         :fallback-p fallback-p))))
 
 (defun collect-fee (ctx fee key-id)
-  "config.rs collect_fee: pull the maximum fee before execution; roll back on failure."
-  (declare (ignore key-id))
+  "config.rs collect_fee: pull the maximum fee before execution; roll back on failure. From
+T7 the fee payer's fee-token balance slot (and the access key's spending-limit slot) become
+non-creditable for the rest of the transaction (NonCreditableSlots)."
   (unless (zerop (fee-collected fee))
     (let ((cp (state:checkpoint evm:*world*)))
       (handler-case
@@ -243,7 +244,16 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
           (state:rollback evm:*world* cp)
           (invalid "fee collection failed: ~A" c)))))
   (when (and (forks:spec>= :t7) (not (zerop (fee-collected fee))))
-    (fail-tx 'unsupported-transaction *tx-index* "T7 non-creditable fee slots")))
+    (let* ((token (fee-token fee)) (payer (fee-payer fee))
+           (balance-slot (with-protocol-storage () (clempo.tip20:balance-slot token payer)))
+           (limit-slot (when key-id
+                         (with-protocol-storage ()
+                           (pcall "CLEMPO.KEYCHAIN" "SPENDING-LIMIT-REMAINING-SLOT" payer key-id token)))))
+      (setf *non-creditable*
+            (lambda (owner slot)
+              (or (and (= owner token) (= slot balance-slot))
+                  (and limit-slot (= owner #xAAAAAAAA00000000000000000000000000000000)
+                       (= slot limit-slot))))))))
 
 (defun settle-storage-credits (success)
   "config.rs settle_storage_credit_refunds: T7 credits pending in transient storage are paid
