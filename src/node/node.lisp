@@ -503,7 +503,7 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
                                 head :chain chain :upstream upstream
                                      :url (or cert-rpc (ecase chain (:mainnet rpc:+mainnet-rpc+)
                                                          (:moderato rpc:+moderato-rpc+)))
-                                     :from (or certify-from (certs:certify-from chain))
+                                     :from certify-from
                                      :trusted-hash (lambda (n) (store:db-block-hash db n)))))
                   (follower (follow:make-follower head :rpc-url upstream :executor node :certifier certifier
                                                        :archive-dir archive-dir :use-archive t :write-archive t
@@ -515,8 +515,9 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
              (metrics:metric-set *m-head* initial-number)
              (metrics:metric-set *m-accounts* (store:db-account-count db))
              (when certifier
-               (log-node "node: certifying from block ~D; first epoch identity from ~(~A~)"
-                         (certs::certifier-from certifier) (certs:certifier-anchor certifier)))
+               (log-node "node: certifying from block ~D (~(~A~)); first epoch identity from ~(~A~)"
+                         (certs:certifier-from certifier) (certs:certifier-from-source certifier)
+                         (certs:certifier-anchor certifier)))
              (setf history-writer (start-history-writer node))
              (when jit (setf jit-worker (start-jit-worker)))
              (when forward (setf forwarder (start-forwarder upstream pool)

@@ -4,6 +4,7 @@
                     (#:consensus #:clempo.consensus) (#:headers #:clempo.headers)
                     (#:blocks #:clempo.blocks))
   (:export #:make-certifier #:certifier-anchor #:certifier-uncertified #:certify-from
+           #:certifier-from #:certifier-from-source #:discover-certify-from #:descend-header-chain
            #:network-identity))
 
 (in-package #:clempo.follow.certs)
@@ -35,12 +36,13 @@
              1747))))
 
 (defun certify-from (chain)
-  "The first height the public certificate endpoint serves (probed 2026-11-21)."
+  "The first height the public certificate endpoint served when probed on 2026-11-21."
   (ecase chain (:mainnet 41166893) (:moderato 36627280)))
 
 (defstruct (certifier (:constructor %make-certifier (verifier url epoch-length from network-epoch)))
   verifier url epoch-length from network-epoch
   (anchor nil)          ; how the first epoch's identity was established
+  (from-source nil)     ; :given, :recorded, :discovered or :recorded-unprobed
   (uncertified 0 :type integer))
 
 (defun fetch-finalization (url height)
@@ -49,6 +51,20 @@
                                             :retries 1)
                   (rpc:rpc-error () :null))))
     (and (json:jobject-p result) result)))
+
+(defun discover-certify-from (url known)
+  "The first height URL serves a finalization for. KNOWN (the recorded value) is kept when
+it is still served; when the endpoint has pruned past it, the earliest served height is
+found by bisection up to the latest finalization. Returns (values height how)."
+  (cond ((fetch-finalization url known) (values known :recorded))
+        (t (let* ((latest (rpc:rpc-call "consensus_getFinalization" '("latest") :url url))
+                  (high (hex->integer (json:jget* latest "block" "header" "number")))
+                  (low known))
+             ;; Invariant: LOW is not served, HIGH is.
+             (loop while (> (- high low) 1)
+                   do (let ((mid (floor (+ low high) 2)))
+                        (if (fetch-finalization url mid) (setf high mid) (setf low mid))))
+             (values high :discovered)))))
 
 (defun register-outcome (certifier height extra-data)
   "Install the identity in boundary HEIGHT's EXTRA-DATA; check it names the next epoch and,
@@ -69,10 +85,22 @@ at the network identity's from-epoch, that identity."
 (defun make-certifier (anchor &key (chain :mainnet) (upstream (rpc:local-rpc-url))
                                    (url (ecase chain (:mainnet rpc:+mainnet-rpc+)
                                           (:moderato rpc:+moderato-rpc+)))
-                                   (from (certify-from chain)) trusted-hash)
+                                   from trusted-hash)
   "A certifier for following from ANCHOR (a FOLLOW:HEAD). URL serves consensus_getFinalization;
 UPSTREAM serves raw blocks. TRUSTED-HASH, if given, maps a block number to the hash of a
-block the caller executed itself (or NIL)."
+block the caller executed itself (or NIL). FROM (default: DISCOVER-CERTIFY-FROM from the
+recorded CERTIFY-FROM, or that recorded value when URL cannot be probed) is the first height
+whose certificate is required."
+  (let ((from-source :given))
+    (unless from
+      (multiple-value-setq (from from-source)
+        (handler-case (discover-certify-from url (certify-from chain))
+          (error () (values (certify-from chain) :recorded-unprobed)))))
+    (let ((certifier (build-certifier anchor chain upstream url from trusted-hash)))
+      (setf (certifier-from-source certifier) from-source)
+      certifier)))
+
+(defun build-certifier (anchor chain upstream url from trusted-hash)
   (let* ((spec (clempo.chainspec:load-chainspec chain))
          (length (clempo.chainspec:chain-epoch-length spec))
          (epoch (floor (1+ (follow:head-number anchor)) length))
@@ -120,9 +148,12 @@ block the caller executed itself (or NIL)."
        (register-outcome certifier boundary (headers:header-extra-data header))
        (setf (certifier-anchor certifier) :network-identity))
       ((< (floor boundary (certifier-epoch-length certifier)) (certifier-network-epoch certifier))
-       (error "Cannot authenticate the DKG anchor at block ~D: its epoch precedes the network ~
-identity (from epoch ~D) and it is neither executed here nor below --certify-from ~D"
-              boundary (certifier-network-epoch certifier) (certifier-from certifier)))
+       ;; No key for its epoch is published, but every block is final with its descendants:
+       ;; verify the from-epoch's boundary certificate under the network identity, then
+       ;; follow parent hashes down to this boundary.
+       (link-to-certified-boundary certifier boundary hash upstream)
+       (register-outcome certifier boundary (headers:header-extra-data header))
+       (setf (certifier-anchor certifier) :certified-descendant))
       (t
        (let ((result (fetch-finalization (certifier-url certifier) boundary)))
          (unless result
@@ -137,6 +168,48 @@ identity (from epoch ~D) and it is neither executed here nor below --certify-fro
             (list (list boundary hash (headers:header-parent-hash header)
                         (headers:header-extra-data header) certificate)))
            (setf (certifier-anchor certifier) :certificate)))))))
+
+(defun raw-headers (from count upstream)
+  "Raw header RLP of blocks FROM..FROM+COUNT-1 from UPSTREAM, as a list."
+  (loop for result in (rpc:rpc-batch (loop for n from from below (+ from count)
+                                           collect (list "debug_getRawHeader" (list (quantity->hex n))))
+                                     :url upstream)
+        for n from from
+        collect (if (stringp result) (hex->octets result)
+                    (error "Upstream has no raw header ~D: ~A" n result))))
+
+(defun link-to-certified-boundary (certifier boundary hash upstream &key (batch 500))
+  "Authenticate block BOUNDARY (HASH) as an ancestor of the last block of the network
+identity's from-epoch, whose own certificate verifies under that published identity."
+  (let* ((target (1- (* (1+ (certifier-network-epoch certifier)) (certifier-epoch-length certifier))))
+         (raw (first (raw-headers target 1 upstream)))
+         (header (headers:decode-header raw))
+         (result (fetch-finalization (certifier-url certifier) target))
+         (certificate (and result (json:jget result "certificate"))))
+    (unless (stringp certificate)
+      (error "No finalization certificate for block ~D to authenticate the DKG anchor ~D" target boundary))
+    (consensus:certify-blocks
+     (certifier-verifier certifier)
+     (list (list target (clempo.keccak:keccak256 raw) (headers:header-parent-hash header)
+                 (headers:header-extra-data header) certificate)))
+    (unless (octets= hash (descend-header-chain (headers:header-parent-hash header) (1- target) boundary
+                                                (lambda (from count) (raw-headers from count upstream))
+                                                :batch batch))
+      (error "DKG anchor block ~D is not an ancestor of the certified block ~D" boundary target))))
+
+(defun descend-header-chain (expected top bottom fetch &key (batch 500))
+  "Walk raw headers TOP down to BOTTOM+1 (FETCH: from count -> list of raw headers), each of
+which must hash to EXPECTED, the parent hash named by the header above it. Returns the parent
+hash the lowest one names: the hash of block BOTTOM, if the chain holds."
+  (loop for high = top then (- high batch)
+        while (> high bottom)
+        do (let ((from (max (1+ bottom) (1+ (- high batch)))))
+             (dolist (raw (reverse (funcall fetch from (1+ (- high from)))))
+               (let ((header (headers:decode-header raw)))
+                 (unless (octets= expected (clempo.keccak:keccak256 raw))
+                   (error "Header chain breaks at block ~D" (headers:header-number header)))
+                 (setf expected (headers:header-parent-hash header))))))
+  expected)
 
 (defun not-finalized-p (result)
   (or (eq :null result)

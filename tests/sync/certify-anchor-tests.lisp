@@ -109,3 +109,43 @@ and FINALIZATION (or none) as its certificate."
   (is (eq :hash-linked
           (certs:certifier-anchor
            (certifier-with +certified+ (recorded-raw +certified+) nil :from (1+ +certified+))))))
+
+;;; Anchors before the network identity's from-epoch are authenticated through their
+;;; certified descendant: the header chain is walked down by parent hashes.
+
+(defun synthetic-headers (count)
+  "Raw headers of a linked chain of COUNT blocks, block 1 first, and block 0's hash."
+  (let ((parent (make-octets 32)) (out '()))
+    (loop for n from 1 to count
+          do (let* ((raw (clempo.follow.tests::test-block n parent))
+                    (header (clempo.headers:encode-header (blocks:block-header (blocks:decode-block raw)))))
+               (push header out)
+               (setf parent (clempo.keccak:keccak256 header))))
+    (values (coerce (nreverse out) 'simple-vector) (make-octets 32))))
+
+(deftest descend-header-chain-authenticates-ancestors ()
+  (multiple-value-bind (headers zero) (synthetic-headers 9)
+    (flet ((fetch (table) (lambda (from count) (coerce (subseq table (1- from) (+ from count -1)) 'list))))
+      ;; From block 9's parent hash (as its certificate would vouch), down to block 0.
+      (let ((top-parent (clempo.headers:header-parent-hash (clempo.headers:decode-header (svref headers 8)))))
+        (is-equalp zero (certs:descend-header-chain top-parent 8 0 (fetch headers) :batch 3))
+        (is-equalp (clempo.keccak:keccak256 (svref headers 2))
+                   (certs:descend-header-chain top-parent 8 3 (fetch headers) :batch 4))
+        ;; A substituted ancestor breaks the chain.
+        (let ((forged (copy-seq headers)))
+          (setf (svref forged 4) (svref headers 5))
+          (signals error (certs:descend-header-chain top-parent 8 0 (fetch forged) :batch 3)))))))
+
+(deftest certify-from-discovered-when-pruned ()
+  (flet ((endpoint (first latest)
+           (lambda (method params)
+             (declare (ignore method))
+             (let ((p (first params)))
+               (cond ((equal p "latest")
+                      (json:jobject "block" (json:jobject "header" (json:jobject "number" (quantity->hex latest)))))
+                     ((>= (json:jget p "height") first) (json:jobject "certificate" "0x"))
+                     (t (error 'fake:rpc-failure :code 503 :data "certificate")))))))
+    (fake:call-with-fake-upstream (endpoint 100 5000)
+      (lambda (url) (is-equalp '(1000 :recorded) (multiple-value-list (certs:discover-certify-from url 1000)))))
+    (fake:call-with-fake-upstream (endpoint 1234 5000)
+      (lambda (url) (is-equalp '(1234 :discovered) (multiple-value-list (certs:discover-certify-from url 1000)))))))
