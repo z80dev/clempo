@@ -89,8 +89,10 @@
                    (* (gas-params-tx-access-slot gp) (length (rest entry))))))
     (incf gas (* (gas-params-auth-empty-account gp) (length (evm-tx-authorizations tx))))
     (values gas
-            (+ (gas-params-tx-base gp)
-               (* (gas-params-tx-floor-token gp) (calldata-tokens data))))))
+            (if (plusp (gas-params-tx-floor-token gp))
+                (+ (gas-params-tx-base gp)
+                   (* (gas-params-tx-floor-token gp) (calldata-tokens data)))
+                0))))
 
 (defun effective-gas-price (tx base-fee)
   (if (evm-tx-max-fee tx)
