@@ -1,13 +1,14 @@
 (in-package #:clempo.sim)
 
-;;; The R6 scenarios: fixed seeds, three epochs (two reshares) each, with faults. Epochs are
-;;; long enough that every dealer leads a block in the first half and gets its log on chain.
+;;; The R6 scenarios: fixed seeds, three epochs (three reshares, the last installing epoch 3)
+;;; each, with faults. Dealers deal in an epoch's first half and post their logs in the
+;;; second, so epochs are long enough for a quorum of dealers to lead a block there.
 
 (defscenario "smoke-4"
-  :validators 4 :seed 1 :epochs 2 :epoch-length 6 :latency (5 30) :drop 0)
+  :validators 4 :seed 1 :epochs 2 :epoch-length 12 :latency (5 30) :drop 0)
 
 (defscenario "r6-4"
-  :validators 4 :seed 4 :epochs 3 :epoch-length 20 :latency (5 60) :drop 1/50
+  :validators 4 :seed 4 :epochs 3 :epoch-length 24 :latency (5 60) :drop 1/50
   :faults ((:outage 3 :from 1500 :to 4000)))
 
 (defscenario "r6-5"

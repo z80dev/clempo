@@ -2,7 +2,7 @@
   (:use #:cl #:clempo.base)
   (:local-nicknames (#:c #:clempo.consensus) (#:io #:clempo.io))
   (:documentation "A seeded simulation of Tempo validators: N nodes run the simplex voter and
-the DKG on a simulated network with latency, drops, partitions and outages. Time is
+a clempo.dkg DKG manager on a simulated network with latency, drops, partitions and outages. Time is
 clempo.io:*clock* (a manual clock the scheduler advances event by event) and randomness is
 clempo.io:*entropy* (seeded), so a scenario with a seed replays exactly.
 

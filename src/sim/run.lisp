@@ -2,15 +2,14 @@
 
 ;;; Message handling. Messages on the simulated wire:
 ;;;   (:consensus vote-or-certificate)   (:block block)        (:want-block digest)
-;;;   (:want-cert epoch view)            (:dkg epoch dealer-key pub-msg scalar)
-;;;   (:ack epoch player-key ack)        (:sync height)        (:synced ((block . cert) ...))
+;;;   (:want-cert epoch view)            (:dkg epoch octets)   (:sync height)
+;;;   (:synced ((block . cert) ...))
+;;; :dkg carries the DKG manager's channel messages (Tempo's DKG channel after the epoch mux).
 
 (defun artifact-epoch (m)
   (c:round-epoch (typecase m
                    ((or c:notarize c:nullify c:finalize) (c:vote-round m))
                    (t (c:certificate-round m)))))
-
-(defun node-of (node index) (aref (sim-nodes (node-sim node)) index))
 
 (defun request-sync (node from)
   "Ask FROM for the finalized blocks after ours (at most once per second)."
@@ -23,7 +22,7 @@
     (ecase (first message)
       (:consensus
        (let* ((m (second message))
-              (es (gethash (artifact-epoch m) (node-epochs node))))
+              (es (live-voter node (artifact-epoch m))))
          (cond (es (run-effects node es (clempo.simplex:voter-receive (es-voter es) sender-key m)))
                ((> (artifact-epoch m) (node-epoch node)) (request-sync node from)))))
       (:block
@@ -39,29 +38,12 @@
          (when b (send node from (list :block b) :reliable t))))
       (:want-cert
        (destructuring-bind (epoch view) (rest message)
-         (let* ((es (gethash epoch (node-epochs node)))
+         (let* ((es (live-voter node epoch))
                 (cert (and es (clempo.simplex:voter-certificate (es-voter es) view))))
            (when cert (send node from (list :consensus cert))))))
       (:dkg
-       (destructuring-bind (epoch dealer pub scalar) (rest message)
-         (let ((es (gethash epoch (node-epochs node))))
-           (when (and es (es-player es))
-             (let ((ack (or (cdr (assoc dealer (es-acks-sent es) :test #'octets=))
-                            (handler-case
-                                (clempo.dkg:player-dealer-message (es-player es) dealer pub scalar)
-                              (clempo.dkg:dkg-error () nil)))))
-               (when ack
-                 (pushnew (cons dealer ack) (es-acks-sent es) :key #'car :test #'octets=)
-                 (send node from (list :ack epoch (node-key node) ack))))))))
-      (:ack
-       (destructuring-bind (epoch player ack) (rest message)
-         (let ((es (gethash epoch (node-epochs node))))
-           (when (and es (es-dealer es) (null (es-own-log es))
-                      (not (member player (es-acked es) :test #'octets=)))
-             (handler-case
-                 (progn (clempo.dkg:dealer-receive-player-ack (es-dealer es) player ack)
-                        (push player (es-acked es)))
-               (clempo.dkg:dkg-error () nil))))))
+       (destructuring-bind (epoch octets) (rest message)
+         (run-dkg-actions node (clempo.dkg:dkg-receive (node-dkg node) sender-key epoch octets))))
       (:sync
        (let ((items (loop for h from (second message)
                             to (min (node-finalized-height node) (+ (second message) (* 3 (node-l node))))
@@ -131,15 +113,22 @@ Faults: (:outage NODE :from MS :to MS), (:silent NODE), (:partition (GROUP...) :
                             collect (%make-node :index i :seed seed :key key :sim sim))
                       'simple-vector))
         (loop for node across (sim-nodes sim)
+              for share = (cdr (assoc (node-key node) shares :test #'octets=))
               do (setf (gethash digest (node-blocks node)) genesis
                        (gethash 0 (node-digests node)) digest)
-                 (start-epoch node outcome
-                              (cdr (assoc (node-key node) shares :test #'octets=))
-                              digest))
+                 (multiple-value-bind (m actions)
+                     (let ((node node))
+                       (clempo.dkg:open-dkg-manager
+                        :seed (node-seed node) :store (clempo.dkg:make-memory-dkg-store)
+                        :epoch-length (getf config :epoch-length) :t12-time 0
+                        :header-at (lambda (h) (finalized-dkg-block node h))
+                        :last-finalized-height 0 :initial-share share))
+                   (setf (node-dkg node) m)
+                   (run-dkg-actions node actions)))
         sim))))
 
 (defun node-deadline (node)
-  (let ((es (current node)))
+  (let ((es (live-voter node (node-epoch node))))
     (and es (clempo.simplex:voter-next-deadline (es-voter es)))))
 
 (defun fault-times (net)
@@ -223,7 +212,8 @@ Faults: (:outage NODE :from MS :to MS), (:silent NODE), (:partition (GROUP...) :
      :identity (clempo.dkg:outcome-network-identity (sim-genesis-outcome sim))
      :identities (loop for e from 0 to (node-epoch ref)
                        for es = (gethash e (node-epochs ref))
-                       when es collect (clempo.dkg:outcome-network-identity (es-outcome es)))
+                       when es collect (clempo.dkg:sharing-public
+                                        (clempo.dkg:output-public (es-output es))))
      :proposers (coerce proposers 'list)
      :genesis-extra (sim-block-extra (sim-genesis sim))
      :genesis-digest (block-digest (sim-genesis sim))
