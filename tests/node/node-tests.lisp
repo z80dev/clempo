@@ -10,9 +10,9 @@
 ;;; upstream: an empty datadir starts at genesis with certification on, executes the range,
 ;;; restarts from its own store, and stops cleanly on SIGTERM.
 
-(defun recorded-blocks ()
+(defun recorded-blocks (&optional (chain "mainnet"))
   (with-open-file (in (asdf:system-relative-pathname
-                       "clempo-node/tests" "../../tests/node/data/mainnet-0-20.rawblocks.hex"))
+                       "clempo-node/tests" (format nil "../../tests/node/data/~A-0-20.rawblocks.hex" chain)))
     (coerce (loop for line = (read-line in nil) while line collect (hex->octets line)) 'simple-vector)))
 
 (defun upstream (raws tip-cell &key fail-burst)
@@ -76,6 +76,21 @@ those requests fail, as during an upstream outage."
            (is= 0 (json:jget report "executed")))
          ;; Caches are datadir-scoped unless shared explicitly.
          (is (probe-file (merge-pathnames "receipts/" datadir))))))))
+
+(deftest node-bootstraps-moderato-from-genesis ()
+  ;; Moderato runs system transactions before :t0 (fork :genesis); this once failed block 1.
+  (let ((raws (recorded-blocks "moderato")) (tip (list 20)))
+    (with-temp-dirs (datadir archive)
+      (fake:call-with-fake-upstream
+       (upstream raws tip)
+       (lambda (url)
+         (let ((report (run datadir archive url :chain :moderato :once t)))
+           (is (equal "moderato" (json:jget report "chain")))
+           (is= 20 (json:jget report "head"))
+           (is (string-equal "0xc10e8ebef1a01089addba69d5d7dadddef042569e146f2f6be065b154a2ec513"
+                             (json:jget report "hash")))
+           (is (string-equal "0x3952ff0c60a3f215ab11a3a2c7698126b7911da84faf5cb66bdbcb0c605738c4"
+                             (json:jget report "stateRoot")))))))))
 
 (deftest node-survives-upstream-errors ()
   (let ((raws (recorded-blocks)) (tip (list 12)))
