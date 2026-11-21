@@ -204,7 +204,7 @@ always mint). Returns NIL or the halt status."
   (unless (eq (zerop present) (zerop new))
     (let ((b (contract:make-metered-storage *host* :gas-limit (evm:frame-gas frame))))
       (handler-case
-          (progn (contract::sstore-storage-credits b (evm:frame-address frame) key present new)
+          (progn (contract:sstore-storage-credits b (evm:frame-address frame) key present new)
                  (decf (evm:frame-gas frame) (contract:metered-storage-spent b))
                  nil)
         (contract:precompile-halt (c)
