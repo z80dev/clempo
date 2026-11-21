@@ -440,7 +440,8 @@ version of each key winning; tombstones are skipped unless KEEP-TOMBSTONES."
   ;; Batches handed to KV-WRITE-ASYNC and not yet installed as segments (newest first), read
   ;; before the segments; the thread writing the oldest of them.
   (batches '() :type list)
-  (batch-writer nil))
+  (batch-writer nil)
+  (prefetcher nil))                     ; the read-ahead thread started at open
 
 (defun kv-segment-name (n) (format nil "seg-~12,'0D.kv" n))
 
@@ -473,12 +474,13 @@ version of each key winning; tombstones are skipped unless KEEP-TOMBSTONES."
     (and (probe-file path)
          (eql 0 (search "clempo-kv " (clempo.io:read-file-string path))))))
 
-(defun open-kv (dir &key read-only)
+(defun open-kv (dir &key read-only (prefetch :auto))
   "Open the KV store in DIR (an empty one when DIR has no KV manifest), removing segment
 files the manifest does not list (a write or merge cut short). READ-ONLY opens what the
 manifest names and touches nothing, for a reader beside the datadir's owner; a segment a
 concurrent merge deleted between the manifest read and its open signals FILE-ERROR or
-SB-POSIX:SYSCALL-ERROR (read again)."
+SB-POSIX:SYSCALL-ERROR (read again). PREFETCH bounds the segment bytes read ahead into the
+page cache (KV-PREFETCH): :AUTO, a byte count, or 0 for none."
   (let ((kv (%make-kv dir))
         (names '()))
     (when (kv-manifest-p dir)
@@ -489,7 +491,52 @@ SB-POSIX:SYSCALL-ERROR (read again)."
         (unless (member (file-namestring p) names :test #'string=) (delete-file p)))
       (dolist (p (directory (dir-file dir "seg-*.kv-tmp"))) (delete-file p)))
     (setf (kv-segments kv) (mapcar (lambda (n) (open-kseg (dir-file dir "~A" n))) names))
+    (kv-prefetch kv (if (eq prefetch :auto) (default-prefetch-bytes) prefetch))
     kv))
+
+;;; Read-ahead. A lookup reads one block of one segment at a random place; with the page
+;;; cache cold (after a reboot, or files the cache has not seen, such as an APFS clone) each
+;;; first touch of a page waits for one random read from the drive, 60-80 us on the build
+;;; host's SSD, so a replay waits on the drive more than it computes. Opening a store asks
+;;; the kernel (madvise WILLNEED) to read its segments in sequentially on a background
+;;; thread, newest first, while the replay starts: about 3 GB/s here, with little CPU. A store
+;;; bigger than the limit (a quarter of physical memory by default) reads ahead only that
+;;; many bytes of its newest segments and leaves the rest to demand.
+
+(defun physical-memory-bytes ()
+  (flet ((sysconf (name)
+           (sb-alien:alien-funcall (sb-alien:extern-alien "sysconf" (function sb-alien:long sb-alien:int)) name)))
+    #+darwin (* (sysconf 200) (sysconf 29))  ; _SC_PHYS_PAGES, _SC_PAGESIZE
+    #+linux (* (sysconf 85) (sysconf 30))
+    #-(or darwin linux) 0))
+
+(defun default-prefetch-bytes () (floor (max 0 (physical-memory-bytes)) 4))
+
+(defconstant +madv-willneed+ 3)
+
+(defun kv-prefetch (kv limit)
+  "Ask the kernel to read up to LIMIT bytes of KV's segments, newest first, on a thread."
+  (let ((segs (loop with left = limit
+                    for s in (kv-segments kv)
+                    while (> left 0)
+                    collect s do (decf left (kseg-length s)))))
+    (when segs
+      (setf (kv-prefetcher kv)
+            (sb-thread:make-thread
+             (lambda ()
+               ;; holding SEGS keeps their mappings alive (their finalizers unmap them)
+               (dolist (s segs)
+                 (let ((sap (car (kseg-box s))))
+                   (when sap
+                     (sb-alien:alien-funcall
+                      (sb-alien:extern-alien "madvise" (function sb-alien:int sb-sys:system-area-pointer
+                                                                 sb-alien:unsigned-long sb-alien:int))
+                      sap (kseg-length s) +madv-willneed+)))))
+             :name "kv prefetch")))))
+
+(defun kv-wait-prefetch (kv)
+  (let ((thread (shiftf (kv-prefetcher kv) nil)))
+    (when thread (sb-thread:join-thread thread :default nil))))
 
 (defun kv-get (kv key)
   "The value of KEY, or NIL when absent or deleted. Safe from any thread."
@@ -666,6 +713,7 @@ adjacent while it merges: flushes only add segments at the front."
   kv)
 
 (defun kv-close (kv)
+  (kv-wait-prefetch kv)
   (kv-wait-merges kv)
   (setf (kv-segments kv) '())
   kv)

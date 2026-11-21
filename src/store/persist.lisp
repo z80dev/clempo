@@ -450,7 +450,7 @@ its RAM and never reach DIR."
     (when (kv-manifest-p dir)
       ;; a merge may delete a listed segment between the manifest read and its open
       (loop repeat 8
-            do (let ((kv (handler-case (open-kv dir :read-only t)
+            do (let ((kv (handler-case (open-kv dir :read-only t :prefetch 0)
                            (file-error () nil)
                            (sb-posix:syscall-error () nil))))
                  (when kv
@@ -663,7 +663,7 @@ the interval or the cache limit says so."
     (write-kv-manifest kv (mapcar #'kseg-name (kv-segments kv)))
     (kv-merge-tiers kv))
   ;; the old log, replayed on the imported state and flushed
-  (let* ((kv (open-kv dir))
+  (let* ((kv (open-kv dir :prefetch 0))
          (db (open-backed-statedb kv (make-cache-limits)))
          (path (dir-file dir "log-~12,'0D.wal" n))
          (count 0))
