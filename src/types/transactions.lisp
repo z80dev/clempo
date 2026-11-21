@@ -5,7 +5,10 @@
            #:transaction-encoded-length #:encode-transaction-into #:transaction-unique-identifier
            #:transaction-hash #:transaction-signing-hash #:transaction-sender
            #:transaction-fee-payer #:transaction-key-id
-           #:transaction-key-authorization-signer #:transaction-type #:transaction-fields))
+           #:transaction-key-authorization-signer #:transaction-type #:transaction-fields
+           #:calldata-tokens #:tempo-signature-verification-gas #:validate-calls
+           #:validate-signature-version #:tempo-authorization-fields
+           #:validate-key-authorization))
 (in-package #:clempo.transactions)
 
 (defstruct (transaction (:constructor %make-transaction (type fields raw)))
@@ -119,6 +122,14 @@
           (field-integer (third entry) 8)
           (validate-field (fourth entry) :bytes)))))))
 
+(defun validate-calls (calls authorization-list)
+  "Check Tempo call policy on decoded call triples. Return T or a rejection keyword."
+  (cond ((null calls) :empty-calls)
+        ((and authorization-list (zerop (length (first (first calls)))))
+         :create-with-authorizations)
+        ((some (lambda (call) (zerop (length (first call)))) (rest calls))
+         :create-not-first)
+        (t t)))
 (defun decode-transaction (raw &key (copy-raw t))
   "Decode an EIP-2718 envelope. COPY-RAW NIL transfers ownership of RAW to the result."
   (invariant (and (typep raw 'octets) (plusp (length raw))) "Empty transaction")
@@ -143,11 +154,8 @@
       ((= type #x76)
        (let ((calls (nth 4 fields)) (before (field-integer (nth 8 fields) 8))
              (after (field-integer (nth 9 fields) 8)))
-         (invariant calls "Empty Tempo calls")
-         (loop for call in calls for index from 0
-               when (zerop (length (first call)))
-                 do (invariant (and (zerop index) (null (nth 12 fields)))
-                               "Invalid Tempo CREATE position or authorization list"))
+         (let ((result (validate-calls calls (nth 12 fields))))
+           (invariant (eq result t) "Invalid Tempo calls: ~A" result))
          (invariant (or (zerop before) (zerop after) (> before after))
                     "Invalid transaction validity window")))
       (t (invariant (<= (field-integer (nth (- (length fields) 3) fields) 1) 1)

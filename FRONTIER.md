@@ -130,6 +130,14 @@ R1 remains 640/640 mainnet and 33/33 moderato. The shared body verifier also
 checks ommer hashes and withdrawal presence/roots; sender-scoped transaction
 identifiers hash the signing envelope plus the sender for pool replay checks.
 
+The shared types layer also exposes payment classification (V1/V2/V3), parsed
+key-authorization views, intrinsic signature gas and calldata-token counting,
+call/CREATE rules, T1C signature-version checks, and stateless grant validation
+through the T3/T5/T6 policy changes. These helpers do not replace execution's
+state-dependent permission, balance or expiry checks. The types suite passes
+34 tests, including recorded grants and signed fork-boundary cases:
+`sbcl --dynamic-space-size 8192 --non-interactive --load scripts/build.lisp --eval '(clempo-build:test-all :dirs (list "types") :strict t)'`.
+
 R4 upstream RPC path (partial, `e1fbffd`):
 `CLEMPO_RPC=http://127.0.0.1:8545 bin/clempo-dev follow -last 1000 -seconds 20 -no-archive -json`
 linked and checked 1,038 blocks through height 50,059,685, with zero lag

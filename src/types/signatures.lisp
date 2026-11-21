@@ -276,8 +276,8 @@ Keychain authorization in on-chain state and fork-version gating remain the call
       (trim-absent-options fields 3))))
 
 ;;; Parsed executor view. All scalar wire values, including selectors, witnesses
-;;; and addresses, are integers. Read-only slots and defensive list accessors
-;;; prevent callers or later mutation of the decoded RLP from changing the view.
+;;; and addresses, are integers. Read-only slots and borrowed read-only lists
+;;; avoid accessor allocation; do not mutate lists returned by the parsed view.
 (defstruct (key-authorization-limit (:constructor %make-key-authorization-limit))
   (token 0 :read-only t) (amount 0 :read-only t) (period 0 :read-only t))
 
