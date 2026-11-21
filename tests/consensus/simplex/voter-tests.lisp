@@ -227,3 +227,45 @@ JOURNALS every voter journals to its own memory journal."
       (is (run-network net (all-finalized-p net '(0 1 2 3) target)))
       (is (>= (voter-view (net-voter net 3)) target))
       (is (find 3 (net-requests net) :key #'car) "the returning voter requested certificates"))))
+
+(deftest batcher-blocks-misbehaving-senders ()
+  ;; commonware's batcher (simplex actors/batcher round.rs, actor.rs) blocks the sender of a
+  ;; vote from a non-participant, signed by another participant, for another epoch, or
+  ;; conflicting with the signer's earlier vote in the round; the sender of a certificate that
+  ;; fails verification; and each signer whose vote fails verification when a quorum is
+  ;; checked. A repeated identical vote is ignored, not blocked.
+  (with-test-network (net)
+    (flet ((scheme (i) (clempo.simplex::voter-scheme (net-voter net i))))
+      (let* ((voter (net-voter net 0))
+             (round (make-round :epoch 0 :view 1))
+             (proposal (make-proposal :round round :parent 0 :payload (make-octets 32 :initial-element 1)))
+             (other (make-proposal :round round :parent 0 :payload (make-octets 32 :initial-element 2)))
+             (n1 (sign-vote (scheme 1) :notarize proposal))
+             (n3 (sign-vote (scheme 3) :notarize proposal))
+             (forged (make-notarize :proposal proposal
+                                    :attestation (make-attestation
+                                                  :signer 2 :signature (attestation-signature
+                                                                        (notarize-attestation n3))))))
+        (flet ((disposition (sender message) (nth-value 1 (voter-receive voter sender message))))
+          (let ((clempo.io:*clock* (net-clock net)))
+            (is (null (disposition 1 n1)) "a participant's own vote")
+            (is (null (disposition 1 n1)) "the same vote again")
+            (is (eq :block (disposition 2 n1)) "signed by another participant")
+            (is (eq :block (disposition (make-octets 32 :initial-element 5) n1)) "not a participant")
+            (is (eq :block (disposition 1 (sign-vote (scheme 1) :notarize other))) "conflicting notarize")
+            (is (null (disposition 3 (sign-vote (scheme 3) :nullify round))))
+            (is (eq :block (disposition 3 (sign-vote (scheme 3) :finalize proposal))) "finalize after nullify")
+            (is (eq :block (disposition 1 (sign-vote (scheme 1) :notarize
+                                                     (make-proposal :round (make-round :epoch 5 :view 1)
+                                                                    :parent 0 :payload (proposal-payload proposal)))))
+                "another epoch")
+            (let* ((genuine (assemble-from-votes (scheme 0) (list (sign-vote (scheme 1) :notarize other)
+                                                                  (sign-vote (scheme 2) :notarize other)
+                                                                  (sign-vote (scheme 3) :notarize other))))
+                   (bad (make-notarization :proposal proposal :certificate (notarization-certificate genuine))))
+              (is (eq :block (disposition nil bad)) "a certificate that does not verify"))
+            (is (null (voter-take-blocked voter)))
+            (is (null (disposition 2 forged)) "a bad signature is found only when a quorum is checked")
+            (is (null (disposition 3 n3)))
+            (is (equalp (list (svref (clempo.simplex::voter-participants voter) 2)) (voter-take-blocked voter)))
+            (is (null (voter-take-blocked voter)))))))))

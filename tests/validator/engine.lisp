@@ -22,7 +22,7 @@
         (multiple-value-bind (blocks valid missing) (net::branch app b-hash)
           (is valid) (is (null missing)) (is= (list a b) blocks)
           (clempo.store:with-speculative-blocks (db)
-            (net::execute-ancestors app blocks)
+            (net::execute-branch app blocks)
             (is= 2 (clempo.store:db-number db))
             (is (octets= b-hash (clempo.store:db-hash db)))))))
     (is= 0 (clempo.store:db-number db))
@@ -49,34 +49,15 @@
 
 (defun call-with-devnet-observer (function)
   "Call FUNCTION with a validator app that follows the devnet under a key outside its
-committee, its execution store in a fresh directory and its network peerless."
+committee, in a fresh datadir, alone on an in-memory network."
   (let* ((chain (clempo.chainspec:load-chainspec (devnet-file "genesis.json")))
          (dir (make-temp-dir))
-         (store (clempo.store:open-store dir :genesis (lambda (db) (clempo.executor:load-genesis db :chain chain)))))
+         (seed (make-array 32 :element-type 'octet :initial-element 9))
+         (hub (make-hub))
+         (network (make-instance 'memory-network :hub hub :key (clempo.ed25519:ed25519-public-key seed))))
+    (push network (hub-nodes hub))
     (unwind-protect
-         (let* ((db (clempo.store:store-db store))
-                (head (clempo.headers:decode-header
-                       (clempo.chainspec:genesis-header-rlp chain :state-root (clempo.store:db-root-hash db))))
-                (seed (make-array 32 :element-type 'octet :initial-element 9))
-                (app (net::%make-app :network (net::make-validator-network :seed seed) :store store :db db
-                                     :chain chain :seed seed :key (clempo.ed25519:ed25519-public-key seed)
-                                     :epoch-length (clempo.chainspec:chain-epoch-length chain) :head head
-                                     :journal (clempo.simplex:make-memory-journal))))
-           (setf (gethash 0 (net::validator-app-finalized-headers app))
-                 (net::dkg-block-from-header head (net::head-hash app)))
-           (multiple-value-bind (dkg actions)
-               (clempo.dkg:open-dkg-manager
-                :seed seed :store (clempo.dkg:make-memory-dkg-store)
-                :epoch-length (clempo.chainspec:chain-epoch-length chain)
-                :t12-time (clempo.chainspec:fork-activation :t12 chain)
-                :t15-time (clempo.chainspec:fork-activation :t15 chain)
-                :header-at (lambda (height) (gethash height (net::validator-app-finalized-headers app)))
-                :last-finalized-height 0)
-             (setf (net::validator-app-dkg app) dkg)
-             (net::apply-dkg-actions app actions (clempo.dkg:decode-onchain-dkg-outcome
-                                                  (clempo.chainspec:genesis-extra-data chain) :strict t)))
-           (funcall function app))
-      (clempo.store:close-store store)
+         (net::call-with-validator-app function :chain chain :datadir dir :seed seed :network network)
       (uiop:delete-directory-tree dir :validate t))))
 
 (defun block-context (block)

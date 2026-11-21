@@ -9,7 +9,7 @@
            #:network-track #:network-block #:network-listen-port #:tempo-channel-quotas
            #:local-network-options
            #:network-event #:network-event-kind #:network-event-peer #:network-event-channel
-           #:run-devnet-validator
+           #:run-validator #:validator-command #:open-block-log #:close-block-log #:block-log-head
            #:network-event-frame #:network-event-start #:network-event-end))
 
 (in-package #:clempo.validator)

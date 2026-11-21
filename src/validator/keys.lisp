@@ -270,8 +270,9 @@ IPv4-mapped IPv6."
 
 (defparameter +keys-boolean-flags+ '("encrypt" "send"))
 
-(defun parse-keys-flags (args allowed)
-  "Alist of flag name -> value (T for booleans); --flag value and --flag=value."
+(defun parse-keys-flags (args allowed &key (booleans +keys-boolean-flags+))
+  "Alist of flag name -> value (T for the BOOLEANS); --flag value and --flag=value. The
+`clempo validator` command parses its flags the same way."
   (let ((flags nil))
     (loop while args do
       (let ((arg (pop args)))
@@ -280,7 +281,7 @@ IPv4-mapped IPv6."
           (unless (member name allowed :test #'string=) (keys-fail "unknown flag --~A" name))
           (when (assoc name flags :test #'string=) (keys-fail "flag --~A given twice" name))
           (push (cons name (cond (eq (subseq arg (1+ eq)))
-                                 ((member name +keys-boolean-flags+ :test #'string=) t)
+                                 ((member name booleans :test #'string=) t)
                                  (args (pop args))
                                  (t (keys-fail "flag --~A needs a value" name))))
                 flags))))

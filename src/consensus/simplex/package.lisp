@@ -15,9 +15,14 @@ Voter:
      TIMEOUTS: plist overriding *TEMPO-TIMEOUTS* (:leader :certification :retry :skip
      :skip-budget :view-retention; ms and views). GENESIS: payload of view 0 (32 octets).
   (voter-start voter)                    -> effects; enters view 1
-  (voter-receive voter sender message)   -> effects; MESSAGE a vote (notarize, nullify,
-     finalize) or certificate (notarization, nullification, finalization); SENDER the
-     participant index or ed25519 key (NIL allowed for certificates)
+  (voter-receive voter sender message)   -> (values effects block): MESSAGE a vote (notarize,
+     nullify, finalize) or certificate (notarization, nullification, finalization); SENDER
+     the participant index or ed25519 key (NIL allowed for certificates). BLOCK is :BLOCK
+     when commonware's batcher blocks SENDER for this message: a vote from a non-participant,
+     signed by another participant, for another epoch or conflicting with the signer's earlier
+     vote; a certificate that fails verification or is for another epoch.
+  (voter-take-blocked voter)             -> keys of participants whose votes failed
+     verification since the last call (the batcher blocks them)
   (voter-tick voter)                     -> effects; fires timeouts due at now-ms
   (voter-next-deadline voter)            -> ms or NIL
   (voter-view voter), (voter-last-finalized voter), (voter-leader-of voter view)
@@ -73,7 +78,7 @@ Electors: (make-random-elector :v0|:v1), (make-round-robin-elector &key seed),
    #:voter #:make-voter #:voter-start #:voter-receive #:voter-tick #:voter-next-deadline
    #:voter-proposed #:voter-verified #:voter-certified
    #:voter-view #:voter-last-finalized #:voter-epoch #:voter-me #:voter-leader-of
-   #:voter-certificate #:voter-deliver #:voter-journal
+   #:voter-certificate #:voter-deliver #:voter-journal #:voter-take-blocked
    ;; journal
    #:journal-append #:journal-sync #:journal-replay #:journal-prune
    #:memory-journal #:make-memory-journal #:memory-journal-drop-unsynced

@@ -74,6 +74,7 @@ participants (commonware's SkipBudget::Participants).")
   (last-activity #() :type simple-vector)
   (required-active 0)
   (hinted-view nil)                     ; current view whose leader-nullify hint was sent
+  (blocked '())                         ; participant indices to block (batcher round.rs)
   ;; resolver
   (resolver-floor 0) (resolver-current 0) (resolver-cursor 1)
   (requests '())                        ; outstanding (view . kind), kind :nullification|:notarization
@@ -545,20 +546,24 @@ certified notarization. NIL: answer with an error frame."
 
 (defun accept-vote (voter vote verified)
   "Record VOTE in its round (at most one per kind and signer, never both nullify and finalize).
-True if it was new."
+T if it was new, NIL if already held or from a signer whose vote failed verification, and
+:CONFLICT when the signer already voted otherwise in this round (batcher round.rs blocks it:
+conflicting notarize/nullify/finalize, nullify after finalize, finalize after nullify)."
   (let* ((r (ensure-round voter (proposal-or-round-view vote)))
          (signer (vote-signer vote))
          (kind (vote-kind vote))
          (slots (kind-votes r kind)))
-    (when (and (< signer (voter-n voter))
-               (null (svref slots signer))
-               (not (member signer (vround-invalid r)))
-               (case kind
-                 (:nullify (null (round-vote r :finalize signer)))
-                 (:finalize (null (round-vote r :nullify signer)))
-                 (t t)))
-      (setf (svref slots signer) (cons vote verified))
-      t)))
+    (cond ((or (>= signer (voter-n voter)) (member signer (vround-invalid r))) nil)
+          ((svref slots signer) (if (equalp (car (svref slots signer)) vote) nil :conflict))
+          ((case kind
+             (:nullify (round-vote r :finalize signer))
+             (:finalize (round-vote r :nullify signer)))
+           :conflict)
+          (t (setf (svref slots signer) (cons vote verified))
+             t))))
+
+(defun block-participant (voter index)
+  (pushnew index (voter-blocked voter)))
 
 (defun proposal-or-round-view (vote) (round-view (vote-round vote)))
 
@@ -593,7 +598,8 @@ optimistically: assemble, check the certificate, and only if it fails check each
                 (if (verify-vote scheme (car e))
                     (setf (cdr e) t)
                     (setf (svref slots signer) nil
-                          (vround-invalid r) (adjoin signer (vround-invalid r))))))))))))
+                          (vround-invalid r) (adjoin signer (vround-invalid r))
+                          (voter-blocked voter) (adjoin signer (voter-blocked voter))))))))))))
 
 (defun distinct-proposals (r kind)
   (let ((seen '()))
@@ -630,13 +636,21 @@ optimistically: assemble, check the certificate, and only if it fails check each
                        (queue-event voter :certificate c))))))))
 
 (defun batcher-network-vote (voter sender vote)
+  "Queue a vote from the network. Returns :BLOCK for one commonware's batcher blocks its
+sender for (round.rs): an unknown participant, a signer other than the sender, a vote for
+another epoch, or one that conflicts with the signer's earlier vote in the round."
   (let ((view (round-view (vote-round vote))))
-    (when (and sender (= (round-epoch (vote-round vote)) (voter-epoch voter)))
-      (record-activity voter sender)
-      (when (and (admits-vote-p voter view) (= sender (vote-signer vote))
-                 (accept-vote voter vote nil))
-        (hint-leader-nullify voter)
-        (batcher-process voter view)))))
+    (cond ((or (null sender) (/= sender (vote-signer vote))
+               (/= (round-epoch (vote-round vote)) (voter-epoch voter)))
+           :block)
+          (t (record-activity voter sender)
+             (when (admits-vote-p voter view)
+               (case (accept-vote voter vote nil)
+                 (:conflict :block)
+                 ((nil) nil)
+                 (t (hint-leader-nullify voter)
+                    (batcher-process voter view)
+                    nil)))))))
 
 (defun batcher-network-certificate (voter sender certificate)
   "Verify and queue a certificate from the network: :valid, :invalid (wrong epoch or bad
@@ -911,14 +925,22 @@ an honest peer serves for VIEW, wrong epoch or a bad signature: penalize the pee
 
 (defun voter-receive (voter sender message)
   "Deliver MESSAGE, a vote or certificate, from SENDER (a participant index or ed25519 public
-key; NIL for a certificate from outside the committee). Returns effects."
-  (let ((sender (participant-index voter sender)))
-    (etypecase message
-      ((or notarize nullify finalize) (batcher-network-vote voter sender message))
-      ((or notarization nullification finalization)
-       (batcher-network-certificate voter sender message))))
-  (pump voter)
-  (take-effects voter))
+key; NIL for a certificate from outside the committee). Returns effects and, as a second
+value, :BLOCK when the batcher would block SENDER for this message (see
+BATCHER-NETWORK-VOTE; a certificate that fails verification or is for another epoch)."
+  (let* ((index (participant-index voter sender))
+         (disposition (etypecase message
+                        ((or notarize nullify finalize) (batcher-network-vote voter index message))
+                        ((or notarization nullification finalization)
+                         (batcher-network-certificate voter index message)))))
+    (pump voter)
+    (values (take-effects voter) (when (member disposition '(:block :invalid)) :block))))
+
+(defun voter-take-blocked (voter)
+  "The participant keys whose votes failed verification since the last call (the batcher
+blocks each signer): their keys, as ed25519 public keys."
+  (mapcar (lambda (index) (svref (voter-participants voter) index))
+          (shiftf (voter-blocked voter) '())))
 
 (defun voter-tick (voter)
   "Fire due timeouts at (clempo.io:now-ms); returns effects."

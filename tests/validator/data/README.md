@@ -45,3 +45,13 @@ branch. A notarized response is not a finalized-chain assertion.
   the address (signed over but absent from rotateValidator calldata) is topic 3 of the
   ValidatorRotated log in `eth_getTransactionReceipt`, read from the private mainnet archive
   node (CLEMPO_RPC) on 2026-11-21.
+
+## The devnet's validators (tests/validator/engine.lisp)
+
+- `devnet-r6-keys/0..3/`: `signing.seed` (raw 32-byte ed25519 key), `signing.share` (BLS
+  SigningShare, 0x-hex) and `signing.public` of the four validators of the devnet whose
+  genesis is `tests/tempo/executor/data/devnet-r6/genesis.json`, copied unchanged from
+  `~/cache/clempo/devnet-r6-1795238891/network/127.0.0.1:21{0,1,2,3}00/` (the same
+  `tempo-xtask generate-localnet --seed 42` run as `localnet-key/`, which is slot 0; the raw
+  seed was exported by `scripts/devnet/export-key.rs`). The engine tests run these four
+  identities in one process over an in-memory network. Throwaway keys that guard nothing.

@@ -54,21 +54,6 @@
         (write-line (clempo.json:to-json-string report))
         (if ok 0 1)))))
 
-(defcommand "devnet-validator" (args)
-  "sign and propose on a fresh loopback Tempo devnet: -manifest PATH -slot N [-datadir PATH -seconds N]"
-  (let ((path (arg args :manifest)) (number (arg-int args :slot)) (seconds (arg-int args :seconds 0)))
-    (unless (and (stringp path) (typep number '(integer 0 *)) (typep seconds '(integer 0 *)))
-      (log-line "devnet-validator: specify -manifest PATH -slot N")
-      (return-from command 2))
-    (let* ((manifest (clempo.validator:read-devnet-manifest path))
-           (slot (clempo.validator:manifest-slot manifest number))
-           (state (or (arg args :datadir) (merge-pathnames "clempo-state/" (clempo.validator:slot-seed-path slot)))))
-      (clempo.validator:run-devnet-validator
-       manifest slot state (lambda (row)
-                             (write-line (clempo.json:to-json-string row))
-                             (force-output)) :seconds seconds)
-      0)))
-
 (defun mixed-devnet-proof (path expected)
   (when path
     (let ((summary nil))
