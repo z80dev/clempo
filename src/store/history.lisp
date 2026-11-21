@@ -181,7 +181,7 @@ STORAGE-P: it has nonzero storage."
             (make-aver nil (logbitp 1 flags) nonce balance code (logbitp 2 flags)))))))
 
 (defun skip-aver (sap pos)
-  (declare (type fixnum pos))
+  (declare #.*hot* (type fixnum pos) (type sb-sys:system-area-pointer sap))
   (with-sap-reader (sap pos)
     (let ((flags (u8)))
       (unless (logbitp 0 flags)
@@ -313,7 +313,7 @@ STORAGE-P: it has nonzero storage."
 (defun segment-floor (seg key target tlen n)
   "Find KEY's record holding its last version at or before block N in SEG. TARGET holds KEY's
 TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
-  (declare (type octets target) (type fixnum tlen n))
+  (declare #.*hot* (type octets target) (type fixnum tlen n))
   (let ((page (find-page seg key n)))
     (when page
       (let* ((sap (segment-sap seg))
@@ -323,7 +323,7 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
                       (segment-index-offset seg)))
              (buf (make-octets 53))
              (found nil) (fstart 0) (fend 0) (ffirst 0) (fcount 0))
-        (declare (type fixnum pos end) (dynamic-extent buf))
+        (declare (type fixnum pos end) (type sb-sys:system-area-pointer sap) (dynamic-extent buf))
         (with-sap-reader (sap pos)
           (loop while (< pos end)
                 do (let* ((shared (u8)) (suffix (u8)) (klen (+ shared suffix)))
@@ -339,7 +339,7 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
         (when found (values fstart fend ffirst fcount))))))
 
 (defun octets-compare (a alen b blen)
-  (declare (type octets a b) (type fixnum alen blen))
+  (declare #.*hot* (type octets a b) (type fixnum alen blen))
   (loop for i below (min alen blen)
         do (let ((x (aref a i)) (y (aref b i)))
              (cond ((< x y) (return-from octets-compare -1))
@@ -348,7 +348,7 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
 
 (defun last-slot-version (sap start end first n)
   "(values block value) of the last slot version at or before N in a record body."
-  (declare (type fixnum start end first n))
+  (declare #.*hot* (type fixnum start end first n) (type sb-sys:system-area-pointer sap))
   (let ((pos start) (block first) (vblock first) (vpos start))
     (declare (type fixnum pos block vblock vpos))
     (with-sap-reader (sap pos)
@@ -361,7 +361,7 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
       (values vblock (word)))))
 
 (defun last-account-version (sap start end first n)
-  (declare (type fixnum start end first n))
+  (declare #.*hot* (type fixnum start end first n) (type sb-sys:system-area-pointer sap))
   (let ((pos start) (block first) (vblock first) (vpos start))
     (declare (type fixnum pos block vblock vpos))
     (with-sap-reader (sap pos)
