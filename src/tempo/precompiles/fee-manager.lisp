@@ -3,24 +3,9 @@
 ;;; TipFeeManager (crates/precompiles/src/tip_fee_manager/{mod,dispatch}.rs): fee token
 ;;; preferences, fee collection around a transaction, and distribution. The fee AMM's
 ;;; operations (pool-id, get-pool, compute-amount-out, plan-fee-route, reserve-pool-liquidity,
-;;; execute-fee-swap, mint, burn, rebalance-swap) live in fee-amm.lisp; this file owns the
-;;; layout, every error and event of both interfaces, and the dispatch.
+;;; execute-fee-swap, mint, burn, rebalance-swap) and shared storage layout live in
+;;; fee-amm.lisp; this file owns every error and event of both interfaces and dispatch.
 
-(defstorable pool
-  (reserve-user-token u128)
-  (reserve-validator-token u128))
-
-(defcontract fee-manager (:address +fee-manager-address+)
-  (validator-tokens (mapping address address))
-  (user-tokens (mapping address address))
-  (collected-fees (mapping address (mapping address u256)))
-  (pools (mapping b256 pool))
-  (total-supply (mapping b256 u256))
-  (liquidity-balances (mapping b256 (mapping address u256)))
-  (pending-fee-swap-reservation (mapping b256 u128) :since :t1c
-   :doc "Transient only (t-read/t-write): validator-token liquidity reserved by collect-fee-pre-tx.")
-  (two-hop-intermediate address :since :t5
-   :doc "Transient only: the intermediate token of a two-hop fee route."))
 
 ;;; IFeeManager
 (deferror invalid-token "InvalidToken()")
@@ -56,16 +41,16 @@
   (read (user-tokens +fee-manager-address+ account)))
 
 (defun set-validator-token (sender token beneficiary)
-  (unless (clempo.tip20-factory:tip20-p token) (revert 'invalid-token))
+  (unless (funcall 'clempo.tip20-factory:tip20-p token) (revert 'invalid-token))
   (when (= sender beneficiary) (revert 'cannot-change-within-block))
-  (clempo.tip20:validate-usd-currency token)
+  (funcall 'clempo.tip20:validate-usd-currency token)
   (write (validator-tokens +fee-manager-address+ sender) token)
   (emit +fee-manager-address+ 'validator-token-set sender token)
   (values))
 
 (defun set-user-token (sender token)
-  (unless (clempo.tip20-factory:tip20-p token) (revert 'invalid-token))
-  (clempo.tip20:validate-usd-currency token)
+  (unless (funcall 'clempo.tip20-factory:tip20-p token) (revert 'invalid-token))
+  (funcall 'clempo.tip20:validate-usd-currency token)
   (when (fork-if (:since :t3)
             (= (read (user-tokens +fee-manager-address+ sender)) token)
             nil)
@@ -95,11 +80,11 @@
   "TipFeeManager::collect_fee_pre_tx: move MAX-AMOUNT of USER-TOKEN from FEE-PAYER to the
 fee manager and reserve AMM liquidity for the swap. Returns USER-TOKEN."
   (let ((validator-token (validator-token beneficiary)))
-    (clempo.tip20:from-address user-token)
+    (funcall 'clempo.tip20:from-address user-token)
     (fork-if (:since :t8)
-        (clempo.tip20:ensure-authorized-as user-token (list (cons fee-payer :sender)))
-        (clempo.tip20:ensure-transfer-authorized user-token fee-payer +fee-manager-address+))
-    (clempo.tip20:transfer-fee-pre-tx user-token fee-payer max-amount)
+        (funcall 'clempo.tip20:ensure-authorized-as user-token (list (cons fee-payer :sender)))
+        (funcall 'clempo.tip20:ensure-transfer-authorized user-token fee-payer +fee-manager-address+))
+    (funcall 'clempo.tip20:transfer-fee-pre-tx user-token fee-payer max-amount)
     (unless skip-liquidity-check
       (let ((route (plan-fee-route user-token validator-token max-amount)))
         (unless route (revert 'insufficient-liquidity))
@@ -113,8 +98,8 @@ fee manager and reserve AMM liquidity for the swap. Returns USER-TOKEN."
 (defun collect-fee-post-tx (fee-payer actual-spending refund fee-token beneficiary)
   "TipFeeManager::collect_fee_post_tx: refund the unused fee, swap the spent part into the
 validator's token and credit it to BENEFICIARY. Returns the amount credited."
-  (clempo.tip20:from-address fee-token)
-  (clempo.tip20:transfer-fee-post-tx fee-token fee-payer refund actual-spending)
+  (funcall 'clempo.tip20:from-address fee-token)
+  (funcall 'clempo.tip20:transfer-fee-post-tx fee-token fee-payer refund actual-spending)
   (let* ((hop (t-read (two-hop-intermediate +fee-manager-address+)))
          (validator-token (validator-token beneficiary))
          (amount (cond ((= fee-token validator-token) actual-spending)
@@ -136,8 +121,8 @@ validator's token and credit it to BENEFICIARY. Returns the amount credited."
          (amount (read place)))
     (unless (zerop amount)
       (write place 0)
-      (clempo.tip20:from-address token)
-      (clempo.tip20:transfer token +fee-manager-address+ validator amount)
+      (funcall 'clempo.tip20:from-address token)
+      (funcall 'clempo.tip20:transfer token +fee-manager-address+ validator amount)
       (emit +fee-manager-address+ 'fees-distributed validator token amount))
     (values)))
 

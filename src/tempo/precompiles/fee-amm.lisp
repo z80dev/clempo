@@ -1,8 +1,23 @@
 (in-package #:clempo.fee-manager)
 
 ;;; The fee AMM half of TipFeeManager (crates/precompiles/src/tip_fee_manager/amm.rs).
-;;; Storage (fee-manager contract, POOL struct), errors and events are declared in
-;;; fee-manager.lisp, which loads after this file: only run-time references here.
+;;; Define the shared layout before AMM operations so generated storage and Pool
+;;; accessors are available for inlining. Errors/events are registered by fee-manager.lisp.
+(defstorable pool
+  (reserve-user-token u128)
+  (reserve-validator-token u128))
+
+(defcontract fee-manager (:address +fee-manager-address+)
+  (validator-tokens (mapping address address))
+  (user-tokens (mapping address address))
+  (collected-fees (mapping address (mapping address u256)))
+  (pools (mapping b256 pool))
+  (total-supply (mapping b256 u256))
+  (liquidity-balances (mapping b256 (mapping address u256)))
+  (pending-fee-swap-reservation (mapping b256 u128) :since :t1c
+   :doc "Transient only (t-read/t-write): validator-token liquidity reserved by collect-fee-pre-tx.")
+  (two-hop-intermediate address :since :t5
+   :doc "Transient only: the intermediate token of a two-hop fee route."))
 
 (defconstant +fee-m+ 9970 "Fee swap multiplier M (30 bps fee), scaled by +FEE-SCALE+.")
 (defconstant +rebalance-n+ 9985 "Rebalance swap multiplier N, scaled by +FEE-SCALE+.")
@@ -89,11 +104,11 @@ validator token at rate N/SCALE (plus one). Returns the validator-token amount p
         nil)
     (write (pools +fee-manager-address+ pool-id)
            (make-pool :reserve-user-token new-user :reserve-validator-token new-validator))
-    (clempo.tip20:system-transfer-from (clempo.tip20:from-address validator-token)
+    (funcall 'clempo.tip20:system-transfer-from (funcall 'clempo.tip20:from-address validator-token)
                                        +fee-manager-address+ msg-sender amount-in)
     ;; collect_fee_pre_tx creates fee-manager balance slots for free: no credits for them.
     (set-tip1060-credit-minting nil)
-    (clempo.tip20:transfer (clempo.tip20:from-address user-token) +fee-manager-address+ to amount-out)
+    (funcall 'clempo.tip20:transfer (funcall 'clempo.tip20:from-address user-token) +fee-manager-address+ to amount-out)
     (emit +fee-manager-address+ 'rebalance-swap-event
           user-token validator-token msg-sender amount-in amount-out)
     amount-in))
@@ -103,15 +118,15 @@ validator token at rate N/SCALE (plus one). Returns the validator-token amount p
 liquidity minted to TO."
   (when (= user-token validator-token) (revert 'identical-addresses))
   (when (zerop amount-validator-token) (revert 'invalid-amount))
-  (clempo.tip20:validate-usd-currency user-token)
-  (clempo.tip20:validate-usd-currency validator-token)
+  (funcall 'clempo.tip20:validate-usd-currency user-token)
+  (funcall 'clempo.tip20:validate-usd-currency validator-token)
   (fork-if (:since :t8)
       (progn
-        (clempo.tip20:ensure-authorized-as user-token
+        (funcall 'clempo.tip20:ensure-authorized-as user-token
                                             (list (cons msg-sender :sender)
                                                   (cons +fee-manager-address+ :recipient)
                                                   (cons to :recipient)))
-        (clempo.tip20:ensure-authorized-as validator-token (list (cons to :recipient))))
+        (funcall 'clempo.tip20:ensure-authorized-as validator-token (list (cons to :recipient))))
       nil)
   (let* ((pool-id (pool-id user-token validator-token))
          (pool (read (pools +fee-manager-address+ pool-id)))
@@ -134,7 +149,7 @@ liquidity minted to TO."
                    (unless num (revert 'invalid-swap-calculation))
                    (floor num denom))))))
     (when (zerop liquidity) (revert 'insufficient-liquidity))
-    (clempo.tip20:system-transfer-from validator-token +fee-manager-address+ msg-sender
+    (funcall 'clempo.tip20:system-transfer-from validator-token +fee-manager-address+ msg-sender
                                        amount-validator-token)
     (let ((reserve (+ (pool-reserve-validator-token pool)
                       (to-u128 amount-validator-token 'invalid-amount))))
@@ -163,12 +178,12 @@ liquidity minted to TO."
 Returns (values amount-user-token amount-validator-token)."
   (when (= user-token validator-token) (revert 'identical-addresses))
   (when (zerop liquidity) (revert 'invalid-amount))
-  (clempo.tip20:validate-usd-currency user-token)
-  (clempo.tip20:validate-usd-currency validator-token)
+  (funcall 'clempo.tip20:validate-usd-currency user-token)
+  (funcall 'clempo.tip20:validate-usd-currency validator-token)
   (fork-if (:since :t8)
       (progn
-        (clempo.tip20:ensure-authorized-as user-token (list (cons msg-sender :sender)))
-        (clempo.tip20:ensure-authorized-as validator-token (list (cons msg-sender :sender))))
+        (funcall 'clempo.tip20:ensure-authorized-as user-token (list (cons msg-sender :sender)))
+        (funcall 'clempo.tip20:ensure-authorized-as validator-token (list (cons msg-sender :sender))))
       nil)
   (let* ((pool-id (pool-id user-token validator-token))
          (balance (get-liquidity-balances pool-id msg-sender)))
@@ -192,8 +207,8 @@ Returns (values amount-user-token amount-validator-token)."
           (when (or (minusp user) (minusp validator)) (revert 'insufficient-reserves))
           (write (pools +fee-manager-address+ pool-id)
                  (make-pool :reserve-user-token user :reserve-validator-token validator)))
-        (clempo.tip20:transfer user-token +fee-manager-address+ to amount-user)
-        (clempo.tip20:transfer validator-token +fee-manager-address+ to amount-validator)
+        (funcall 'clempo.tip20:transfer user-token +fee-manager-address+ to amount-user)
+        (funcall 'clempo.tip20:transfer validator-token +fee-manager-address+ to amount-validator)
         (emit +fee-manager-address+ 'burn-event
               msg-sender user-token validator-token amount-user amount-validator liquidity to)
         (values amount-user amount-validator)))))
@@ -215,7 +230,7 @@ liquidity; INTERMEDIATE is userToken.quoteToken() whenever it was read; POOLS li
         (return-from plan-fee-route (values :direct nil (reverse data))))
       (fork-if (:before :t5)
           (values nil nil (reverse data))
-          (let ((mid (clempo.tip20:quote-token (clempo.tip20:from-address user-token))))
+          (let ((mid (funcall 'clempo.tip20:quote-token (funcall 'clempo.tip20:from-address user-token))))
             (cond ((or (zerop mid) (= mid validator-token)
                        (not (check user-token mid amount-out))
                        (not (check mid validator-token (compute-amount-out amount-out))))

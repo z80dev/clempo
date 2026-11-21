@@ -21,14 +21,14 @@
   (is= 0 (clempo.fee-manager::compute-amount-out 1))
   (is= 9970 (clempo.fee-manager::compute-amount-out 10000))
   (is= 9940 (clempo.fee-manager::compute-amount-out
-             (clempo.fee-manager::compute-amount-out 10000)))))
+             (clempo.fee-manager::compute-amount-out 10000))))
 
 (deftest fee-manager-directional-pool-id ()
   (with-storage ((make-hashmap-storage))
     (is (/= (clempo.fee-manager::pool-id #x123 #x456)
             (clempo.fee-manager::pool-id #x456 #x123)))
     (is= (clempo.base:octets->integer
-          (clempo.keccak:keccak256 (clempo.abi:abi-encode '("address" "address") '(#x123 #x456))))
+          (clempo.keccak:keccak256 (clempo.abi:abi-encode '(:address :address) '(#x123 #x456))))
          (clempo.fee-manager::pool-id #x123 #x456))))
 
 (deftest fee-manager-fee-swap-reserves ()
