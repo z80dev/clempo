@@ -30,6 +30,32 @@
           (setf chunk (clempo.archive:read-chunk want) first want))
         (clempo.blocks:decode-block (clempo.archive:chunk-block chunk n))))))
 
+;;; Sender recovery dominates busy blocks (ecrecover per transaction), so a block's senders are
+;;; recovered on several threads. Recovery reads only immutable tables; each worker still runs
+;;; inside clempo.evm:with-evm-thread for its own Keccak scratch.
+
+(defparameter *sender-threads* 8)
+
+(defun recover-senders (block)
+  (let* ((txs (coerce (clempo.blocks:block-transactions block) 'simple-vector))
+         (n (length txs))
+         (out (make-array n)))
+    (if (< n 4)
+        (dotimes (i n) (setf (svref out i) (clempo.transactions:transaction-sender (svref txs i))))
+        (let* ((k (min *sender-threads* n))
+               (threads
+                 (loop for w below k
+                       collect (let ((w w))
+                                 (sb-thread:make-thread
+                                  (lambda ()
+                                    (clempo.evm:with-evm-thread
+                                      (loop for i from w below n by k
+                                            do (setf (svref out i)
+                                                     (clempo.transactions:transaction-sender (svref txs i))))))
+                                  :name "senders")))))
+          (mapc #'sb-thread:join-thread threads)))
+    (coerce out 'list)))
+
 ;;; The datadir's history: was every committed block matched?
 
 (defun history-path (datadir)
@@ -178,6 +204,7 @@ get the restarts in the debugger)."
                      db from to
                      :chain chain
                      :block-fn source
+                     :senders-fn #'recover-senders
                      :commit-fn (when store (lambda (diff) (clempo.store:store-commit-block store diff)))
                      :heal-fn (lambda (db n block)
                                 (clempo.executor:heal-block db block (reference-prestate-diff n) :chain chain))
