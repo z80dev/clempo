@@ -851,3 +851,65 @@ host:
   0.98-0.99 there is noise.
 - The answer is constant, so the gap is per-request user CPU: the method's history lookup
   and response rendering. The envelope pass this change removed was not the whole of it.
+
+### Per-request cost of a constant answer (eth_getBalance, `5165cd2`)
+
+`eth_getBalance` answers a constant (Tempo has no native balance), so it measures only the
+cost of a request. The earlier note blaming a history lookup was wrong: the method reads no
+state. Profiled per request (sb-sprof, cpu and alloc) in one thread on newphy, the
+in-process path (UTF-8 body to text, envelope, method, response, HTTP head) took 2.55 µs and
+consed 2,064 octets. What changed:
+
+- **One pass over the envelope.** `json-valid-p` takes `:end` and `:members`: while it
+  checks the body it records where each top-level key and value starts. The envelope then
+  reads id, jsonrpc, method and params from that layout. A key that holds an escape falls
+  back to the old key-by-key read, and batches are unchanged. The id is echoed from its raw
+  span, and jsonrpc and method are compared in place.
+- **Params in place.** FixedBytes/address and block selectors that are escape-free strict
+  ASCII hex (or an exact tag) are decoded where they lie. Anything else, including Unicode
+  digits, escapes, wrong lengths and `0x+1`, takes the old path, so errors and their
+  positions are unchanged.
+- **Less allocation.** The constant answer's hex is computed once. Responses are appended to
+  the per-thread buffer without a string stream. Each worker reuses one text buffer, and
+  ASCII bodies are copied eight octets at a time. A JSON 200 head comes from precomputed
+  octets. HTTP header scanning uses typed octet loops instead of generic `position`.
+- **No shared locks on the request path.** Each method keeps its own metric cells:
+  per-thread-shard atomic words (`clempo.metrics:metric-cell`) instead of the registry
+  mutex and consed label lists. The backend read hold is a per-shard atomic count. A writer
+  still waits for held reads and keeps reads out while it writes.
+
+In-process on newphy this path now takes 1.00 µs and conses 96 octets (the address
+bignum). Measured by the server process's CPU ticks over 1,000,000 requests at 16 clients,
+clempo now uses 1.56 µs user and 2.20 µs system per request. Rust uses 2.07 µs and 2.77 µs.
+Before this change clempo used 4.6 µs of user CPU.
+
+Equivalence checks:
+- The 116-case raw HTTP diff against `origin/main` showed 0 differences.
+- A new 629-case envelope and param byte diff (escaped keys and values, duplicates, ids at
+  the u64 edge and with exponents or signs, Unicode digits, every block-tag form) showed 0
+  differences.
+- rpcdiff gave the same results on both trees for every suite: envelope 50/50, static
+  120/123, state 3542/3542, blocks 5124/5126, admin 352/352, gaps 71/71, txs, calls, logs,
+  tempo-params, impl, proofs, consensus and filters.
+- New tests check that the layout and the key-by-key read answer alike on mutated
+  requests, that `json-valid-p` agrees with `parse-json` on base strings, with `:end` and
+  with the member layout, that metric cells count correctly across threads, and that
+  writers exclude reads.
+
+Pinned newphy table (same pinning as above: Rust 0,1,8,9; clempo 2,3,10,11; client
+4-7,12-15), `-total 20000 -rounds 5`, load average 0.2 at the start and 3.9 at the end,
+2,400 of 2,400 answers identical (`rpc-load-pinned-3`). clempo/Rust req/s:
+
+| Method | 1 | 16 | 64 |
+|---|---:|---:|---:|
+| `eth_getBalance` | **1.08** | **1.23** | **1.16** |
+| `eth_call` | **1.40** | **1.26** | **1.23** |
+| `eth_getBlockByNumber` | **1.51** | **1.84** | **2.05** |
+| `eth_getLogs` | **3.92** | **5.27** | **4.91** |
+| `debug_traceTransaction` | **1.79** | **2.66** | **2.63** |
+| `eth_getProof` | **4.58** | **4.86** | **4.77** |
+
+At 20,000 requests an HTTP-bound round lasts about 40 ms, so the two HTTP-bound methods
+were run again for longer: `-total 300000 -rounds 7`, load average 3.6 to 2.8, 800 of 800
+answers identical (`rpc-load-pinned-4`). `eth_getBalance` gave **1.09 / 1.21 / 1.14** and
+`eth_getBlockByNumber` **1.50 / 1.79 / 1.79**.
