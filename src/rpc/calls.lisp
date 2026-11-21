@@ -536,6 +536,17 @@ halt rpc_invalid_transaction_error's text."
                          (:nonce-overflow "nonce has max value")
                          (t (format nil "EVM error: ~A" (halt-name halt)))))))))
 
+(defun error-text (e)
+  "How reth writes a call's error into a result (eth_callMany's and eth_createAccessList's
+\"error\"): the error's Display, which for Tempo's decoded precompile reverts (an
+EthApiError::Other around a jsonrpsee ErrorObject) is that object's Debug."
+  (let ((data (rpc-error-data e)))
+    (if (and (eql (rpc-error-code e) 3) (stringp data)
+             (clempo.rpc.revert:precompile-error-text (hex->octets (subseq data 2))))
+        (format nil "ErrorObject { code: ServerError(3), message: ~A, data: Some(RawValue(~A)) }"
+                (serde:rust-debug-string (rpc-error-message e)) (json:to-json-string data))
+        (rpc-error-message e))))
+
 (defun tx-gas-cap (env)
   "The fork's transaction gas limit cap (EIP-7825 / Tempo T1), or NIL."
   (clempo.chainspec:tx-gas-limit-cap-at (executor:block-env-timestamp env) executor:*chain*))
@@ -648,7 +659,7 @@ ON-INVALID with (code message), or fails with reth's error."
                                              (list :access-list (access-list-plist request)))
               (let ((error (and (not (executor:tx-outcome-status outcome))
                                 (handler-case (progn (call-result outcome gas "eth_createAccessList") nil)
-                                  (rpc-error (e) (rpc-error-message e))))))
+                                  (rpc-error (e) (error-text e))))))
                 (apply #'json:jobject
                        "accessList" (coerce (loop for (address . slots) in list
                                                   collect (json:jobject "address" (addr address)
@@ -691,7 +702,7 @@ transactions). Each request renders as RENDER (tracer request outcome gas) under
                                         (if render
                                             (funcall render tr request outcome gas)
                                             (handler-case (json:jobject "value" (hexbytes (call-result outcome gas what)))
-                                              (rpc-error (e) (json:jobject "error" (rpc-error-message e))))))))
+                                              (rpc-error (e) (json:jobject "error" (error-text e))))))))
                       'simple-vector))
        'simple-vector))))
 
@@ -883,7 +894,8 @@ Returns the rendered results in order."
     (multiple-value-bind (rest end)
         (read-flattened src "struct GethDebugTracingOptions" (mapcar #'second +tracing-option-fields+)
                         (lambda (key src)
-                          (destructuring-bind (kw nil type) (find key +tracing-option-fields+ :key #'second :test #'string=)
+                          (destructuring-bind (kw name type) (find key +tracing-option-fields+ :key #'second :test #'string=)
+                            (declare (ignore name))
                             (when (member kw seen) (serde:serde-fail-after-key src "duplicate field `~A`" key))
                             (push kw seen)
                             (unless (and (not (eq kw :tracer-config)) (serde:read-null-p src))
