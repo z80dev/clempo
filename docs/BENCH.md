@@ -514,3 +514,41 @@ Clempo server at the same head keeps it idle. `-upstream` lets Clempo fill its
 receipts store (root-checked) on first use; the diff pass warms it before timing.
 `rpc-load` exits 1 when any answer differs; `-no-diff` and `-no-load` run one phase.
 Never point it at the live reference node: its rule is two threads at most.
+
+### After the RPC speed work (`feffe50`)
+
+Same host, same heads and corpus (`-n 400`), `-total 4000 -rounds 3`, client and server
+release builds (`rpc-load-3` in the results directory). Medians of 3 interleaved rounds;
+2,400 of 2,400 answers identical. Clempo/Rust req/s, with the first table's ratio and
+goempo's published 1-client ratio:
+
+| Method | 1 client | 16 clients | 64 clients | before (1/16/64) | goempo (1) |
+|---|---:|---:|---:|---|---:|
+| `eth_getBalance` | 0.97 | 1.01 | 0.91 | 0.77 / 1.17 / 0.78 | |
+| `eth_call` | **1.33** | **1.43** | 0.83 | 0.15 / 0.22 / 0.29 | 1.28 |
+| `eth_getBlockByNumber` | 1.03 | 0.96 | 0.95 | 0.49 / 0.67 / 0.76 | |
+| `eth_getLogs` | **2.63** | **1.77** | **2.05** | 0.67 / 0.27 / 0.25 | 2.01 |
+| `debug_traceTransaction` | 0.99 | 0.99 | 0.86 | 0.33 / 0.39 / 0.31 | |
+| `eth_getProof` | 2.38 | 3.16 | 2.21 | 1.18 / 3.29 / 3.40 | |
+
+An earlier run of the same build minus `feffe50` (load average 14-35 from other agents)
+had `eth_call` 1.56 / 1.51 / 2.12 and `eth_getLogs` 2.70 / 2.83 / 1.79: at 64 clients the
+ratios move by up to 2.5x between runs (clempo's p99 there is GC-bound), so read the
+1- and 16-client columns. `eth_getBalance` is a constant answer: at 16 clients both
+servers are bound by the shared SBCL load client and the kernel's socket calls.
+
+What changed (direct per-request time inside the server, warm, 1 thread):
+
+| Method | before | after | Main causes |
+|---|---:|---:|---|
+| `eth_call` | 439 us | 18 us | history probe cache (`1127661`); mapped hash index, no bucket read per block-by-hash (`3888eb1`) |
+| `eth_getLogs` | 43 us | 8 us | bloom bits hashed once per query and tested in place; logs rendered once per block (`2eef1b2`) |
+| `eth_getBlockByNumber` | 34 us | 4 us | JSON writer and hex without FORMAT (`acc0cac`); block JSON kept per cached block (`2eef1b2`) |
+| `debug_traceTransaction` | 1,554 us | ~620 us | history probes; P-384 memo per connection thread (`feffe50`) |
+| `eth_getBalance` (HTTP) | | | request lines scanned in a per-connection buffer, no wakeup syscall per request (`72443d9`, `3888eb1`) |
+
+Open: `debug_traceTransaction` spends ~40% in per-op tracer hooks (CLOS dispatch,
+`MAKE-PENDING`, `STEP-STOP-AND-COST`) although `callTracer` keeps no steps; a
+no-steps interpreter path would put it well above Rust (EvmJitAgent agreed to the edit
+in `src/evm/tracing.lisp`; not done). At 64 clients thread-per-connection loses to
+Rust's 16 kqueue workers.
