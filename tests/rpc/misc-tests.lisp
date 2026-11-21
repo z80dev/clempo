@@ -63,6 +63,12 @@
   (is (nth-value 1 (filter:paginate '(1 2 3) 0 2)))
   (is (not (nth-value 1 (filter:paginate '(1 2) 0 2)))))
 
+(deftest fee-history-cache-percentiles ()
+  ;; reth approximate_percentile (fee history cache, resolution 4): f64::round, half away from zero
+  (loop for (p want) in '((10d0 10d0) (10.1d0 10d0) (10.125d0 10.25d0) (10.375d0 10.5d0)
+                          (99.9d0 100d0) (0.124d0 0d0) (2.5d0 2.5d0))
+        do (is= want (clempo.rpc.logs::quarter-percentile p) "~A" p)))
+
 ;;; Admin peer parameters: the success paths reth acknowledges (never sent to the reference;
 ;;; its parse errors are corpus suite "admin").
 

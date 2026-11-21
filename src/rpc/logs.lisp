@@ -227,9 +227,22 @@ decoded block when it is cached, else from the raw block."
                               do (incf index) (incf cumulative (car (nth index txs))))
                         (cdr (nth index txs)))))))
 
+(defconstant +fee-history-cache-blocks+ 1124
+  "reth FeeHistoryCacheConfig max_blocks (MAX_HEADER_HISTORY + 100): a running node's cache
+holds the fee history of this many blocks up to its head.")
+
+(defun quarter-percentile (p)
+  "reth approximate_percentile at the cache's resolution 4: P rounded (half away from zero)
+to a multiple of 0.25."
+  (let* ((x (* p 4d0)) (r (ffloor x)))
+    (/ (if (>= (- x r) 0.5d0) (+ r 1d0) r) 4d0)))
+
 (defun fee-history (count newest percentiles)
-  "reth's fee_history over headers and receipts (the cache-free path). PERCENTILES is :ABSENT,
-or a list (possibly empty)."
+  "reth's fee_history over headers and receipts. PERCENTILES is :ABSENT, or a list (possibly
+empty). A range inside the last +FEE-HISTORY-CACHE-BLOCKS+ blocks is answered as reth's
+fee history cache answers it once a running node has filled it: a reward row per block (empty
+percentiles give empty rows) at percentiles rounded to 0.25. An older range takes reth's
+cache-free path: exact percentiles, and no rows at all for empty percentiles."
   (when (zerop count) (return-from fee-history (json:jobject "gasUsedRatio" #() "oldestBlock" "0x0")))
   (when (and (listp percentiles)
              (or (> (length percentiles) 100)
@@ -261,11 +274,16 @@ or a list (possibly empty)."
              "blobGasUsedRatio" (coerce (loop repeat count collect 0d0) 'simple-vector)
              "oldestBlock" (q start)
              (when (listp percentiles)
-               (list "reward" (if percentiles
-                                  (map 'simple-vector
-                                       (lambda (b) (map 'simple-vector #'q (block-rewards b percentiles)))
-                                       blocks)
-                                  #())))))))
+               (list "reward" (if (>= start (- chain:*head* (1- +fee-history-cache-blocks+)))
+                                  (let ((approximated (mapcar #'quarter-percentile percentiles)))
+                                    (map 'simple-vector
+                                         (lambda (b) (map 'simple-vector #'q (block-rewards b approximated)))
+                                         blocks))
+                                  (if percentiles
+                                      (map 'simple-vector
+                                           (lambda (b) (map 'simple-vector #'q (block-rewards b percentiles)))
+                                           blocks)
+                                      #()))))))))
 
 (defrpc "eth_feeHistory" ((count u64) (newest block-number-or-tag)
                           (percentiles fee-percentiles :default :absent))

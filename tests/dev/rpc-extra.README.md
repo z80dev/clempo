@@ -7,7 +7,11 @@ the recorded request. `bindSubscription` substitutes the first live subscription
 ID for the recorded ID. The event fixture compares the complete notification
 shape, not the time-varying certificate or block contents. With an owned server,
 `eventHeight` publishes a historical head using the local finalization archive;
-with `-url`, replay waits for an actual event from that server.
+with `-url`, replay waits for an actual event from that server. The recorded
+event's block (0x2fc6d9a) has an empty body, and shape comparison tells an empty
+array from a filled one, so `eventHeight` is 50015002: a certified archive block
+whose body is also empty (the reference's `eth_getBlockTransactionCountByNumber`
+answers 0 for it; 50015001 holds 2 transactions).
 The lead recorded `admin_clearTxpool` on the private reth node: `[]`, omitted
 params, and `[1]` each answered numeric `0`. This agrees with reth's
 `crates/rpc/rpc/src/admin.rs` (`c82820f`): remove all local pool transactions
