@@ -377,7 +377,7 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
 
 (defstruct (tail (:constructor make-tail (from)))
   (from 0) (to -1)
-  (keys (make-hash-table :size 65536) :type hash-table)
+  (keys (make-hash-table :size 65536 :synchronized t) :type hash-table) ; the follower writes while RPC threads read
   (versions 0 :type fixnum)
   (wipes '()))
 
@@ -409,7 +409,7 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
   (segments '() :type list)              ; newest (largest TO) first
   (wipes (make-hash-table :synchronized t) :type hash-table) ; address -> sorted simple-vector of blocks
   (codes (make-hash-table :synchronized t) :type hash-table) ; hash integer -> (path . offset) or octets
-  (code-files (make-hash-table :test 'equal) :type hash-table) ; path -> bytes scanned
+  (code-files (make-hash-table :test 'equal :synchronized t) :type hash-table) ; path -> bytes scanned
   (lock (sb-thread:make-mutex :name "history"))
   (tail nil)                             ; writer only
   (job nil)

@@ -247,7 +247,7 @@ Returns (values header-start header-end tx-bounds) where tx-bounds is a list of 
   (format nil "~A/cache/clempo/receipts/~A/" (io:getenv "HOME") chain))
 
 (defstruct rstore dir (lock (sb-thread:make-mutex :name "receipts store"))
-  (offsets (make-hash-table)))   ; chunk-first -> hash number -> (offset . length)
+  (offsets (make-hash-table :synchronized t)))   ; chunk-first -> hash number -> (offset . length); filled lazily by RPC threads
 
 (defun rstore-path (store first) (format nil "~Areceipts-~10,'0D.dat" (rstore-dir store) first))
 
