@@ -37,4 +37,5 @@
                (:file "state-tests")
                (:file "serde-tests")
                (:file "bal-tests")
-               (:file "misc-tests")))
+               (:file "misc-tests")
+               (:file "aa-request-tests")))

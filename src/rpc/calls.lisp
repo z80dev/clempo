@@ -137,7 +137,9 @@ Option) treat null as absent; REQUIRED fields fail with \"missing field\" after 
   (:y-parity "yParity" q8 :aliases ("v") :required t)
   (:r "r" q256 :required t)
   (:s "s" q256 :required t))
-(defvec authorization-list signed-authorization)
+(defvec signed-authorizations signed-authorization)
+(defparam authorization-list (src) "Vec<SignedAuthorization> as a vector (empty and absent differ)"
+  (coerce (read-param 'signed-authorizations src) 'simple-vector))
 
 (defparam signature-type (src) "Tempo SignatureType (camelCase unit variants)"
   (let ((variants '("secp256k1" "p256" "webAuthn" "configurableAccount")))
@@ -457,23 +459,154 @@ and a zero base fee when the request pays no gas price (reth prepare_call_env)."
         ((req-gas-price r) 0)
         (t 2)))
 
-(defun request-plist (r world gas price)
-  "The executor's request plist for an Ethereum request (normalize_transaction_request with
-the nonce taken from the state, as create_txn_env does)."
-  (let ((type (request-type r)) (from (or (req-from r) 0)))
-    (when (req-authorizations r)
-      (internal-error "EIP-7702 authorization lists in call requests are not converted yet"))
-    (list :from from
-          :to (let ((to (req-to r))) (if (or (null to) (eq to :create)) nil to))
-          :gas gas :type type
-          :gas-price (when (member type '(0 1)) (or (req-gas-price r) price))
-          :max-fee (unless (member type '(0 1)) (or (req-max-fee r) price))
-          :max-priority (unless (member type '(0 1)) (or (req-max-priority r) 0))
-          :value (or (req-value r) 0)
-          :nonce (state:get-nonce world from)
-          :chain-id (req-chain-id r)
-          :input (or (request-input r) (make-octets 0))
-          :access-list (access-list-plist r))))
+(defparameter +simulation-unique-id+
+  (octets->integer (string->octets "TEMPO_RPC_SIMULATION_MPP_CONTEXT"))
+  "RPC_SIMULATION_UNIQUE_TX_IDENTIFIER: the transaction identifier of every simulated request.")
+
+(defun request-plist (r world gas price &optional env)
+  "The executor's request plist for REQUEST R (Tempo's TryIntoTxEnv after create_txn_env):
+an Ethereum request as normalize_transaction_request leaves it, a Tempo one (AA-REQUEST-P) as
+its 0x76 transaction with a mock signature. The nonce comes from WORLD, as reth's
+prepare_call_env drops the request's. ENV, the call's block environment, is needed for AA
+requests."
+  (if (aa-request-p r)
+      (aa-request-plist r world gas price env)
+      (let ((type (request-type r)) (from (or (req-from r) 0))
+            (to (let ((to (req-to r))) (if (or (null to) (eq to :create)) nil to))))
+        ;; a type-4 request needs a target (rpc-convert) and authorizations (evm2 EmptyAuthorizationList)
+        (when (and (= type 4) (or (null to) (zerop (length (req-authorizations r)))))
+          (rpc-fail -32003 "EIP-7702 authorization list has invalid fields"))
+        (list :from from
+              :to to
+              :gas gas :type type
+              :gas-price (when (member type '(0 1)) (or (req-gas-price r) price))
+              :max-fee (unless (member type '(0 1)) (or (req-max-fee r) price))
+              :max-priority (unless (member type '(0 1)) (or (req-max-priority r) 0))
+              :value (or (req-value r) 0)
+              :nonce (state:get-nonce world from)
+              :chain-id (req-chain-id r)
+              :input (or (request-input r) (make-octets 0))
+              :access-list (access-list-plist r)
+              :authorizations (authorization-items r)
+              :unique-id +simulation-unique-id+))))
+
+(defun authorization-items (r)
+  "The request's EIP-7702 authorizationList as a type-4 transaction's decoded RLP items."
+  (map 'list (lambda (a)
+               (destructuring-bind (&key chain-id address nonce y-parity r s) a
+                 (rlp-items (list chain-id (integer->octets address 20) nonce y-parity r s))))
+       (req-authorizations r)))
+
+(defun authorization-authorities (r chain-id)
+  "evm2 AccessListInspector::with_excluded_from_tx: the recoverable authorities of the
+request's EIP-7702 authorizations for CHAIN-ID."
+  (loop for item in (authorization-items r)
+        for auth-chain = (octets->integer (first item))
+        for authority = (and (or (zerop auth-chain) (= auth-chain chain-id))
+                             (/= (octets->integer (third item)) +u64-max+)
+                             (handler-case (values (clempo.signatures:authorization-signer item))
+                               (clempo.signatures:signature-error () nil)))
+        when authority collect authority))
+
+;;; Tempo (0x76) requests: TempoTransactionRequest::build_aa with create_mock_tempo_sig.
+
+(defparameter +nonce-manager+ #x4e4f4e4345000000000000000000000000000000 "NONCE_PRECOMPILE_ADDRESS")
+(defparameter +expiring-nonce-key+ (1- (ash 1 256)) "TEMPO_EXPIRING_NONCE_KEY")
+
+(defun request-nonce (r world)
+  "create_txn_env's nonce: a nonzero nonce key's from the NonceManager (nonces[from][key],
+0 for the expiring key), else the account's."
+  (let ((from (or (req-from r) 0)) (key (req-nonce-key r)))
+    (flet ((word (x) (integer->octets x 32)))
+      (cond ((or (null key) (zerop key)) (state:get-nonce world from))
+            ((= key +expiring-nonce-key+) 0)
+            (t (min +u64-max+
+                    (state:sload world +nonce-manager+
+                                 (octets->integer
+                                  (clempo.keccak:keccak256
+                                   (octets-concat (word key)
+                                                  (clempo.keccak:keccak256 (octets-concat (word from) (word 0)))))))))))))
+
+(defun mock-webauthn-signature (size)
+  "mock_webauthn_signature: authenticator data and a clientDataJSON padded to SIZE bytes."
+  (let* ((base "{\"type\":\"webauthn.get\",\"challenge\":\"\",\"origin\":\"\"}")
+         (size (max size (+ 37 (length base))))
+         (auth (fill (make-octets 37) #xff)))
+    (setf (aref auth 32) 1)
+    (octets-concat (octets-of 2) auth
+                   (string->octets (format nil "{\"type\":\"webauthn.get\",\"challenge\":\"\",\"origin\":\"~A\"}"
+                                           (make-string (- size 37 (length base)) :initial-element #\x)))
+                   (make-octets 128))))
+
+(defun mock-primitive-signature (type key-data)
+  "create_mock_primitive_signature as wire bytes; KEY-DATA of 1, 2 or 4 bytes sizes WebAuthn data."
+  (ecase type
+    (:secp256k1 (octets-concat (make-octets 64) (octets-of 27)))
+    (:p256 (octets-concat (octets-of 1) (make-octets 129)))
+    (:webauthn (mock-webauthn-signature
+                (min 8192 (if (and key-data (member (length key-data) '(1 2 4)))
+                              (octets->integer key-data)
+                              800))))))
+
+(defun mock-signature (r from spec)
+  "create_mock_tempo_sig: the request's key type as a primitive signature, wrapped in a
+keychain signature (V2 from T1C) for an access key (keyId)."
+  (let ((inner (mock-primitive-signature (or (req-key-type r) :secp256k1) (req-key-data r))))
+    (if (req-key-id r)
+        (octets-concat (octets-of (if (clempo.forks:fork>= spec :t1c) 4 3)) (integer->octets from 20) inner)
+        inner)))
+
+(defun call-items (calls)
+  (mapcar (lambda (c) (list (if (first c) (integer->octets (first c) 20) (make-octets 0)) (second c) (third c)))
+          calls))
+
+(defun fee-payer (r fields)
+  "TempoTransaction::recover_fee_payer over the unsigned FIELDS (the fee payer signature's
+place holding the sender), or NIL when the request carries no fee payer signature."
+  (let ((sig (req-fee-payer-signature r)))
+    (when sig
+      (or (and (<= (getf sig :s) (ash clempo.secp256k1:+secp256k1-n+ -1))
+               (clempo.secp256k1:ecrecover-address
+                (clempo.keccak:keccak256 (octets-concat (octets-of #x78) (clempo.rlp:rlp-encode fields)))
+                (getf sig :r) (getf sig :s) (if (getf sig :y-parity) 1 0)))
+          (rpc-fail -32003 "fee payer signature recovery failed")))))
+
+(defun aa-request-plist (r world gas price env)
+  (let* ((from (or (req-from r) 0))
+         (gp (or (req-gas-price r) (when (member (request-type r) '(0 1)) price)))
+         (max-fee (or gp (req-max-fee r) price))
+         (priority (or gp (req-max-priority r) 0))
+         (to (req-to r))
+         (calls (mapcar (lambda (c) (list (if (eq (first c) :create) nil (first c)) (second c) (third c)))
+                        (append (req-calls r)
+                                (when to (list (list to (or (req-value r) 0)
+                                                     (or (request-input r) (make-octets 0)))))))))
+    (unless calls (rpc-fail +invalid-params+ "Missing 'calls' or 'to' field for Tempo transaction."))
+    (let* ((chain-id (or (req-chain-id r) (executor:block-env-chain-id env)))
+           (nonce (request-nonce r world))
+           (access-list (access-list-plist r))
+           (fee-payer (fee-payer r (append (list chain-id priority max-fee
+                                                 (or (req-gas r) (executor:block-env-gas-limit env))
+                                                 (call-items calls)
+                                                 (mapcar (lambda (e) (list (integer->octets (car e) 20)
+                                                                           (mapcar (lambda (k) (integer->octets k 32)) (cdr e))))
+                                                         access-list)
+                                                 (or (req-nonce-key r) 0) nonce
+                                                 (or (req-valid-before r) (make-octets 0))
+                                                 (or (req-valid-after r) (make-octets 0))
+                                                 (if (req-fee-token r) (integer->octets (req-fee-token r) 20) (make-octets 0))
+                                                 (integer->octets from 20)
+                                                 (req-tempo-authorizations r))
+                                           (when (req-key-authorization r) (list (req-key-authorization r)))))))
+      (list :type #x76 :from from :gas gas :max-fee max-fee :max-priority priority
+            :nonce nonce :chain-id chain-id :calls calls :access-list access-list
+            :nonce-key (or (req-nonce-key r) 0) :fee-token (req-fee-token r)
+            :valid-before (req-valid-before r) :valid-after (req-valid-after r)
+            :tempo-authorizations (req-tempo-authorizations r)
+            :key-authorization (req-key-authorization r) :key-id (req-key-id r)
+            :fee-payer fee-payer
+            :signature (mock-signature r from (executor:block-env-spec env))
+            :unique-id +simulation-unique-id+))))
 
 (defun access-list-plist (r)
   "The request's access list as the executor takes it: ((address slot ...) ...)."
@@ -492,12 +625,96 @@ the nonce taken from the state, as create_txn_env does)."
   "clempo's invalid-transaction reasons -> reth's RpcInvalidTransactionError (code, message)
 and eth_simulateV1's code.")
 
+(defvar *invalid-context* nil
+  "(request . block-env) of the request whose rejection INVALID-REQUEST-ERROR maps: Tempo's
+messages quote the block timestamp and the request's validity window.")
+
+(defun checksum-address (address)
+  "EIP-55: alloy's Display of an Address."
+  (let* ((hex (format nil "~(~40,'0x~)" address))
+         (hash (octets->integer (clempo.keccak:keccak256 (string->octets hex)))))
+    (with-output-to-string (s)
+      (write-string "0x" s)
+      (loop for c across hex for i from 0
+            do (write-char (if (and (alpha-char-p c) (logbitp (- 255 (* 4 i)) hash)) (char-upcase c) c) s)))))
+
+(defparameter +precompile-error-variants+
+  '(("CLEMPO.KEYCHAIN" . "AccountKeychainError") ("CLEMPO.NONCE" . "NonceError")
+    ("CLEMPO.TIP20" . "TIP20") ("CLEMPO.DEX" . "StablecoinDEX") ("CLEMPO.TIP403" . "TIP403RegistryError")
+    ("CLEMPO.TIP20-FACTORY" . "TIP20Factory") ("CLEMPO.CHANNEL-RESERVE" . "TIP20ChannelReserveError"))
+  "clempo precompile packages -> the TempoPrecompileError variant of their errors.")
+
+(defun precompile-error-debug (reason)
+  "The Debug of the TempoPrecompileError a \"precompile revert PKG::NAME ... 0xDATA\" REASON
+names (\"AccountKeychainError(KeyNotFound(KeyNotFound))\"), for errors without fields; else NIL."
+  (let* ((at (search "precompile revert " reason))
+         (start (and at (+ at (length "precompile revert "))))
+         (sep (and start (search "::" reason :start2 start)))
+         (end (and sep (position #\Space reason :start sep)))
+         (variant (and sep (cdr (assoc (subseq reason start sep) +precompile-error-variants+ :test #'string=))))
+         (symbol (and variant (find-symbol (subseq reason (+ sep 2) end) (subseq reason start sep))))
+         (canonical (and symbol (third (get symbol 'clempo.contract::error-signature)))))
+    (when (and canonical (search "()" canonical))
+      (let ((name (subseq canonical 0 (position #\( canonical))))
+        (format nil "~A(~A(~A))" variant name name)))))
+
+(defun reason-integer (reason prefix)
+  (parse-integer reason :start (length prefix) :junk-allowed t))
+
+(defun tempo-invalid-error (reason)
+  "(values message data) of TempoInvalidTransaction's Display for the executor's REASON, or NIL."
+  (destructuring-bind (&optional request . env) *invalid-context*
+    (let ((now (and env (executor:block-env-timestamp env))))
+      (flet ((starts (prefix) (and (>= (length reason) (length prefix)) (string= prefix reason :end2 (length prefix))))
+             (has (part) (search part reason)))
+        (cond
+          ((starts "expiring nonce without valid_before") "expiring nonce transaction requires valid_before to be set")
+          ((starts "expiring nonce must be zero") "expiring nonce transaction must have nonce == 0 before T12")
+          ((has "EXPIRING-NONCE-REPLAY") "expiring nonce transaction already included")
+          ((and (has "INVALID-EXPIRING-NONCE-EXPIRY") now request (req-valid-before request))
+           (let ((before (req-valid-before request)))
+             (if (<= before now)
+                 (format nil "nonce manager error: expiring nonce transaction expired: valid_before (~D) <= block timestamp (~D)" before now)
+                 (format nil "nonce manager error: expiring nonce valid_before (~D) too far in the future: must be within 30s of block timestamp (~D), max allowed is ~D"
+                         before now (+ now 30)))))
+          ((and (starts "nonce manager: ") (precompile-error-debug reason))
+           (format nil "nonce manager error: Tempo Transaction nonce error: ~A" (precompile-error-debug reason)))
+          ((starts "value transfer not allowed in AA") "value transfer in Tempo Transaction not allowed")
+          ((starts "calls cannot contain CREATE when the authorization list is non-empty")
+           "calls cannot contain CREATE when 'aa_authorization_list' is non-empty")
+          ((starts "access key cannot authorize other keys")
+           "access keys cannot authorize other keys, only the root key can authorize new keys")
+          ((starts "key authorization signature recovery failed") "failed to recover signer from KeyAuthorization signature")
+          ((starts "self-sponsored fee payer") "fee payer cannot resolve to sender")
+          ((starts "subblock transactions are not supported") "subblock transactions are not supported")
+          ((starts "T6 key authorization fields are not active before T6")
+           "keychain validation failed: T6 key authorization fields are not active before T6")
+          ((and (starts "keychain validation failed: ") (precompile-error-debug reason))
+           (format nil "keychain validation failed: ~A" (precompile-error-debug reason)))
+          ((and (starts "expired at ") now)
+           (format nil "transaction expired: current block timestamp ~D >= validBefore ~D" now (reason-integer reason "expired at ")))
+          ((and (starts "not valid before ") now)
+           (format nil "transaction not valid yet: current block timestamp ~D < validAfter ~D" now (reason-integer reason "not valid before ")))
+          ((and (starts "fee token ") (has " is not TIP-20"))
+           (let ((token (checksum-address (parse-integer reason :start 10 :end (search " is not" reason) :radix 16))))
+             (values (format nil "fee token ~A is not a TIP-20 token; fee tokens must be TIP-20 tokens" token)
+                     (json:jobject "name" "FeeTokenNotTip20Error" "token" token))))
+          ((and (starts "insufficient fee token balance: ") (not (has " in ")))
+           (let* ((prefix "insufficient fee token balance: ")
+                  (lt (search " < " reason)))
+             (format nil "insufficient fee token balance: required ~D, but only have ~D"
+                     (parse-integer reason :start (+ lt 3)) (parse-integer reason :start (length prefix) :end lt)))))))))
+
 (defun invalid-request-error (reason &key simulate)
-  "(values code message) of the reference's error for an invalid request, or an internal
-error naming a reason with no known reference equivalent."
+  "(values code message data) of the reference's error for an invalid request (see
+*INVALID-CONTEXT*), or an internal error naming a reason with no known reference equivalent."
   (let ((e (assoc reason +invalid-transaction-errors+ :test #'string=)))
-    (unless e (internal-error (format nil "request rejected by clempo's executor with no reference error mapped: ~A" reason)))
-    (values (if simulate (fourth e) (second e)) (third e))))
+    (if e
+        (values (if simulate (fourth e) (second e)) (third e))
+        (multiple-value-bind (message data) (tempo-invalid-error reason)
+          (unless message
+            (internal-error (format nil "request rejected by clempo's executor with no reference error mapped: ~A" reason)))
+          (values -32003 message data)))))
 
 (defun utf8-or-nil (octets)
   (handler-case (sb-ext:octets-to-string octets :external-format '(:utf-8 :replacement nil))
@@ -519,8 +736,12 @@ error naming a reason with no known reference equivalent."
            (and text (every (lambda (c) (or (graphic-char-p c) (< (char-code c) 32))) text) text)))))
 
 (defun halt-name (halt)
-  "The halt keyword as revm's Debug name (out-of-gas -> OutOfGas)."
-  (remove #\- (string-capitalize (string halt))))
+  "The halt keyword as revm's Debug name (out-of-gas -> OutOfGas, invalid-fe-opcode ->
+InvalidFEOpcode)."
+  (case halt
+    (:invalid-fe-opcode "InvalidFEOpcode")
+    (:create-contract-starting-with-ef "CreateContractStartingWithEF")
+    (t (remove #\- (string-capitalize (string halt))))))
 
 (defun call-result (outcome gas what)
   "reth ensure_success: the output of a successful call; a revert is code 3 with its data, a
@@ -557,33 +778,72 @@ EthApiError::Other around a jsonrpsee ErrorObject) is that object's Debug."
   "The fork's transaction gas limit cap (EIP-7825 / Tempo T1), or NIL."
   (clempo.chainspec:tx-gas-limit-cap-at (executor:block-env-timestamp env) executor:*chain*))
 
-(defun request-gas (request price env what)
+(defun request-gas (request price env allowance)
   "reth prepare_call_env's gas limit: the request's (capped by the RPC gas cap), else the RPC
-gas cap (prepare_call_env lifts the EIP-7825 transaction cap without EIP-8037)."
-  (declare (ignore env))
+gas cap (prepare_call_env lifts the EIP-7825 transaction cap without EIP-8037), which for a
+priced request is further capped by the block gas limit and the caller's allowance at that
+gas (ALLOWANCE: gas -> what the fee payer's fee token balance buys)."
   (let ((g (req-gas request)))
     (cond (g (min g *rpc-gas-cap*))
           ((zerop price) *rpc-gas-cap*)
-          (t (internal-error (format nil "~A: capping the gas of a priced request by the caller's fee token allowance is not implemented yet" what))))))
+          (t (min (funcall allowance *rpc-gas-cap*) *rpc-gas-cap* (executor:block-env-gas-limit env))))))
 
-(defun fail-invalid (e on-invalid)
-  (multiple-value-bind (code message) (invalid-request-error (executor:execution-failure-reason e))
-    (if on-invalid (funcall on-invalid code message) (rpc-fail code message))))
+(defun allowance-fn (ctx request price env)
+  "Tempo's caller_gas_allowance for REQUEST in CTX as a function of the request's gas limit."
+  (lambda (gas)
+    (executor:caller-gas-allowance ctx (request-plist request (executor:call-block-world ctx) gas price env))))
 
-(defun request-runner (b state request what &key state-overrides block-overrides)
-  "Everything a request's executions share: (values run price env), RUN taking a gas limit
-and optional plist changes and executing REQUEST on a fresh overlay of STATE (overrides applied)."
-  (when (aa-request-p request)
-    (internal-error (format nil "~A: Tempo AA call requests are not converted to executor requests yet" what)))
+(defun fail-invalid (e on-invalid request env)
+  "Fail with the reference's error for the executor's rejection E of REQUEST in ENV, or hand
+ON-INVALID its (code message)."
+  (multiple-value-bind (code message data)
+      (let ((*invalid-context* (cons request env)))
+        (invalid-request-error (executor:execution-failure-reason e)))
+    (if on-invalid (funcall on-invalid code message) (rpc-fail code message data))))
+
+(defun request-runner (b state request &key state-overrides block-overrides)
+  "Everything a request's executions share: (values run price env allowance), RUN taking a gas
+limit and optional plist changes and executing REQUEST on a fresh overlay of STATE (overrides
+applied), ALLOWANCE the caller's gas allowance on such an overlay (see ALLOWANCE-FN)."
   (let* ((price (normalize-request request (or (getf block-overrides :base-fee) (header-base-fee b))))
          (env (call-env b block-overrides price)))
-    (values (lambda (gas &rest changes)
-              (let* ((ctx (executor:begin-call-block state (call-env b block-overrides price)
-                                                     :block-hash-fn (block-hash-fn)))
-                     (world (executor:call-block-world ctx)))
-                (apply-state-overrides world state-overrides)
-                (executor:call-request ctx (append changes (request-plist request world gas price)))))
-            price env)))
+    (flet ((overlay ()
+             (let ((ctx (executor:begin-call-block state (call-env b block-overrides price)
+                                                   :block-hash-fn (block-hash-fn))))
+               (apply-state-overrides (executor:call-block-world ctx) state-overrides)
+               ctx)))
+      (values (lambda (gas &rest changes)
+                (flet ((execute ()
+                         (let ((ctx (overlay)))
+                           (executor:call-request ctx (append changes (request-plist request (executor:call-block-world ctx)
+                                                                                     gas price env))))))
+                  (refine-halt (execute) #'execute)))
+              price env
+              (lambda (gas) (funcall (allowance-fn (overlay) request price env) gas))))))
+
+(defclass halt-op-tracer ()
+  ((op :initform nil :accessor halt-op))
+  (:documentation "Records the opcode a top-level frame halted on as an invalid opcode."))
+
+(defmethod clempo.evm:trace-step-end ((tr halt-op-tracer) frame pc op gas sp stack status)
+  (declare (ignore pc gas sp stack))
+  (when (and (eq status :invalid-opcode) (zerop (clempo.evm:frame-depth frame)))
+    (setf (halt-op tr) op)))
+
+(defun refine-halt (outcome rerun)
+  "OUTCOME with revm's halt for an invalid opcode, which names the opcode: InvalidFEOpcode
+for 0xFE, NotActivated for an opcode of a later fork, else OpcodeNotFound. The executor only
+says :INVALID-OPCODE, so RERUN (a thunk executing the request again on a fresh overlay) runs
+under a tracer that finds the opcode."
+  (when (eq (executor:tx-outcome-halt outcome) :invalid-opcode)
+    (let ((tr (make-instance 'halt-op-tracer)))
+      (let ((clempo.evm:*tracer* tr)) (funcall rerun))
+      (setf (executor:tx-outcome-halt outcome)
+            (let ((op (halt-op tr)))
+              (cond ((eql op #xfe) :invalid-fe-opcode)
+                    ((and op (clempo.tracing:opcode-name op)) :not-activated)
+                    (t :opcode-not-found))))))
+  outcome)
 
 (defun make-budget () (list *rpc-gas-cap*))
 
@@ -600,18 +860,19 @@ and optional plist changes and executing REQUEST on a fresh overlay of STATE (ov
 under TRACER when given. Returns (values tx-outcome gas ctx); an invalid request calls
 ON-INVALID with (code message), or fails with reth's error. BUDGET (MAKE-BUDGET) is the gas
 the calls of one eth_callMany, debug_traceCallMany or trace_callMany share (reth
-CallManyBudget): a call gets at most what is left, and runs out of it with an error."
-  (when (aa-request-p request)
-    (internal-error (format nil "~A: Tempo AA call requests are not converted to executor requests yet" what)))
-  (let* ((price (normalize-request request (or (getf block-overrides :base-fee) (header-base-fee b))))
+CallManyBudget): a call gets at most what is left, and runs out of it with an error. WHAT names
+the method."
+  (declare (ignore what))
+  (let* ((fresh (null ctx))
+         (price (normalize-request request (or (getf block-overrides :base-fee) (header-base-fee b))))
          (env (call-env b block-overrides price))
          (ctx (or ctx (executor:begin-call-block state env :block-hash-fn (block-hash-fn))))
          (world (executor:call-block-world ctx))
-         (gas (request-gas request price env what))
+         (gas (progn (apply-state-overrides world state-overrides)
+                     (request-gas request price env (allowance-fn ctx request price env))))
          (capped (and budget (> gas (car budget)))))
     (when capped (setf gas (car budget)))
-    (apply-state-overrides world state-overrides)
-    (flet ((execute () (executor:call-request ctx (request-plist request world gas price))))
+    (flet ((execute () (executor:call-request ctx (request-plist request world gas price env))))
       (let ((outcome (handler-case (if tracer
                                        (clempo.tracing:with-tracer (tracer world) (execute))
                                        (execute))
@@ -619,7 +880,13 @@ CallManyBudget): a call gets at most what is left, and runs out of it with an er
                          (when (and capped (string= (executor:execution-failure-reason e)
                                                     "intrinsic gas too low"))
                            (budget-exceeded))
-                         (fail-invalid e on-invalid)))))
+                         (fail-invalid e on-invalid request env)))))
+        (when (and fresh (not tracer))
+          (refine-halt outcome (lambda ()
+                                 (let* ((c (executor:begin-call-block state env :block-hash-fn (block-hash-fn)))
+                                        (w (executor:call-block-world c)))
+                                   (apply-state-overrides w state-overrides)
+                                   (executor:call-request c (request-plist request w gas price env))))))
         (when budget
           (let ((halt (executor:tx-outcome-halt outcome)))
             (when (and capped halt (search "OUT-OF-GAS" (symbol-name halt)))
@@ -650,18 +917,19 @@ CallManyBudget): a call gets at most what is left, and runs out of it with an er
   "reth estimate_gas_at: the gas REQUEST needs on the state after BLOCK, as an integer."
   (multiple-value-bind (b state)
       (prepare-call request block "eth_estimateGas" :state-overrides state-overrides :block-overrides block-overrides)
-    (multiple-value-bind (run price env)
-        (request-runner b state request "eth_estimateGas" :state-overrides state-overrides
-                                                          :block-overrides block-overrides)
-      (unless (zerop price)
-        (internal-error "eth_estimateGas: the caller's fee token allowance for priced requests is not implemented yet"))
+    (multiple-value-bind (run price env allowance)
+        (request-runner b state request :state-overrides state-overrides :block-overrides block-overrides)
       (let ((max-gas (min (or (tx-gas-cap env) +u64-max+) (executor:block-env-gas-limit env) *rpc-gas-cap*)))
         (handler-case
             (executor:estimate-gas run :max-gas-limit max-gas :request-gas (req-gas request)
                                        :price-p (or (req-gas-price request) (req-max-fee request))
                                        :basic-transfer-p (and (null state-overrides)
-                                                              (basic-transfer-p request state)))
-          (executor:invalid-transaction (e) (fail-invalid e nil))
+                                                              (basic-transfer-p request state))
+                                       ;; the transaction env's gas: the request's, else the block's
+                                       :allowance (unless (zerop price)
+                                                    (funcall allowance (or (req-gas request)
+                                                                           (executor:block-env-gas-limit env)))))
+          (executor:invalid-transaction (e) (fail-invalid e nil request env))
           (executor:estimate-failure (e)
             (let ((gas (executor:estimate-failure-gas-limit e))
                   (outcome (executor:estimate-failure-outcome e)))
@@ -683,14 +951,16 @@ CallManyBudget): a call gets at most what is left, and runs out of it with an er
   "the access list a call touches and its gas"
   (multiple-value-bind (b state)
       (prepare-call request block "eth_createAccessList" :state-overrides state-overrides)
-    (multiple-value-bind (run price env)
-        (request-runner b state request "eth_createAccessList" :state-overrides state-overrides)
-      (let ((gas (request-gas request price env "eth_createAccessList")))
+    (multiple-value-bind (run price env allowance)
+        (request-runner b state request :state-overrides state-overrides)
+      (let ((gas (request-gas request price env allowance)))
         (handler-case
             (multiple-value-bind (list gas-used outcome)
                 (executor:create-access-list (lambda (plist)
                                                (funcall run gas :access-list (getf plist :access-list)))
-                                             (list :access-list (access-list-plist request)))
+                                             (list :access-list (access-list-plist request))
+                                             :excluded (authorization-authorities
+                                                        request (executor:block-env-chain-id env)))
               (let ((error (and (not (executor:tx-outcome-status outcome))
                                 (handler-case (progn (call-result outcome gas "eth_createAccessList") nil)
                                   (rpc-error (e) (error-text e))))))
@@ -701,7 +971,7 @@ CallManyBudget): a call gets at most what is left, and runs out of it with an er
                                             'simple-vector)
                        "gasUsed" (quantity->hex gas-used)
                        (when error (list "error" error)))))
-          (executor:invalid-transaction (e) (fail-invalid e nil)))))))
+          (executor:invalid-transaction (e) (fail-invalid e nil request env)))))))
 
 (defun call-many (bundles context state-overrides what &key tracer render)
   "reth call_many: the bundles' requests run one after another on one overlay at the

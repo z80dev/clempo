@@ -47,6 +47,32 @@ runs transaction INDEX as the block ran it."
   "Run REQUEST in CTX as eth_call does: a TX-OUTCOME, or INVALID-TRANSACTION."
   (apply #'execute-request ctx request *call-flags*))
 
+(defun caller-gas-allowance (ctx request)
+  "Tempo's caller_gas_allowance (crates/node/src/rpc/mod.rs) for REQUEST in CTX: the gas the
+fee payer's fee token balance buys at the request's max fee per gas. When no fallback token
+covers the request's gas limit the largest candidate balance stands in, as Tempo takes the
+InsufficientBalance error's available amount. Every read is rolled back (no slot stays warm)."
+  (let* ((*tx-index* (ctx-index ctx)) (*ctx* ctx)
+         (world (ctx-world ctx))
+         (mark (state:checkpoint world)))
+    (unwind-protect
+         (with-block-context (ctx)
+           (let* ((v (request-txv request *tx-index*))
+                  (payer (txv-fee-payer v))
+                  (price (txv-max-fee-per-gas v))
+                  (balance
+                    (flet ((balance (token)
+                             (with-protocol-storage (:static t) (clempo.tip20:balance-of token payer))))
+                      (handler-case
+                          (balance (resolve-fee-token v payer (calc-gas-balance-spending (txv-gas-limit v) price)))
+                        (invalid-transaction ()
+                          (reduce #'max (mapcar #'balance (pc:fallback-fee-tokens forks:*spec*))
+                                  :initial-value 0))))))
+             (if (zerop price)
+                 0
+                 (min +max-u64+ (floor (* balance +gas-price-scaling+) price)))))
+      (state:rollback world mark))))
+
 ;;; eth_estimateGas
 
 (defconstant +min-transaction-gas+ 21000)
