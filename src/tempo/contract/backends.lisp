@@ -42,26 +42,39 @@ code when it had none. Returns (values previous-commitment account-was-empty-p).
 
 (define-constant +storage-credits-address+ #x1060000000000000000000000000000000000000)
 
-(defclass metered-storage (storage-backend)
-  ((host :initarg :host :reader metered-storage-host)
-   (limit :initarg :limit :initform (1- (ash 1 64)) :accessor metered-storage-limit)
-   (spent :initform 0 :accessor metered-storage-spent)
-   (refunded :initform 0 :accessor metered-storage-refunded)
-   (static :initarg :static :initform nil :reader metered-static)
-   (tip1060 :initarg :tip1060 :initform :default :accessor metered-tip1060)
-   (minting :initform t :accessor metered-minting)
-   (non-creditable :initarg :non-creditable :initform nil :accessor non-creditable-slots
-                   :documentation "NIL or a function (owner slot) -> true for a slot whose
-clear must not mint a storage credit (NonCreditableSlots)."))
-  (:documentation "The backend precompiles run on inside the EVM: every SLOAD, SSTORE, account
-load, log and code write is charged exactly as EvmPrecompileStorageProvider charges it,
-including T4's pre-charging, T12's stipend guard and TIP-1060 storage credits."))
+;;; A structure, not a class: one is made per precompile call and per protocol call, and its
+;;; slots are read on every SLOAD and charge.
+(defstruct (metered-storage (:constructor %make-metered-storage
+                                (host limit static tip1060 non-creditable))
+                            (:copier nil))
+  "The backend precompiles run on inside the EVM: every SLOAD, SSTORE, account load, log and
+code write is charged exactly as EvmPrecompileStorageProvider charges it, including T4's
+pre-charging, T12's stipend guard and TIP-1060 storage credits."
+  host
+  (limit (1- (ash 1 64)))
+  (spent 0)
+  (refunded 0)
+  (static nil :read-only t)
+  (tip1060 :default)
+  (minting t)
+  ;; NIL or a function (owner slot) -> true for a slot whose clear must not mint a storage
+  ;; credit (NonCreditableSlots).
+  (non-creditable nil))
+
+(declaim (inline metered-static metered-tip1060 (setf metered-tip1060) metered-minting
+                 (setf metered-minting) non-creditable-slots (setf non-creditable-slots)))
+(defun metered-static (b) (metered-storage-static b))
+(defun metered-tip1060 (b) (metered-storage-tip1060 b))
+(defun (setf metered-tip1060) (v b) (setf (metered-storage-tip1060 b) v))
+(defun metered-minting (b) (metered-storage-minting b))
+(defun (setf metered-minting) (v b) (setf (metered-storage-minting b) v))
+(defun non-creditable-slots (b) (metered-storage-non-creditable b))
+(defun (setf non-creditable-slots) (v b) (setf (metered-storage-non-creditable b) v))
 
 (defun make-metered-storage (host &key (gas-limit (1- (ash 1 64))) static (tip1060 t) non-creditable)
   "A metered backend over HOST with GAS-LIMIT gas. TIP1060 NIL is
 enter_evm_without_tip1060_accounting."
-  (make-instance 'metered-storage :host host :limit gas-limit :static static
-                                  :tip1060 tip1060 :non-creditable non-creditable))
+  (%make-metered-storage host gas-limit static tip1060 non-creditable))
 
 (defun tip1060-enabled-p (b)
   (and (metered-tip1060 b) (spec>= :t7)))
