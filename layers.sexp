@@ -11,8 +11,8 @@
  (:dir "io" :io t)
  (:dir "crypto")
  (:dir "codec")
+ (:dir "trie")                              ; before types: tx/receipt roots are tries
  (:dir "types")
- (:dir "trie")
  (:dir "store" :io t)
  (:dir "state")
  (:dir "evm")

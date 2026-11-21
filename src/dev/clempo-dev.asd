@@ -1,4 +1,4 @@
-;;; Every .lisp file in this directory is a component, main.lisp first, the rest in
+;;; Every .lisp file in this directory is a component, main.lisp and score.lisp first, the rest in
 ;;; alphabetical order, so command files can be added without editing this file.
 
 (defsystem "clempo-dev"
@@ -10,4 +10,4 @@
                        (names (sort (mapcar #'pathname-name (directory (merge-pathnames "*.lisp" here)))
                                     #'string<)))
                   (mapcar (lambda (n) (list :file n))
-                          (cons "main" (remove "main" names :test #'string=)))))
+                          (list* "main" "score" (remove-if (lambda (n) (member n (quote ("main" "score")) :test (function string=))) names)))))
