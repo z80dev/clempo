@@ -11,8 +11,13 @@
                 (log-line "sim ~A: certificate verifier rejected the chain: ~A" name e)
                 nil)))
          (secs (/ (- (get-internal-real-time) t0) (float internal-time-units-per-second)))
+         (ceremonies (clempo.sim:sim-result-ceremonies r))
+         (concluded (count-if #'cdr ceremonies))
+         ;; a pass needs 3 epochs, a certified chain and every reshare concluded
          (ok (and c (eq (clempo.sim:sim-result-summary r) :done)
-                  (>= (clempo.sim:sim-result-epochs r) 3))))
+                  (>= (clempo.sim:sim-result-epochs r) 3)
+                  (>= (length ceremonies) 3)
+                  (= concluded (length ceremonies)))))
     (log-line "sim ~A: ~A, finalized height ~D (~D epochs), ~D certificates verified, ~D messages (~D dropped), ~,1Fs simulated in ~,1Fs"
               name (clempo.sim:sim-result-summary r) (clempo.sim:sim-result-finalized-height r)
               (clempo.sim:sim-result-epochs r)
@@ -24,6 +29,7 @@
              "height" (clempo.sim:sim-result-finalized-height r)
              "epochs" (clempo.sim:sim-result-epochs r)
              "certificates" (if c (clempo.consensus:certification-certificates c) 0)
+             "ceremonies" (format nil "~D/~D" concluded (length ceremonies))
              "proposers" (coerce (clempo.sim:sim-result-proposers r) 'simple-vector)
              "messages" (clempo.sim:sim-result-messages r)
              "dropped" (clempo.sim:sim-result-dropped r)
