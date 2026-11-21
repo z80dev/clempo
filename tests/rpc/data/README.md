@@ -9,3 +9,10 @@ depend on chain state.
 `eth_getBlockAccessListRaw` (`raw`) answers for mainnet block 12,290,227 (`0xbb88b3`: a
 pre-execution marker code change, storage changes and reads, the system-call accounts),
 recorded on 2026-11-21 over HTTP from a Tempo `568b4fb425` mainnet archive node.
+
+`fill-simulation.jsonl`: `eth_fillTransaction` requests carrying `configurableAccountSimulation`,
+`keyAuthorizationSimulation`, key authorizations signed by configurable witnesses and their
+error cases, one request per line with the reference's answer (the smaller answers of the
+`gaps` RPC corpus suite). Every request gives its gas, nonce, nonce key and fees, so the answers
+depend only on the chain id. Recorded on 2026-11-21 over HTTP from a Tempo `568b4fb425` mainnet
+archive node.

@@ -33,7 +33,7 @@ missing piece.")
            #:estimate-request-gas #:copy-call-request #:req-valid-before #:req-valid-after
            #:req-fee-payer-signature #:req-tempo-authorizations #:req-key-authorization
            #:req-account-simulation #:req-key-authorization-simulation #:req-key-type
-           #:aa-sim-transaction))
+           #:aa-sim-transaction #:req-key-id #:mock-webauthn-signature #:mock-primitive-signature))
 
 (in-package #:clempo.rpc.calls)
 
