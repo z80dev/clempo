@@ -2,7 +2,8 @@
   (:use #:cl #:clempo.base)
   (:documentation "Keccak-256 (the pre-SHA3 padding Ethereum uses).")
   (:export #:keccak256 #:keccak256-integer #:keccak256-concat
-           #:make-keccak #:keccak-update #:keccak-final))
+           #:make-keccak #:keccak-update #:keccak-final
+           #:copy-keccak-into #:keccak-digest))
 
 (in-package #:clempo.keccak)
 
@@ -145,3 +146,17 @@ within a round: theta, rho, pi and chi become straight-line register code."
 
 (defun keccak256-integer (data &key (start 0) (end (length data)))
   (octets->integer (keccak256 data :start start :end end)))
+
+(defun copy-keccak-into (from to)
+  "Overwrite TO with FROM's absorbed state. Returns TO."
+  (declare (type keccak from to) #.*hot*)
+  (replace (keccak-state to) (keccak-state from))
+  (replace (keccak-buffer to) (keccak-buffer from))
+  (setf (keccak-fill to) (keccak-fill from))
+  to)
+
+(defun keccak-digest (k &optional (scratch (%make-keccak)))
+  "The digest of everything absorbed into K so far, leaving K usable (running MACs).
+SCRATCH is overwritten; pass a reusable one to avoid allocating per call."
+  (declare (type keccak k scratch))
+  (keccak-final (copy-keccak-into k scratch)))

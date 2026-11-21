@@ -21,3 +21,10 @@
         (loop for pos from 0 below n by 50
               do (keccak-update k data :start pos :end (min n (+ pos 50))))
         (is-equalp (keccak256 data) (keccak-final k) "length ~D" n)))))
+
+(deftest keccak-digest-is-non-destructive ()
+  (let ((k (make-keccak)) (scratch (make-keccak)) (a (string->octets "running")) (b (string->octets " mac")))
+    (keccak-update k a)
+    (is-equalp (keccak256 a) (keccak-digest k scratch))
+    (keccak-update k b)
+    (is-equalp (keccak256 (octets-concat a b)) (keccak-digest k scratch))))
