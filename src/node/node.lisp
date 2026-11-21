@@ -7,13 +7,14 @@
                     (#:executor #:clempo.executor) (#:blocks #:clempo.blocks)
                     (#:trie #:clempo.trie) (#:workers #:clempo.node.workers)
                     (#:headers #:clempo.headers) (#:repl #:clempo.node.repl)
-                    (#:eth-source #:clempo.eth-source))
+                    (#:eth-source #:clempo.eth-source) (#:history #:clempo.history))
   (:export #:run-node #:main #:*node-backend* #:call-with-block-source))
 
 (in-package #:clempo.node)
 
 (defvar *node-backend* nil "Live backend bound in the node's socket REPL.")
 (define-constant +recent-count+ 256)
+(define-constant +history-flush-blocks+ 100000)
 
 (defstruct recent-block
   number raw receipts receipts-known-p transaction-hashes)
@@ -22,7 +23,8 @@
   ((store :initarg :store :reader node-store)
    (chain :initarg :chain :reader node-chain)
    (recent :initform (make-array +recent-count+ :initial-element nil) :reader node-recent)
-   (server :initform nil :accessor node-server)))
+   (server :initform nil :accessor node-server)
+   (history-writer :initform nil :accessor node-history-writer)))
 
 (defun node-db (node) (store:store-db (node-store node)))
 
@@ -86,7 +88,13 @@
                  (error 'executor:block-mismatch :number number :field field :fields fields
                                                  :expected expected :actual actual :result result)))
              (let ((entry (recent-entry block (executor:block-result-receipts result))))
-               (store:store-commit-block datastore (store:db-commit-block db number (blocks:block-hash block)))
+               (let ((diff (store:db-commit-block db number (blocks:block-hash block)))
+                     (h (node-history-writer node)))
+                 (store:store-commit-block datastore diff)
+                 (when h
+                   (history:history-record-block h db diff)
+                   (when (zerop (mod number +history-flush-blocks+))
+                     (history:history-flush h :db db))))
                (note-recent node entry)
                (setf (backend:archive-backend-head node) number)))
         (when (store:db-block-open-p db) (store:db-revert-block db))))
@@ -139,6 +147,23 @@
                                   :parallel-map mapper))
    :threads threads :name "trie subtree hash"))
 
+(defun start-history-writer (node)
+  "Append followed blocks to the backend's history when it ends exactly at the stored head;
+a gap would make later versions shadow unrecorded ones. Returns the history or NIL."
+  (let* ((h (backend:backend-history node))
+         (db (node-db node))
+         (number (store:db-number db)))
+    (cond ((null h) nil)
+          ((eql (history:history-height h) number)
+           (history:history-start-writer h (1+ number) db)
+           (setf (node-history-writer node) h)
+           (log-node "node: appending followed blocks to history ~A from ~D"
+                     (history:history-dir h) (1+ number))
+           h)
+          (t (log-node "node: history ~A ends at ~A, not the stored head ~D; not appending"
+                       (history:history-dir h) (history:history-height h) number)
+             nil))))
+
 (defun run-node (datadir &key (upstream (rpc:local-rpc-url))
                            (archive-dir (archive:archive-dir))
                            (rpc-port 8545) (bind "127.0.0.1")
@@ -162,7 +187,8 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
     (let* ((datastore (trie:call-with-trie-hashing
                        (lambda () (store:open-store dir :interval checkpoint-interval :log #'log-node))))
            (rpc-server nil)
-           (repl-server nil))
+           (repl-server nil)
+           (history-writer nil))
       (unwind-protect
            (let* ((head (validate-head (store:store-db datastore) upstream))
                   (node (backend:make-archive-backend :class 'node-backend :store datastore
@@ -181,6 +207,7 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
                   (max-lag 0)
                   (live-base nil))
              (prime-head-block node head upstream)
+             (setf history-writer (start-history-writer node))
              (setf rpc-server (server:start-server :host bind :port rpc-port :backend node)
                    (node-server node) rpc-server)
              (log-node "node: JSON-RPC listening on ~A:~D; stored head ~D, upstream tip ~D" bind
@@ -222,7 +249,9 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
         (unwind-protect
              (unwind-protect (when repl-server (repl:stop-repl repl-server))
                (when rpc-server (server:stop-server rpc-server)))
-          (store:close-store datastore))))))
+          (unwind-protect
+               (when history-writer (history:history-flush history-writer :db (store:store-db datastore)))
+            (store:close-store datastore)))))))
 
 (defun call-with-block-source (source function &key peers)
   "Run FUNCTION with the selected raw block transport, or NIL for RPC."
