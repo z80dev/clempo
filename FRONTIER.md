@@ -6,7 +6,7 @@
 | R1 Decode | mainnet 640/640 (T0..T13), moderato 33/33 | 1edd52f | 2026-11-21 |
 | R2 Genesis | yes: matching state roots and block hashes on mainnet and Moderato | `ec20b6b` | 2026-11-21 |
 | R3 Replay | 3,210 (every block 1..3210 matches gas, receipts root, bloom, state root; stops at 3211, the first user transaction, until the EVM lands) | `b74f4d8` | 2026-11-21 |
-| R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `b0b729d` | 2026-11-21 |
+| R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `750c66b` | 2026-11-21 |
 | R3p Precompiles | - | | |
 | R4 Follow | - | | |
 | R5 RPC | 60/132 methods, 5,368/8,221 cases; 55/156 reference methods served (blocks 3,890/3,890, logs 366/366, envelope 50/50; state, calls and traces wait on the executor) | rpc slice 3 | 2026-11-21 |
@@ -29,7 +29,7 @@ CLEMPO_BUILD=release sbcl --noinform --non-interactive --load scripts/build.lisp
             (time (clempo.keccak:keccak256 big)))'
 ```
 
-R3e = 61,903/61,903 (b0b729d): `bin/clempo-dev score -rung R3e -json` (or
+R3e = 61,903/61,903 (750c66b): `bin/clempo-dev score -rung R3e -json` (or
 `bin/clempo-dev statetest ~/cache/clempo/fixtures/fixtures/state_tests/`) runs every
 execution-spec-tests v5.4.0 `fixtures_develop` state test for Istanbul..Osaka (pre-Istanbul
 cases skipped, as goempo) on 12 threads in 33.5 s: Istanbul 608, Berlin 1,249, London 1,504,
