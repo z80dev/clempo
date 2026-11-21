@@ -149,12 +149,20 @@ Returns a REPLAY-RESULT."
                      do (store:db-set-storage db address (hex->integer slot) (hex->integer value)))))))
 
 (defun heal-block (db block traces &key (chain *chain*))
-  "Inside the open block: apply our pre-execution system changes for BLOCK, then the
-reference's per-transaction prestate diffs TRACES (the parsed debug_traceBlockByNumber
-result, a vector of {result: {pre, post}})."
-  (let ((env (header-block-env (blocks:block-header block) :chain chain)))
-    (forks:with-spec ((block-env-spec env))
-      (apply-pre-execution-changes db env block))
+  "Inside the open block: run BLOCK's pre-execution system changes (fork markers, the
+EIP-4788/2935 calls, zone installs) as we execute them, then the reference's per-transaction
+prestate diffs TRACES (the parsed debug_traceBlockByNumber result, a vector of {result: {pre,
+post}}), then the post-execution committee call. The system calls are not in the traces."
+  (let* ((*chain* chain)
+         (env (header-block-env (blocks:block-header block) :chain chain))
+         (ctx (begin-block db env :block block :open nil)))
+    (with-block-context (ctx)
+      (write-changes db (state:drain-changes (ctx-world ctx))))
     (loop for trace across traces
           for result = (clempo.json:jget trace "result")
-          do (apply-prestate-diff db (clempo.json:jget result "pre") (clempo.json:jget result "post")))))
+          do (apply-prestate-diff db (clempo.json:jget result "pre") (clempo.json:jget result "post")))
+    ;; A fresh world reads the healed state for the post-execution call.
+    (setf (ctx-world ctx) (state:make-world db))
+    (with-block-context (ctx)
+      (apply-committee-call ctx)
+      (write-changes db (state:drain-changes (ctx-world ctx))))))
