@@ -1,0 +1,335 @@
+(defpackage #:clempo.rpc.state
+  (:use #:cl #:clempo.base #:clempo.rpc #:clempo.rpc.render)
+  (:local-nicknames (#:json #:clempo.json) (#:serde #:clempo.serde) (#:chain #:clempo.rpc.chain)
+                    (#:store #:clempo.store) (#:trie #:clempo.trie))
+  (:documentation "The eth and debug methods that read the world state at a block: code,
+storage, nonces, accounts, account info and Merkle proofs (reth's EthState over a state
+provider). A block id selects a state the way reth's state_by_block_id does; the state itself
+comes from the backend (clempo.rpc.chain:backend-state), which serves only the states it keeps.
+A state it does not keep is answered with an internal error naming the block, never a guess.")
+  (:export #:*eth-proof-window* #:block-id-number #:block-id-text #:header-not-found
+           #:state-at #:state-block #:state-unavailable #:ensure-within-proof-window
+           #:storage-key #:storage-key-value #:landed-function))
+
+(in-package #:clempo.rpc.state)
+
+(defparameter *eth-proof-window* 0
+  "reth's eth_proof_window (DEFAULT_ETH_PROOF_WINDOW): how many blocks below the head
+eth_getProof, eth_getMultiProof and eth_getAccount still answer.")
+
+(defconstant +max-proof-slots+ 1024 "reth DEFAULT_MAX_PROOF_SLOTS")
+(defconstant +max-storage-values-slots+ 1024 "reth DEFAULT_MAX_STORAGE_VALUES_SLOTS")
+
+(defun landed-function (package name what)
+  "The function PACKAGE::NAME, which another layer is adding; until it lands, WHAT fails
+with an internal error saying so."
+  (let* ((p (find-package package))
+         (s (and p (find-symbol name p))))
+    (if (and s (fboundp s))
+        (symbol-function s)
+        (internal-error (format nil "~A is not available: ~A:~A has not landed yet"
+                                what package (string-downcase name))))))
+
+;;; Block ids (as clempo.rpc's BLOCK-ID reader returns them) and their states
+
+(defun hash-id-p (id) (and (consp id) (eq (first id) :hash)))
+
+(defun block-id-text (id)
+  "alloy's Display of a BlockId, as reth's \"block not found\" error prints it."
+  (cond ((hash-id-p id)
+         (format nil "~:[~;canonical ~]hash ~A" (getf (cddr id) :require-canonical) (hex32 (second id))))
+        ((integerp id) (q id))
+        (t (string-downcase (string id)))))
+
+(defun header-not-found (id)
+  (rpc-fail -32001 (format nil "block not found: ~A" (block-id-text id))))
+
+(defun block-id-number (id)
+  "The block number ID selects (NIL for an unknown hash); tags follow clempo.rpc.eth, numbers
+above the head are returned as they are."
+  (cond ((null id) chain:*head*)
+        ((hash-id-p id) (chain:backend-block-number chain:*backend* (second id)))
+        ((integerp id) id)
+        (t (case id
+             ((:latest :safe :finalized :pending) chain:*head*)
+             (:earliest 0)))))
+
+(define-condition state-unavailable (rpc-error) ()
+  (:documentation "The backend keeps no state for the requested block."))
+
+(defun state-unavailable (number)
+  (error 'state-unavailable
+         :code +internal-error+
+         :message (format nil "state at block ~D is not available: this node keeps only the state of its latest block"
+                          number)))
+
+;;; The first blocks' states, rebuilt from genesis. Early mainnet blocks are nearly empty, so a
+;;; state the backend does not keep near genesis is recomputed by executing the archived blocks
+;;; on the genesis allocation, each block checked against its header (state root included).
+
+(defparameter *replay-history-limit* 1024
+  "Blocks up to this number may be rebuilt from genesis when the backend keeps no state.")
+
+(defvar *replayed-states* (make-hash-table :test 'eq :weakness :key :synchronized t)
+  "backend -> recently rebuilt (number . statedb), newest first; the databases are read-only.")
+(defvar *replay-lock* (sb-thread:make-mutex :name "replayed states"))
+
+(defun replay-chain ()
+  "The executor chain whose genesis the current backend starts from, or NIL."
+  (let ((chain clempo.executor:*chain*))
+    (when (eql (chain:backend-chain-id chain:*backend*)
+               (clempo.chainspec:chain-id (clempo.chainspec:load-chainspec chain)))
+      chain)))
+
+(defun rebuild-state (n chain)
+  "A fresh state database after block N of CHAIN: genesis, then blocks 1..N from the backend."
+  (let ((db (clempo.executor:genesis-db :chain chain)))
+    (loop for k from 1 to n
+          do (let* ((raw (or (chain:backend-block-raw chain:*backend* k) (return-from rebuild-state nil)))
+                    (block (clempo.blocks:decode-block raw))
+                    (header (clempo.blocks:block-header block))
+                    (result (clempo.executor:execute-block db block :chain chain))
+                    (bad (clempo.executor:block-mismatches result header)))
+               (when bad
+                 (store:db-revert-block db)
+                 (internal-error (format nil "state at block ~D is not available: re-executing block ~D from genesis disagrees with its header (~(~A~))"
+                                         n k (first (first bad)))))
+               (store:db-commit-block db k (clempo.blocks:block-hash block))))
+    db))
+
+(defun replayed-state (n)
+  "The state after block N rebuilt from genesis, or NIL when N is beyond the replay limit."
+  (let ((chain (and (<= n *replay-history-limit*) (replay-chain))))
+    (when chain
+      (sb-thread:with-mutex (*replay-lock*)
+        (let ((recent (gethash chain:*backend* *replayed-states*)))
+          (or (cdr (assoc n recent))
+              (let ((db (rebuild-state n chain)))
+                (when db
+                  (setf (gethash chain:*backend* *replayed-states*)
+                        (subseq (cons (cons n db) recent) 0 (min 8 (1+ (length recent))))))
+                db)))))))
+
+(defun state-block (id)
+  "The number of the block whose state ID selects; an unknown block fails with \"block not
+found\" as reth's state_by_block_id does."
+  (let ((n (block-id-number id)))
+    (when (or (null n) (> n chain:*head*)) (header-not-found (or id :latest)))
+    n))
+
+(defun state-at (id)
+  "The state database after the block ID selects (see STATE-BLOCK); a known block the backend
+keeps no state for, and that is too far from genesis to rebuild, fails with STATE-UNAVAILABLE.
+Returns (values statedb number)."
+  (let ((n (state-block id)))
+    (values (or (chain:backend-state chain:*backend* n) (replayed-state n) (state-unavailable n)) n)))
+
+(defun ensure-within-proof-window (id)
+  "reth ensure_within_proof_window: the block's distance below the head must not exceed the
+proof window."
+  (let ((n (block-id-number id)))
+    (unless n (header-not-found id))
+    (when (> (- chain:*head* (min n chain:*head*)) *eth-proof-window*)
+      (rpc-fail 4444 "distance to target block exceeds maximum proof window"))))
+
+;;; Reading the state database
+
+(defun account-fields (db address)
+  "(values exists nonce balance code-hash-octets storage-root-octets)"
+  (let ((a (store:db-account db address)))
+    (if a
+        (values t (store:account-nonce a) (store:account-balance a) (store:account-code-hash a)
+                (store:account-storage-root a))
+        (values nil 0 0 trie:+empty-code-hash+ trie:+empty-trie-root+))))
+
+(defun account-code (db address)
+  (multiple-value-bind (exists nonce balance code-hash) (account-fields db address)
+    (declare (ignore exists nonce balance))
+    (store:db-code db code-hash)))
+
+(defun code-by-hash (db hash)
+  "The code whose hash is the octets HASH, or NIL. Code is never removed from the store, as
+reth's Bytecodes table, so the answer does not depend on the block."
+  (if (octets= hash trie:+empty-code-hash+)
+      (make-octets 0)
+      (handler-case (store:db-code db hash) (simple-error () nil))))
+
+;;; Storage keys: alloy-serde JsonStorageKey
+
+(defstruct (storage-key (:constructor make-storage-key (value full-p)))
+  "A slot as the caller wrote it: FULL-P (63 or 64 digits) echoes as 32 bytes, otherwise as a
+quantity."
+  (value 0 :type integer) full-p)
+
+(defun storage-key-json (k)
+  (if (storage-key-full-p k)
+      (integer->hex (storage-key-value k) :bytes 32)
+      (q (storage-key-value k))))
+
+(defparameter +storage-key-expected+ "a hex string of at most 64 digits")
+
+(defun parse-storage-key-string (src s)
+  (let ((digits (if (and (>= (length s) 2) (char= (char s 0) #\0) (char-equal (char s 1) #\x)) (subseq s 2) s)))
+    (cond ((> (length digits) 64)
+           (serde:serde-fail-here src "invalid length ~D, expected ~A" (length digits) +storage-key-expected+))
+          ((notevery (lambda (c) (digit-char-p c 16)) digits)
+           (serde:serde-fail-here src "invalid value: string ~A, expected ~A"
+                                  (serde:rust-debug-string s) +storage-key-expected+))
+          (t (make-storage-key (if (zerop (length digits)) 0 (parse-integer digits :radix 16))
+                               (>= (length digits) 63))))))
+
+(defparam storage-key (src) "alloy-serde JsonStorageKey: up to 64 hex digits (0x optional) or a u64"
+  (case (serde:peek-kind src)
+    (:string (parse-storage-key-string src (serde:read-string src)))
+    (:number (let ((n (serde:read-number src)))
+               (if (and (integerp n) (<= 0 n +u64-max+))
+                   (make-storage-key n nil)
+                   (serde:serde-fail-here src "invalid type: ~A, expected ~A"
+                                          (if (integerp n) (format nil "integer `~D`" n)
+                                              (format nil "floating point `~A`" (clempo.serde::rust-float n)))
+                                          +storage-key-expected+))))
+    (t (serde:invalid-type src +storage-key-expected+))))
+
+(defparam storage-keys (src) "Vec<JsonStorageKey>"
+  (let ((keys '()))
+    (serde:do-array (i src) (push (read-param 'storage-key src) keys))
+    (nreverse keys)))
+
+(defun parse-address-key (src s)
+  "An Address map key (FixedBytes<20> from a str), failing after the key as serde_json does."
+  (let ((h (if (and (>= (length s) 2) (char= (char s 0) #\0) (char-equal (char s 1) #\x)) (subseq s 2) s)))
+    (cond ((oddp (length h)) (serde:serde-fail-after-key src "odd number of digits"))
+          ((/= (length h) 40) (serde:serde-fail-after-key src "invalid string length"))
+          (t (let ((bad (position-if-not (lambda (c) (digit-char-p c 16)) h)))
+               (when bad
+                 (serde:serde-fail-after-key src "invalid character '~A' at position ~D" (string (char h bad)) bad))
+               (parse-integer h :radix 16))))))
+
+(defparam storage-requests (src) "HashMap<Address, Vec<JsonStorageKey>>: ((address . keys) ...)"
+  (let ((out '()))
+    (serde:do-object (key src)
+      (let ((a (parse-address-key src key)))
+        (setf out (cons (cons a (read-param 'storage-keys src)) (remove a out :key #'car)))))
+    (nreverse out)))
+
+(defparam proof-targets (src) "Vec<(Address, Vec<B256>)>: ((address . slot-octets-list) ...)"
+  (let ((out '()))
+    (serde:do-array (i src)
+      (unless (eq (serde:peek-kind src) :array) (serde:invalid-type src "a tuple of size 2"))
+      (let ((address nil) (slots '()) (n 0))
+        (serde:do-array (j src :expected "a tuple of size 2")
+          (case j
+            (0 (setf address (read-param 'address src)))
+            (1 (serde:do-array (k src) (push (read-param 'hash src) slots)))
+            (t (serde:peek src)
+               (incf (serde:src-pos src))
+               (serde:serde-fail-here src "trailing characters")))
+          (setf n (1+ j)))
+        (when (< n 2) (serde:serde-fail-here src "invalid length ~D, expected a tuple of size 2" n))
+        (push (cons address (nreverse slots)) out)))
+    (nreverse out)))
+
+;;; Proofs: the store's proof readers (ExecutorAgent's clempo.store) over the committed tries.
+
+(defun account-proof (db address)
+  (funcall (landed-function "CLEMPO.STORE" "DB-ACCOUNT-PROOF" "eth_getProof")
+           db address))
+
+(defun storage-proofs (db address slots)
+  (if slots
+      (funcall (landed-function "CLEMPO.STORE" "DB-STORAGE-PROOF" "eth_getProof")
+               db address slots)
+      '()))
+
+(defun proof-json (db address keys)
+  "alloy EIP1186AccountProofResponse for ADDRESS with storage KEYS (storage-key structs)."
+  (multiple-value-bind (exists nonce balance code-hash storage-root) (account-fields db address)
+    (declare (ignore exists))
+    (let ((proofs (storage-proofs db address (mapcar #'storage-key-value keys)))
+          (nodes (lambda (list) (map 'simple-vector #'hexbytes list))))
+      (json:jobject "address" (addr address)
+                    "balance" (q balance)
+                    "codeHash" (hex32 code-hash)
+                    "nonce" (q nonce)
+                    "storageHash" (hex32 storage-root)
+                    "accountProof" (funcall nodes (account-proof db address))
+                    "storageProof"
+                    (map 'simple-vector
+                         (lambda (k proof)
+                           (json:jobject "key" (storage-key-json k)
+                                         "value" (q (store:db-storage db address (storage-key-value k)))
+                                         "proof" (funcall nodes proof)))
+                         keys proofs)))))
+
+(defun slot-hex (db address slot) (integer->hex (store:db-storage db address slot) :bytes 32))
+
+;;; Methods
+
+(defrpc "eth_getCode" ((address address) (block block-id :optional t)) "code of an account"
+  (hexbytes (account-code (state-at block) address)))
+
+(defrpc "eth_getStorageAt" ((address address) (key storage-key) (block block-id :optional t))
+  "one storage slot"
+  (slot-hex (state-at block) address (storage-key-value key)))
+
+(defrpc "eth_getTransactionCount" ((address address) (block block-id :optional t))
+  "the account nonce (the pool is empty, so pending adds nothing)"
+  (q (nth-value 1 (account-fields (state-at block) address))))
+
+(defrpc "eth_getStorageValues" ((requests storage-requests) (block block-id :optional t))
+  "several slots of several accounts"
+  (when (null requests) (rpc-fail +invalid-params+ "empty request"))
+  (let ((total (loop for r in requests sum (length (cdr r)))))
+    (when (> total +max-storage-values-slots+)
+      (rpc-fail +invalid-params+ (format nil "total slot count ~D exceeds limit ~D" total +max-storage-values-slots+))))
+  (let ((db (state-at block)))
+    (cons :object
+          (loop for (address . keys) in requests
+                collect (cons (addr address)
+                              (map 'simple-vector (lambda (k) (slot-hex db address (storage-key-value k))) keys))))))
+
+(defrpc "eth_getAccount" ((address address) (block block-id)) "nonce, balance, storage root and code hash"
+  (ensure-within-proof-window block)
+  (multiple-value-bind (exists nonce balance code-hash storage-root) (account-fields (state-at block) address)
+    (if exists
+        (json:jobject "nonce" (q nonce) "balance" (q balance)
+                      "storageRoot" (hex32 storage-root) "codeHash" (hex32 code-hash))
+        :null)))
+
+(defrpc "eth_getAccountInfo" ((address address) (block block-id)) "balance, nonce and code"
+  (let ((db (state-at block)))
+    (multiple-value-bind (exists nonce balance) (account-fields db address)
+      (declare (ignore exists))
+      (json:jobject "balance" (q balance) "nonce" (q nonce) "code" (hexbytes (account-code db address))))))
+
+(defrpc "eth_getProof" ((address address) (keys storage-keys) (block block-id :optional t))
+  "EIP-1186 account and storage proofs"
+  (when (> (length keys) +max-proof-slots+)
+    (rpc-fail +invalid-params+ (format nil "storage key count ~D exceeds limit ~D" (length keys) +max-proof-slots+)))
+  (ensure-within-proof-window block)
+  (proof-json (state-at block) address keys))
+
+(defrpc "eth_getMultiProof" ((targets proof-targets) (block block-id :optional t))
+  "EIP-1186 proofs for several accounts"
+  (when (> (length targets) +max-proof-slots+)
+    (rpc-fail +invalid-params+ (format nil "target count ~D exceeds limit ~D" (length targets) +max-proof-slots+)))
+  (let ((total (loop for x in targets sum (length (cdr x)))))
+    (when (> total +max-proof-slots+)
+      (rpc-fail +invalid-params+ (format nil "total slot count ~D exceeds limit ~D" total +max-proof-slots+))))
+  (ensure-within-proof-window block)
+  ;; No targets: the answer is empty whatever the state holds.
+  (if (null targets)
+      (progn (state-block block) #())
+      (let ((db (state-at block)))
+        (map 'simple-vector
+             (lambda (target)
+               (proof-json db (car target)
+                           (mapcar (lambda (slot) (make-storage-key (octets->integer slot) t)) (cdr target))))
+             targets))))
+
+(defrpc "debug_codeByHash" ((hash hash) (block block-id :optional t)) "code by its hash"
+  ;; The empty code's hash names the empty code whatever the state holds.
+  (let ((code (if (octets= hash trie:+empty-code-hash+)
+                  (progn (state-block block) (make-octets 0))
+                  (code-by-hash (state-at block) hash))))
+    (if code (hexbytes code) :null)))

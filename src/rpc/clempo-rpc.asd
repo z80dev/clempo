@@ -2,7 +2,8 @@
 (defsystem "clempo-rpc"
   :description "JSON-RPC server (HTTP and WebSocket) serving the reference node's method set"
   :depends-on ("clempo-base" "clempo-io" "clempo-crypto" "clempo-codec" "clempo-trie" "clempo-types"
-               "clempo-sync" "clempo-tempo-chainspec" (:require "sb-bsd-sockets"))
+               "clempo-sync" "clempo-tempo-chainspec" "clempo-store" "clempo-tempo-executor"
+               (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "serde")
                (:file "defrpc")
@@ -16,11 +17,14 @@
                (:file "config")
                (:file "stubs")
                (:file "sender")
-               (:file "subscribe")))
+               (:file "subscribe")
+               (:file "state")
+               (:file "calls")))
 
 (defsystem "clempo-rpc/tests"
   :depends-on ("clempo-rpc")
   :pathname "../../tests/rpc/"
   :serial t
   :components ((:file "rpc-tests")
-               (:file "ws-tests")))
+               (:file "ws-tests")
+               (:file "state-tests")))
