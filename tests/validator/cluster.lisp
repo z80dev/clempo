@@ -55,12 +55,15 @@
 
 (defun crash-node (node)
   "Kill NODE's validator as a crash would: its state store's unsynced tail is lost (the
-block log and journals sync every record)."
-  (let* ((network (node-network node)) (app (shiftf (node-app node) nil)))
+block log and journals sync every record) and, as when the process dies, its datadir lock
+is released."
+  (let* ((network (node-network node)) (app (shiftf (node-app node) nil))
+         (store (net::validator-app-store app)))
     (push (mem-key network) (hub-offline (mem-hub network)))
     (setf (car (mem-inbox network)) nil (cdr (mem-inbox network)) nil)
     (net::close-block-log (net::validator-app-log app))
-    (close (clempo.store::store-log-stream (net::validator-app-store app)) :abort t)))
+    (close (clempo.store::store-log-stream store) :abort t)
+    (sb-posix:close (clempo.store::store-lock-fd store))))
 
 (defun call-with-cluster (function)
   "FUNCTION receives the four nodes, started from genesis in fresh datadirs."

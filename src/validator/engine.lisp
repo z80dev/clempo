@@ -19,7 +19,7 @@
 (defstruct (validator-app (:constructor %make-app))
   network store db chain seed key epoch-length journal
   voter scheme outcome dkg
-  log backend server pool                 ; block log, JSON-RPC backend and server, txpool service
+  log backend server                      ; block log, JSON-RPC backend (with the pool) and server
   (fee-recipient 0)                       ; beneficiary when ValidatorConfigV2 names none
   (timeouts nil)                          ; voter timeouts plist (NIL: Tempo's)
   (finalized-headers (make-hash-table :test #'eql)) ; height -> dkg-block, current and previous epoch
@@ -38,6 +38,7 @@
   (backfill-buffer (make-hash-table))     ; height -> (block finalization . peer)
   (backfill-missing (make-hash-table))    ; height -> peers that answered with an error
   (backfill-next-ms (make-hash-table :test #'equalp)) ; peer -> earliest next request time
+  (backfill-queued 0)                     ; a finalization above a gap, queued for its ancestors
   (proposed 0) (committed 0) (dealings-sent 0) (acks-sent 0)
   (report (constantly nil)))
 
@@ -73,13 +74,21 @@ proposal's parent, later views of the epoch re-propose that block as is rather t
 blocks the epoch transition would cut off."
   (eql (digest-height app digest) (epoch-last-height app)))
 
+(defun proposal-pool (app)
+  "The transaction pool proposals draw from, or NIL."
+  (let ((pool (backend-pool-service (validator-app-backend app))))
+    (when pool (validator-pool-pool pool))))
+
 (defun t15-p (app timestamp)
   (clempo.chainspec:fork-active-p :t15 timestamp (validator-app-chain app)))
 
 (defmacro with-chain-write ((app) &body body)
-  "Run BODY, which runs blocks on the state DB, with JSON-RPC requests held off."
+  "Run BODY, which runs blocks on the state DB, under the app's chain spec (the executor
+and builder read CLEMPO.EXECUTOR:*CHAIN*, e.g. for the epoch length of the boundary's
+CurrentCommittee call) with JSON-RPC requests held off."
   (let ((backend (gensym "BACKEND")) (thunk (gensym "THUNK")))
-    `(let ((,backend (validator-app-backend ,app)))
+    `(let ((,backend (validator-app-backend ,app))
+           (clempo.executor:*chain* (validator-app-chain ,app)))
        (flet ((,thunk () ,@body))
          (if ,backend
              (clempo.rpc.chain:with-backend-write (,backend) (,thunk))
@@ -303,8 +312,7 @@ dealers whose logs the blocks carry (NIL entries for blocks without one)."
                                              :parent-view (car parent) :proposer (validator-app-key app))
                          :extra-data (proposal-extra-data app ancestors height))
                         :chain (validator-app-chain app)
-                        :pool (when (validator-app-pool app)
-                                (clempo.txpool:pool-service-pool (validator-app-pool app)))))))
+                        :pool (proposal-pool app)))))
                  (block (clempo.builder:built-payload-block payload))
                  (digest (stash-block app block)))
             (when digest
@@ -517,7 +525,7 @@ last block. It is the voter's genesis (Floor::Genesis) and its timestamp picks t
                           (registered-by-key db key))
           unless (octets= key me)
             collect (if entry
-                        (list key (registered-host entry) (registered-port entry))
+                        (list key (registered-host entry) (registered-port entry) (registered-egress entry))
                         (list key nil nil)))))
 
 (defun refresh-peers (app)
@@ -553,8 +561,7 @@ if the state store had not synced), then the state, then the DKG actor."
         (when boundary (clempo.store:store-sync store))
         (setf (validator-app-head app) header (validator-app-head-digest app) digest
               (gethash height (validator-app-finalized-headers app)) dkg-block)
-        (let ((pool (validator-app-pool app)))
-          (when pool (clempo.txpool:pool-service-block pool (validator-app-db app) header)))))
+        (revalidate-pool (validator-app-backend app))))
     (incf (validator-app-committed app))
     (when dealer (pushnew dealer (validator-app-logged-dealers app) :test #'octets=))
     (report app "finalized" "height" height "hash" (octets->hex digest)
@@ -664,7 +671,8 @@ block is finalized."
             (outstanding (loop for request being the hash-values of (validator-app-requests app)
                                when (eq (fetch-kind request) :finalized)
                                  collect (clempo.validator-wire:marshal-key-height (fetch-key request)))))
-        (loop for height from (1+ (head-number app)) to (min target (+ (head-number app) +backfill-window+))
+        (loop for height from (1+ (max (head-number app) (validator-app-backfill-queued app)))
+                to (min target (+ (head-number app) +backfill-window+))
               unless (or (member height outstanding)
                          (gethash height (validator-app-backfill-buffer app)))
                 do (let ((peer (backfill-peer app now)))
@@ -696,16 +704,20 @@ skipped for the next buffered certificate, whose ancestors then arrive by digest
                       (error "verified finalization at ~D does not extend our finalized head" height))
                      (t (stash-block app block)
                         (commit-finalization app finalization (list block))))))
-            ((let ((peers (network-peers (validator-app-network app)))
-                   (refused (gethash height (validator-app-backfill-missing app))))
-               (and peers (every (lambda (p) (member p refused :test #'octets=)) peers)))
+            ((and (<= (validator-app-backfill-queued app) (head-number app))
+                  (let ((peers (network-peers (validator-app-network app)))
+                        (refused (gethash height (validator-app-backfill-missing app))))
+                    (and peers (every (lambda (p) (member p refused :test #'octets=)) peers))))
+             ;; No peer holds this height's own certificate (it was finalized as an ancestor):
+             ;; queue the next certified height; its ancestors arrive by digest.
              (let ((later (loop for h being the hash-keys of buffer minimize h)))
                (when (and later (> later height))
                  (destructuring-bind (block finalization . peer) (gethash later buffer)
                    (remhash later buffer)
                    (cond ((current-finalization-p app finalization)
                           (stash-block app block)
-                          (setf (validator-app-finalizations app)
+                          (setf (validator-app-backfill-queued app) later
+                                (validator-app-finalizations app)
                                 (nconc (validator-app-finalizations app) (list finalization))))
                          (t (block-peer app peer "invalid marshal finalization")))))
                (return)))

@@ -21,7 +21,7 @@
   "A decoded active ValidatorConfigV2 entry."
   public-key host port egress fee-recipient index address)
 
-(defun parse-ipv4 (text)
+(defun ipv4-text (text)
   "TEXT as four dotted decimal octets (Rust's Ipv4Addr::from_str: no leading zeros), or NIL."
   (let ((parts (uiop:split-string text :separator ".")))
     (when (and (= 4 (length parts))
@@ -31,9 +31,9 @@
                       parts))
       text)))
 
-(defun parse-ip (text)
+(defun ip-text (text)
   "An IPv4 or bracketless IPv6 address string, or NIL (Rust's IpAddr::from_str)."
-  (or (parse-ipv4 text)
+  (or (ipv4-text text)
       (and (find #\: text) (every (lambda (c) (or (digit-char-p c 16) (member c '(#\: #\.)))) text)
            (<= 2 (length text) 45) text)))
 
@@ -47,8 +47,8 @@
         (when (<= port 65535)
           (if (and (plusp (length host)) (char= #\[ (char host 0)) (char= #\] (char host (1- (length host)))))
               (let ((inner (subseq host 1 (1- (length host)))))
-                (when (and (find #\: inner) (parse-ip inner)) (values inner port)))
-              (when (parse-ipv4 host) (values host port))))))))
+                (when (and (find #\: inner) (ip-text inner)) (values inner port)))
+              (when (ipv4-text host) (values host port))))))))
 
 (defun decode-registered (tuple)
   "DecodedValidatorV2::decode_from_contract: NIL when the key is not an Ed25519 point or an
@@ -57,7 +57,7 @@ address does not parse."
     (declare (ignore added deactivated))
     (let ((public-key (integer->octets key 32)))
       (multiple-value-bind (host port) (parse-socket-address ingress)
-        (when (and host (parse-ip egress) (clempo.ed25519:ed25519-public-key-valid-p public-key))
+        (when (and host (ip-text egress) (clempo.ed25519:ed25519-public-key-valid-p public-key))
           (make-registered-validator :public-key public-key :host host :port port :egress egress
                                      :fee-recipient fee-recipient :index index :address address))))))
 
@@ -231,3 +231,57 @@ of a crash during an append, is cut off; any other damage signals an error."
 (defmethod clempo.rpc.chain:backend-state ((b validator-backend) number)
   (let ((db (clempo.store:store-db (backend-store b))))
     (when (eql number (clempo.store:db-number db)) db)))
+
+;;; The transaction pool consensus proposes from (clempo.txpool, Tempo's pool rules). JSON-RPC
+;;; submissions are admitted against the head state; every finalized block revalidates it.
+
+(defstruct (validator-pool (:constructor make-validator-pool ()))
+  (pool (clempo.txpool:make-pool))
+  (lock (thr:make-mutex :name "validator pool") :read-only t))
+
+(defmacro with-validator-pool ((pool) &body body)
+  `(thr:with-mutex ((validator-pool-lock ,pool)) ,@body))
+
+(defun pool-snapshot-reader (backend)
+  "A txpool state reader over the head state, for the next block's environment, with the fee
+tokens the last ten finalized blocks' beneficiaries prefer (the pool's validator-token window)."
+  (let* ((db (clempo.store:store-db (backend-store backend)))
+         (log (backend-log backend))
+         (head-number (clempo.store:db-number db))
+         (head (clempo.blocks:block-header
+                (clempo.blocks:decode-block (log-record-block (block-log-record log head-number)))))
+         (chain (clempo.rpc.chain:backend-chain backend))
+         (env (clempo.builder:next-block-env
+               db head (clempo.builder:make-payload-attributes
+                        :timestamp (max (1+ (clempo.headers:header-timestamp head)) (io:now-seconds)))
+               :chain chain)))
+    (clempo.txpool:make-state-reader
+     db env :recent-validator-tokens
+     (loop for height from (max 0 (- head-number 9)) to head-number
+           for header = (clempo.blocks:block-header
+                         (clempo.blocks:decode-block (log-record-block (block-log-record log height))))
+           collect (clempo.txpool::validator-fee-token
+                    db env (clempo.headers:ethereum-header-beneficiary (clempo.headers:header-inner header)))))))
+
+(defmethod clempo.rpc.chain:backend-submit-raw-transaction ((b validator-backend) raw)
+  (let ((pool (backend-pool-service b)))
+    (unless pool (return-from clempo.rpc.chain:backend-submit-raw-transaction (call-next-method)))
+    (let ((tx (clempo.transactions:decode-transaction raw)))
+      (with-validator-pool (pool)
+        (clempo.txpool:submit-transaction (validator-pool-pool pool) tx (pool-snapshot-reader b)))
+      (clempo.transactions:transaction-hash tx))))
+
+(defmethod clempo.rpc.chain:backend-pool-transactions ((b validator-backend))
+  (let ((pool (backend-pool-service b)))
+    (when pool (with-validator-pool (pool) (clempo.txpool:pool-snapshot (validator-pool-pool pool))))))
+
+(defmethod clempo.rpc.chain:backend-clear-pool ((b validator-backend))
+  (let ((pool (backend-pool-service b)))
+    (if pool (with-validator-pool (pool) (clempo.txpool:pool-clear (validator-pool-pool pool))) 0)))
+
+(defun revalidate-pool (backend)
+  "After a finalized block: drop what it mined or made invalid."
+  (let ((pool (backend-pool-service backend)))
+    (when pool
+      (with-validator-pool (pool)
+        (clempo.txpool:pool-revalidate (validator-pool-pool pool) (pool-snapshot-reader backend))))))

@@ -95,7 +95,8 @@ before it enters its epoch. CLOSE-VALIDATOR-APP closes the datadir."
              (setf app (%make-app :network network :store store :db (clempo.store:store-db store)
                                   :chain chain :seed seed :key (clempo.ed25519:ed25519-public-key seed)
                                   :epoch-length length :head head :log log
-                                  :backend (make-instance 'validator-backend :chain chain :log log :store store)
+                                  :backend (make-instance 'validator-backend :chain chain :log log :store store
+                                                                             :pool (make-validator-pool))
                                   :fee-recipient fee-recipient :timeouts timeouts
                                   :backfill-frequency backfill-frequency :report reporter
                                   :journal (make-file-journal (datadir-path datadir "simplex/"))))
