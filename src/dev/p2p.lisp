@@ -17,7 +17,7 @@
     (let ((peer (clempo.eth:eth-dial host port key :versions (if version (list version) '(69 68))))
           (chunk nil))
       (unwind-protect
-           (let ((start (get-internal-real-time)))
+           (let ((start (clempo.io:monotonic-ticks)))
              (log-line "p2p-sync: negotiated eth/~D with ~A:~D" (clempo.eth:eth-version peer) host port)
              (let* ((count (clempo.eth:download-blocks
                             peer from to
@@ -28,7 +28,7 @@
                                   (setf chunk (clempo.archive:read-chunk first dir)))
                                 (unless (clempo.eth:block-matches-p (clempo.archive:chunk-block chunk n) header body)
                                   (error "Block ~D differs from archived RLP" n))))))
-                    (seconds (/ (- (get-internal-real-time) start) (float internal-time-units-per-second 1d0))))
+                    (seconds (/ (- (clempo.io:monotonic-ticks) start) (float internal-time-units-per-second 1d0))))
                (format t "eth/~D: ~:D blocks (~:D..~:D) matched archive byte for byte in ~,3F s (~,0F blocks/s)~%"
                        (clempo.eth:eth-version peer) count from to seconds (/ count (max seconds 1d-6)))
                0))
@@ -77,8 +77,8 @@
          (elapsed 0) (reported 0) (connections 0))
     (check-type seconds (integer 1 *))
     (check-type batch (integer 1 128))
-    (let ((start (get-internal-real-time))
-          (progress (get-internal-real-time)))
+    (let ((start (clempo.io:monotonic-ticks))
+          (progress (clempo.io:monotonic-ticks)))
       (clempo.eth-source:call-with-public-block-source
        (lambda (fetch)
          (loop
@@ -95,13 +95,13 @@
                         (unless (octets= (svref raw i) (svref expected i))
                           (error "Public peer block ~D differs from RPC data" (+ next i)))))
                     (incf next count)
-                    (setf progress (get-internal-real-time)))))
-              (setf elapsed (floor (- (get-internal-real-time) start) units))
+                    (setf progress (clempo.io:monotonic-ticks)))))
+              (setf elapsed (floor (- (clempo.io:monotonic-ticks) start) units))
               (when (>= elapsed (+ reported 30))
                 (log-line "p2p-follow-proof: ~Ds, ~:D blocks matched, own ~:D RPC ~:D"
                           elapsed (- next from) (1- next) tip)
                 (setf reported elapsed))
-              (when (> (- (get-internal-real-time) progress) (* 120 units))
+              (when (> (- (clempo.io:monotonic-ticks) progress) (* 120 units))
                 (error "Public devp2p did not advance for 120 seconds"))
               (when (and (>= elapsed seconds) (> next tip))
                 (return))

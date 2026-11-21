@@ -226,7 +226,7 @@ unknown query parameters, invalid curve keys and non-public endpoints."
     (rlp:rlp-error () (protocol-error "malformed discovery v4 RLP"))))
 
 (defun monotonic-seconds ()
-  (/ (get-internal-real-time) internal-time-units-per-second))
+  (/ (clempo.io:monotonic-ticks) internal-time-units-per-second))
 
 (defun expiration () (+ (clempo.io:now-seconds) 20))
 
