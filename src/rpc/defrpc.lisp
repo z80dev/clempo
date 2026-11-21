@@ -181,6 +181,10 @@ notification."
                (let ((m (find-method* method))
                      (notification (null id-src)))
                  (multiple-value-bind (result err)
+                     (measured
+                      ;; only served names become labels: a client cannot grow the registry
+                      (if m method "unknown")
+                      (lambda ()
                      (cond ((null m) (values nil (error-object +method-not-found+ "Method not found")))
                            ;; a :raw method reads its params itself, untouched by the envelope
                            ((eq (rpc-method-params m) :raw) (invoke-method m params-src))
@@ -193,10 +197,31 @@ notification."
                                       (t (values nil (error-object
                                                       +invalid-params+ "Invalid params"
                                                       (format nil "Invalid params. Expected one of '[', ']' or ',' but found '~A'"
-                                                              (peek seq)))))))))
+                                                              (peek seq)))))))))))
                    (cond (notification nil)
                          (err (response-string id-raw :error err))
                          (t (capped-response id-raw (response-string id-raw :result result))))))))))))
+
+(defparameter *requests-metric*
+  (clempo.metrics:define-metric "clempo_rpc_requests_total" :counter
+                                "JSON-RPC calls answered, by method and outcome (ok or error)"))
+(defparameter *latency-metric*
+  (clempo.metrics:define-metric "clempo_rpc_request_duration_seconds" :summary
+                                "Time to answer a JSON-RPC call, by method"))
+
+(defun measured (method thunk)
+  "Call THUNK, which returns (values result error-object), counting the call and its time
+under METHOD."
+  (let ((start (clempo.io:monotonic-ticks)))
+    (multiple-value-bind (result err) (funcall thunk)
+      (let ((labels (list (cons "method" method))))
+        (clempo.metrics:metric-inc *requests-metric*
+                                   :labels (append labels (list (cons "outcome" (if err "error" "ok")))))
+        (clempo.metrics:metric-observe *latency-metric*
+                                       (/ (- (clempo.io:monotonic-ticks) start)
+                                          (float internal-time-units-per-second 1d0))
+                                       :labels labels))
+      (values result err))))
 
 (defparameter *response-max* (* 160 1024 1024)
   "Largest response, as reth's default --rpc.max-response-size (160 MiB) caps it.")

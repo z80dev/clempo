@@ -366,3 +366,22 @@
         do (is (search (format nil "an array of u8, or raw bytes at line 1 column ~D\"" column)
                        (handle (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":~A}" params)))
                "~A" params)))
+
+(deftest calls-are-counted-and-timed-per-method ()
+  (flet ((count-of (method outcome)
+           (or (clempo.metrics:metric-value rpc::*requests-metric*
+                                            :labels (list (cons "method" method) (cons "outcome" outcome)))
+               0)))
+    (let ((ok (count-of "web3_clientVersion" "ok"))
+          (bad (count-of "web3_sha3" "error"))
+          (unknown (count-of "unknown" "error")))
+      (handle +client-version-request+)
+      (handle "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"web3_sha3\",\"params\":[\"zz\"]}")
+      (handle "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"no_suchMethod\",\"params\":[]}")
+      (is= (1+ ok) (count-of "web3_clientVersion" "ok"))
+      (is= (1+ bad) (count-of "web3_sha3" "error"))
+      (is= (1+ unknown) (count-of "unknown" "error"))
+      (is (null (clempo.metrics:metric-value rpc::*requests-metric*
+                                             :labels (list (cons "method" "no_suchMethod") (cons "outcome" "error")))))
+      (is (plusp (car (clempo.metrics:metric-value rpc::*latency-metric*
+                                                   :labels (list (cons "method" "web3_clientVersion")))))))))
