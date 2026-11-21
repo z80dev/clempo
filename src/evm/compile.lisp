@@ -440,7 +440,8 @@ rest, so every result variable is bound once and never assigned."
   (let ((*region* (make-hash-table)))
     (dolist (b blocks) (setf (gethash (cblock-start b) *region*) t))
     `(lambda (frame stack sp entry)
-       (declare ,*hot* (type frame frame) (type simple-vector stack) (type (integer 0 1024) sp)
+       (declare ,*hot* (optimize (sb-c:store-source-form 0)) ; see COMPILE-REGION
+                (type frame frame) (type simple-vector stack) (type (integer 0 1024) sp)
                 (type fixnum entry) (sb-ext:muffle-conditions sb-ext:compiler-note))
        ;; GAS is FRAME-GAS itself, not a variable: SBCL's propagation over a variable
        ;; assigned and compared once per segment is superlinear in the code size.
@@ -549,14 +550,32 @@ holds it."
   (declare (ignore frame))
   (values :stop +empty-code+))
 
+(defun compile-region (form)
+  "FORM compiled, without the copy of FORM that COMPILE keeps in the function's debug
+source (SBCL stores every in-memory compilation's toplevel form there for the debugger).
+For this generated code that form is about 6 times the native code it produced, so a
+cache of compiled contracts would mostly hold Lisp source no one reads."
+  (let* ((fn (compile nil form))
+         (source (sb-c::debug-info-source
+                  (sb-kernel:%code-debug-info (sb-kernel:fun-code-header (sb-kernel:%fun-fun fn))))))
+    (when (typep source 'sb-c::core-debug-source)
+      (setf (sb-c::core-debug-source-form source) nil))
+    fn))
+
 (defun native-bytes (fn)
-  "Bytes of the code object holding the compiled function FN."
-  (sb-ext:primitive-object-size (sb-kernel:fun-code-header (sb-kernel:%fun-fun fn))))
+  "Bytes FN keeps alive: its code object and debug info (with its function map)."
+  (let* ((code (sb-kernel:fun-code-header (sb-kernel:%fun-fun fn)))
+         (info (sb-kernel:%code-debug-info code))
+         (map (and (typep info 'sb-c::compiled-debug-info) (sb-c::compiled-debug-info-fun-map info))))
+    (+ (sb-ext:primitive-object-size code)
+       (if info (sb-ext:primitive-object-size info) 0)
+       (if (typep map 'vector) (sb-ext:primitive-object-size map) 0))))
 
 (defun compile-code (code fork)
   "CODE compiled for FORK: a function of a FRAME that returns (values status output) and
 leaves FRAME-GAS as INTERPRET would. Second value: the full warnings the compiler raised
-\(muffled; any is a translation bug). Third: the bytes of native code and tables made."
+\(muffled; any is a translation bug). Third: the bytes the function keeps alive (its code
+objects, debug info and tables; measured within 10% of the heap it retains)."
   (declare (type octets code))
   (when (zerop (length code))
     (return-from compile-code (values #'empty-code-run '() 0)))
@@ -566,7 +585,7 @@ leaves FRAME-GAS as INTERPRET would. Second value: the full warnings the compile
                                               (unless (typep w 'style-warning)
                                                 (push (princ-to-string w) warnings))
                                               (muffle-warning w))))
-                      (map 'simple-vector (lambda (f) (compile nil f)) forms)))
+                      (map 'simple-vector #'compile-region forms)))
            ;; the code objects, plus the pc tables they hold (block-region, block-local
            ;; of the same size, and the jump-destination bits)
            (bytes (+ (* 2 (sb-ext:primitive-object-size block-region))

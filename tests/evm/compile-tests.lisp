@@ -418,3 +418,34 @@ NIL without one."
             "~D analyses stored" (+ (hash-table-count (clempo.evm::analysis-store-young store))
                                     (hash-table-count (clempo.evm::analysis-store-old store))))))
     (is= 200 (length alive))))
+
+(deftest compiled-code-keeps-no-source ()
+  ;; COMPILE keeps each in-memory compilation's whole source form in its debug source (and,
+  ;; at debug 1, on the function): for generated contract code that was 4-6 times the
+  ;; native code, so the cache's byte bound counted a sixth of what it held. Compiled
+  ;; regions keep neither, and the bytes COMPILE-CODE reports cover what stays alive.
+  (let ((codes (loop for i below 40
+                     collect (apply #'asm (append (list :push2 (+ 5000 i))
+                                                  (loop repeat 60 append (list :push1 3 :add :dup1 :push1 0 :mstore))
+                                                  (list :stop)))))
+        (keep '())
+        (reported 0))
+    (sb-ext:gc :full t)
+    (let ((before (sb-kernel:dynamic-usage)))
+      (dolist (c codes)
+        (multiple-value-bind (fn warnings bytes) (compile-code c (fork-index :osaka))
+          (is (null warnings))
+          (push fn keep)
+          (incf reported bytes)))
+      (sb-ext:gc :full t)
+      (let ((retained (- (sb-kernel:dynamic-usage) before)))
+        (is (< retained (* 2 reported)) "~D bytes retained for ~D reported" retained reported)))
+    (let* ((fn (first keep))
+           (region (loop for i below (1- (sb-kernel:get-closure-length fn))
+                         for v = (sb-kernel:%closure-index-ref fn i)
+                         when (functionp v) return v
+                         when (simple-vector-p v) return (svref v 0)))
+           (code (sb-kernel:fun-code-header (sb-kernel:%fun-fun region))))
+      (is (null (sb-c::core-debug-source-form
+                 (sb-c::debug-info-source (sb-kernel:%code-debug-info code)))))
+      (is (null (function-lambda-expression region))))))
