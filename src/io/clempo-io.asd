@@ -3,6 +3,7 @@
   :depends-on ("clempo-base" (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "io")
+               (:file "clock")
                (:file "http")))
 
 (defsystem "clempo-io/tests"
