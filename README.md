@@ -2,7 +2,7 @@
 
 A [Tempo](https://github.com/tempoxyz/tempo) node in Common Lisp. It replays all of mainnet from genesis with every state root checked, follows the live tip with every finalization certificate verified, answers the reference node's JSON-RPC methods identically, and runs as a validator alongside Rust validators. It uses nothing outside SBCL: no EVM, trie, crypto or networking library, and no foreign code.
 
-clempo is the third independent implementation, after zempo (Zig) and [goempo](https://github.com/gakonst/goempo) (Go). It climbs the same ladder of rungs against the same reference ([GOAL.md](GOAL.md)), with every number in [FRONTIER.md](FRONTIER.md) backed by a command you can re-run.
+clempo is an independent implementation of the [Tempo reference node](https://github.com/tempoxyz/tempo), alongside others such as [goempo](https://github.com/gakonst/goempo) (Go). It climbs goempo's ladder of rungs against the same reference ([GOAL.md](GOAL.md)), with every number in [FRONTIER.md](FRONTIER.md) backed by a command you can re-run.
 
 ## Status
 
