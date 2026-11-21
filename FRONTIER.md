@@ -406,3 +406,19 @@ blocks and no duplicate completed chunks; evidence is
 `~/scratch/clempo/r1-archive/resume-test.eI4u3S/{first.log,resumed.log,result.json}`.
 
 R1 full archive (2026-11-21, 4e28f4d): `CLEMPO_RPC=http://127.0.0.1:8545 nice -n 10 bin/clempo-dev r1-archive -threads 6 -batch 100 -result ~/scratch/clempo/r1-archive/full-1795243500.json` checked every mainnet block 0..50,049,999 (50,050,000 blocks, 35,979,413 transactions, 15,342,450 signature recoveries, 48.6 GB of raw blocks) against the reference's eth_getBlockByNumber(full): byte-identical re-encoding, block hash, transactions root, every tx hash and sender. 0 failures in 4,493 s (11,139 blocks/s, 6 threads, sharing the host with replays).
+
+Full archive result at **4e28f4d**: **50,050,000/50,050,000 blocks** (0..50,049,999)
+passed raw round-trip, block/body/transaction commitments, sender and key-ID checks
+against independent full-block Rust RPC responses. The run covered **35,979,413
+transactions**, including **15,342,450 actual cryptographic recoveries**; legacy
+zero-signature system senders were compared but excluded from recovery counts.
+All 5,005 chunks completed; there were **zero failed blocks and zero chunk errors**.
+Measured scan time was **4,493.361169 s**, CPU time 4,460.574188 s:
+**11,138.655 blocks/s and 3,414.471 cryptographic recoveries/s** end-to-end,
+including archive I/O, RPC, JSON, codecs and roots. It processed 48,649,547,789 raw
+bytes and cumulatively allocated 8,527,808,667,808 bytes (not peak memory).
+This six-worker, niceness-10 release run predates the direct-address recovery
+migration; it does not measure that optimization. Receipts and execution remain
+outside this archive check, so it does not replace sampled R1 or score R7.
+Result: `~/scratch/clempo/r1-archive/full-1795243500.json`; its `.failures.jsonl`
+is empty, with per-chunk evidence in `.chunks.jsonl` and console output in `.log`.
