@@ -254,10 +254,10 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
       (unless (tip20-address-p token) (invalid "fee token ~X is not TIP-20" token))
       (unless (zerop max-fee)
         (unless (valid-fee-token-p token) (invalid "fee token ~X is not USD" token)))
-      (unless (ctx-skip-fee-charge ctx)
-        (let ((balance (with-protocol-storage (:static t) (clempo.tip20:balance-of token fee-payer))))
-          (when (< balance max-fee)
-            (invalid "insufficient fee token balance: ~D < ~D" balance max-fee))))
+      ;; Read (and so warm) the payer's balance even when fees are not charged (RPC calls).
+      (let ((balance (with-protocol-storage (:static t) (clempo.tip20:balance-of token fee-payer))))
+        (when (and (not (ctx-skip-fee-charge ctx)) (< balance max-fee))
+          (invalid "insufficient fee token balance: ~D < ~D" balance max-fee)))
       (make-fee-context :payer fee-payer :token token :collected collected :max-fee max-fee
                         :fallback-p fallback-p))))
 
