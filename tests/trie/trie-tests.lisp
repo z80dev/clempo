@@ -164,6 +164,28 @@
                    (is= expected (if value (clempo.rlp:rlp-decode-integer
                                            (clempo.rlp:rlp-decode value)) 0))))))))
 
+(deftest account-commitment-extension ()
+  "T14: a nonzero configuration commitment is the account's fifth RLP string, 0x00 || hash
+(alloy-trie TrieAccount account-ext); zero leaves the four-field encoding unchanged."
+  (let* ((root +empty-trie-root+)
+         (code-hash (clempo.keccak:keccak256 (octets-of #xef)))
+         (commitment #x77777777777777777777777777777777777777777777777777777777777777)
+         (plain (encode-account 1 2 root code-hash))
+         (extended (encode-account 1 2 root code-hash commitment)))
+    (is-equalp plain (encode-account 1 2 root code-hash 0))
+    (is-equalp extended
+               (clempo.rlp:rlp-encode (list 1 2 root code-hash
+                                            (octets-concat (octets-of 0)
+                                                           (integer->octets commitment 32)))))
+    (is= commitment (nth-value 4 (decode-account extended)))
+    (is= 0 (nth-value 4 (decode-account plain)))
+    ;; decode_config_commitment: an explicit zero or untagged extension is invalid
+    (dolist (bad (list (make-octets 33) (octets-concat (octets-of 1) (integer->octets 1 32))
+                       (make-octets 0)))
+      (is (handler-case (progn (decode-account (clempo.rlp:rlp-encode (list 1 2 root code-hash bad)))
+                               nil)
+            (clempo.rlp:rlp-error () t))))))
+
 (deftest reused-scratch-and-parallel-subtrees ()
   (let* ((store (make-memory-store))
          (persisted (make-trie :store store))

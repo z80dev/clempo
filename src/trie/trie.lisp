@@ -705,28 +705,42 @@ a malformed, incomplete or trailing proof returns NIL, NIL."
                 (if (proof-store-nodes store) (values nil nil) (values value t)))
             ((or trie-node-error rlp-error) () (values nil nil)))))))
 
-(defun encode-account (nonce balance storage-root code-hash)
-  "Encode the Ethereum state account RLP."
+(defun encode-account (nonce balance storage-root code-hash &optional (commitment 0))
+  "Encode the Ethereum state account RLP. A nonzero T14 configuration COMMITMENT (TIP-1108)
+adds the account extension as a fifth string, 0x00 || commitment (alloy-trie TrieAccount with
+account-ext, tempo encode_config_commitment)."
   (check-type nonce (unsigned-byte 64))
   (check-type balance (unsigned-byte 256))
   (check-type storage-root (simple-array (unsigned-byte 8) (32)))
   (check-type code-hash (simple-array (unsigned-byte 8) (32)))
+  (check-type commitment (unsigned-byte 256))
   (multiple-value-bind (out pos)
       (rlp-list-buffer (+ 66 (the fixnum (rlp-encoded-length nonce))
-                             (the fixnum (rlp-encoded-length balance))))
+                             (the fixnum (rlp-encoded-length balance))
+                          (if (zerop commitment) 0 34)))
     (setf pos (rlp-encode-into nonce out pos)
           pos (rlp-encode-into balance out pos)
-          pos (write-ref storage-root out pos))
-    (write-ref code-hash out pos)
+          pos (write-ref storage-root out pos)
+          pos (write-ref code-hash out pos))
+    (unless (zerop commitment)
+      (setf (aref out pos) #xa1 (aref out (1+ pos)) 0)
+      (integer-into-octets commitment out (+ pos 2) (+ pos 34)))
     out))
 
 (defun decode-account (bytes)
-  "Return (values nonce balance storage-root code-hash) from account RLP."
-  (destructuring-bind (nonce balance storage-root code-hash) (rlp-decode bytes)
+  "Return (values nonce balance storage-root code-hash commitment) from account RLP; the
+commitment is 0 without the T14 extension (decode_config_commitment)."
+  (destructuring-bind (nonce balance storage-root code-hash &optional (extension nil ext-p))
+      (rlp-decode bytes)
     (check-type storage-root (simple-array (unsigned-byte 8) (32)))
     (check-type code-hash (simple-array (unsigned-byte 8) (32)))
+    (when ext-p
+      (unless (and (typep extension 'octets) (= (length extension) 33) (zerop (aref extension 0))
+                   (find-if-not #'zerop extension :start 1))
+        (error 'rlp-error :message "invalid account commitment extension")))
     (values (rlp-decode-integer nonce :max-bytes 8) (rlp-decode-integer balance)
-            storage-root code-hash)))
+            storage-root code-hash
+            (if ext-p (octets->integer extension :start 1) 0))))
 
 (defun ordered-trie-root (encoded-items)
   "Root of an Ethereum indexed list. The keys are RLP(index), starting at zero.
