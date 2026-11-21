@@ -225,7 +225,12 @@ discovery, `CLEMPO_BUILD=release bin/clempo-dev p2p-follow-proof -upstream
 http://127.0.0.1:8545 -seconds 90` authenticated eth/69 on `40.160.67.13:30303`
 and matched all 167 finalized blocks (50,069,660–50,069,826) byte for byte.
 The public peer supplied headers and bodies; RPC supplied only the finalized
-heights and comparison bytes. Logs are in `~/scratch/clempo/public-p2p/`.
+heights and comparison bytes. A forced eth/68 session against
+`109.94.98.205:30056` matched a further 16 finalized blocks (50,070,617–50,070,632)
+byte for byte. The integrated `bin/clempo-dev follow -source devp2p -upstream
+http://127.0.0.1:8545 -last 10 -batch 5 -once -no-archive -json` reached
+height 50,070,139 with 10 validated blocks and no lag, using default discovery.
+Logs are in `~/scratch/clempo/public-p2p/`.
 
 Hash/25519 crypto (SBCL 2.6.8 release, Apple Silicon, single thread): on
 64 MiB, SHA-256 **2,684 MB/s** (25 ms, no consing), BLAKE3 **317 MB/s**
