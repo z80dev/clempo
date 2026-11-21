@@ -21,7 +21,10 @@ Voter:
   (voter-tick voter)                     -> effects; fires timeouts due at now-ms
   (voter-next-deadline voter)            -> ms or NIL
   (voter-view voter), (voter-last-finalized voter), (voter-leader-of voter view)
-  (voter-certificate voter view)         -> the certificate to answer a peer's request for VIEW
+  (voter-certificate voter view)         -> the certificate to answer a peer's resolver
+     request for VIEW (Rust's produce), or NIL (answer with an error frame)
+  (voter-deliver voter view certificate) -> (values effects outcome): a resolver response to
+     our request for VIEW; outcome :valid, :ignored or :invalid (penalize the peer)
 
 Application (generic functions the simulator specializes on its application object):
   (app-propose app context)            -> payload (32 octets), :PENDING or NIL (no proposal)
@@ -42,6 +45,19 @@ Effects, in order:
                          retry while still missing.
   (:send recipients message) is reserved: this voter broadcasts everything.
 
+Journal (commonware's voter journal; consensus touches no files, so it is a protocol):
+  make-voter :journal J. Every vote the voter signs, certificate it records and certification
+  verdict is (journal-append J epoch view octets) and made durable by (journal-sync J epoch)
+  before any effect leaves the voter; voter-start replays (journal-replay J epoch) (octets in
+  ascending view, append order within a view), so a restarted voter never votes against what
+  it sent; (journal-prune J epoch min-view) drops what is no longer retained. Octets are
+  commonware's simplex Artifact encoding (encode-artifact / decode-artifact).
+  MEMORY-JOURNAL is the in-memory reference backend.
+
+Wire: votes go on channel 0, certificates on channel 1, resolver frames on channel 2, each
+behind Tempo's varint epoch mux (clempo.consensus encode-epoch-mux); every vote and
+certificate effect is a broadcast to all participants.
+
 Electors: (make-random-elector :v0|:v1), (make-round-robin-elector &key seed),
   (elect elector epoch view n seed) -> leader index; SEED is the seed signature of the
   certificate that unlocked VIEW (NIL for view 1).")
@@ -57,4 +73,10 @@ Electors: (make-random-elector :v0|:v1), (make-round-robin-elector &key seed),
    #:voter #:make-voter #:voter-start #:voter-receive #:voter-tick #:voter-next-deadline
    #:voter-proposed #:voter-verified #:voter-certified
    #:voter-view #:voter-last-finalized #:voter-epoch #:voter-me #:voter-leader-of
-   #:voter-certificate))
+   #:voter-certificate #:voter-deliver #:voter-journal
+   ;; journal
+   #:journal-append #:journal-sync #:journal-replay #:journal-prune
+   #:memory-journal #:make-memory-journal #:memory-journal-drop-unsynced
+   #:artifact #:encode-artifact #:decode-artifact #:artifact-view
+   #:certification-record #:make-certification-record #:certification-record-round
+   #:certification-record-ok))

@@ -61,8 +61,9 @@ the same proposals."))
     (defer app (lambda () (voter-certified voter round payload t)))))
 
 (defun make-network (&key (elector :random-v1) (epoch 0) timeouts (app-class 'chain-app)
-                       observer)
-  "Four participants, and with OBSERVER a fifth voter (index 4) that only follows."
+                       observer journals)
+  "Four participants, and with OBSERVER a fifth voter (index 4) that only follows. With
+JOURNALS every voter journals to its own memory journal."
   (multiple-value-bind (coefficients total shares participants) (golden-sharing)
     (multiple-value-bind (clock handle) (clempo.io:make-manual-clock 1000000)
       (let* ((apps (loop repeat (if observer 5 4) collect (make-instance app-class)))
@@ -77,7 +78,8 @@ the same proposals."))
                                                        (make-verifier-scheme coefficients total))
                                            :epoch epoch :participants participants
                                            :me (car share) :application app :elector elector
-                                           :timeouts (or timeouts *tempo-timeouts*)))
+                                           :timeouts (or timeouts *tempo-timeouts*)
+                                           :journal (and journals (make-memory-journal))))
                             'vector))))
         (loop for app in apps for i from 0
               when (typep app 'deferred-app)

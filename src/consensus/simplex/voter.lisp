@@ -78,7 +78,11 @@ participants (commonware's SkipBudget::Participants).")
   (resolver-floor 0) (resolver-current 0) (resolver-cursor 1)
   (requests '())                        ; outstanding (view . kind), kind :nullification|:notarization
   (highest-finalization nil)
-  (reported-finalized 0))
+  (reported-finalized 0)
+  ;; journal
+  (journal nil)
+  (journal-dirty nil)                   ; appended since the last sync
+  (journal-floor 0))                    ; min view last pruned to
 
 (defmethod print-object ((voter voter) stream)
   (print-unreadable-object (voter stream :type t :identity t)
@@ -86,12 +90,13 @@ participants (commonware's SkipBudget::Participants).")
             (voter-epoch voter) (voter-view voter) (voter-last-finalized voter))))
 
 (defun make-voter (&key scheme (epoch 0) participants me application (elector :random-v1)
-                     (timeouts *tempo-timeouts*) namespace (genesis (make-octets 32)))
+                     (timeouts *tempo-timeouts*) namespace (genesis (make-octets 32)) journal)
   "A voter for EPOCH. SCHEME is a clempo.consensus scheme (a signer scheme when ME is a
 participant index, a verifier scheme for an observer, ME NIL). PARTICIPANTS are the ed25519
 public keys in index order. ELECTOR is an elector or :RANDOM-V1, :RANDOM-V0, :ROUND-ROBIN.
 TIMEOUTS is a plist like *TEMPO-TIMEOUTS*. GENESIS is the payload of view 0, the parent of
-the first proposal."
+the first proposal. JOURNAL, if given, persists what the voter signs and records (see
+JOURNAL-APPEND); VOTER-START replays it."
   (let* ((participants (coerce participants 'simple-vector))
          (n (length participants))
          (timeouts (append timeouts *tempo-timeouts*)))
@@ -113,7 +118,7 @@ the first proposal."
                  :skip-timeout (getf timeouts :skip)
                  :skip-budget (if (getf timeouts :skip) (or (getf timeouts :skip-budget) n) 0)
                  :view-retention (getf timeouts :view-retention)
-                 :genesis genesis
+                 :genesis genesis :journal journal
                  :last-activity (make-array n :initial-element nil)
                  :required-active (if me (1- (scheme-threshold scheme)) (scheme-threshold scheme)))))
 
@@ -139,6 +144,21 @@ the first proposal."
 
 (defun queue-event (voter &rest event)
   (setf (voter-events voter) (append (voter-events voter) (list event))))
+
+(defun record (voter artifact)
+  "Append ARTIFACT to the journal (durable at the next SYNC-JOURNAL); returns ARTIFACT."
+  (let ((journal (voter-journal voter)))
+    (when (and journal artifact)
+      (journal-append journal (voter-epoch voter) (artifact-view artifact)
+                      (encode-artifact artifact))
+      (setf (voter-journal-dirty voter) t)))
+  artifact)
+
+(defun sync-journal (voter)
+  "Make every append durable; called before effects built from them leave the voter."
+  (when (voter-journal-dirty voter)
+    (journal-sync (voter-journal voter) (voter-epoch voter))
+    (setf (voter-journal-dirty voter) nil)))
 
 (defun this-round (voter view) (make-round :epoch (voter-epoch voter) :view view))
 
@@ -282,6 +302,7 @@ between nullified, or (values nil nil missing-view)."
         (setf (vround-decision r) :nullify
               (vround-retry-deadline r) (+ (now) (voter-retry-timeout voter)))
         (let ((nullify (sign voter :nullify (this-round voter (voter-view voter)))))
+          (when (and nullify (not retry)) (record voter nullify))
           (and nullify (values nullify retry)))))))
 
 (defun best-certificate (voter)
@@ -296,13 +317,13 @@ notarization of the previous view."
     (when (and r (admits-outbound-p voter view) (can-construct-notarize-p r)
                (verification-matches-p voter view))
       (setf (vround-broadcast-notarize r) t)
-      (sign voter :notarize (vround-proposal r)))))
+      (record voter (sign voter :notarize (vround-proposal r))))))
 
 (defun construct-finalize (voter view)
   (let ((r (round-at voter view)))
     (when (and r (> view (voter-last-finalized voter)) (admits-outbound-p voter view))
       (let ((proposal (round-construct-finalize r)))
-        (and proposal (sign voter :finalize proposal))))))
+        (and proposal (record voter (sign voter :finalize proposal)))))))
 
 (defun try-propose (voter)
   "The context of the lowest view we lead and can propose in now, claiming its build."
@@ -403,6 +424,7 @@ notarization of the previous view."
   (let ((r (round-at voter view)))
     (when r
       (setf (vround-certify r) (if ok :certified :rejected))
+      (record voter (make-certification-record :round (this-round voter view) :ok ok))
       (if ok
           (enter-view voter (1+ view))
           (trigger-timeout voter view :failed-certification))
@@ -413,6 +435,9 @@ notarization of the previous view."
     (loop for view being the hash-keys of (voter-rounds voter)
           when (< view min) collect view into dead
           finally (dolist (v dead) (remhash v (voter-rounds voter))))
+    (when (and (voter-journal voter) (> min (voter-journal-floor voter)))
+      (setf (voter-journal-floor voter) min)
+      (journal-prune (voter-journal voter) (voter-epoch voter) min))
     (setf (voter-requests voter)
           (remove-if (lambda (req) (resolver-settled-p voter (car req) (cdr req)))
                      (voter-requests voter)))))
@@ -462,15 +487,29 @@ notarization of the previous view."
     (unless (resolver-settled-p voter (car req) (cdr req))
       (effect voter :request (car req)))))
 
+(defun certified-notarization (voter view)
+  (let ((r (round-at voter view)))
+    (and r (eq (vround-certify r) :certified) (vround-notarization r))))
+
 (defun voter-certificate (voter view)
-  "The certificate this voter serves for a request about VIEW (resolver produce): the highest
-finalization if it covers VIEW, else VIEW's certified notarization or its nullification."
+  "The certificate this voter serves for a peer's request about VIEW (resolver produce): the
+highest finalization if it covers VIEW, else VIEW's certified notarization, else its
+nullification, else for a VIEW at or below the floor (the highest certified view) the floor's
+certified notarization. NIL: answer with an error frame."
   (let ((f (voter-highest-finalization voter))
-        (r (round-at voter view)))
+        (r (round-at voter view))
+        (floor (voter-resolver-floor voter)))
     (cond ((and f (<= view (proposal-view (finalization-proposal f)))) f)
-          ((and r (vround-notarization r) (eq (vround-certify r) :certified))
-           (vround-notarization r))
-          (r (vround-nullification r)))))
+          ((certified-notarization voter view))
+          ((and r (vround-nullification r)))
+          ((<= view floor) (certified-notarization voter floor)))))
+
+(defun servable-p (view certificate)
+  "commonware's resolver validate: what an honest peer may answer to a request for VIEW."
+  (let ((v (round-view (certificate-round certificate))))
+    (etypecase certificate
+      (nullification (= v view))
+      ((or notarization finalization) (>= v view)))))
 
 ;;; Batcher (batcher/actor.rs, round.rs, verifier.rs): votes in, certificates out.
 
@@ -600,28 +639,35 @@ optimistically: assemble, check the certificate, and only if it fails check each
         (batcher-process voter view)))))
 
 (defun batcher-network-certificate (voter sender certificate)
+  "Verify and queue a certificate from the network: :valid, :invalid (wrong epoch or bad
+signature), or :ignored (already held, or outside the retained views)."
   (let* ((round (certificate-round certificate))
          (view (round-view round)))
-    (when (= (round-epoch round) (voter-epoch voter))
-      (record-activity voter sender)
-      (let ((r (round-at voter view))
-            (kind (ecase (certificate-kind certificate)
-                    (:notarization :notarize) (:nullification :nullify) (:finalization :finalize))))
-        (when (and (retains-p voter view)
-                   (not (and r (member kind (vround-assembled r))))
-                   (verify-artifact (voter-scheme voter) certificate))
-          (push kind (vround-assembled (ensure-round voter view)))
-          (queue-event voter :certificate certificate))))))
+    (if (/= (round-epoch round) (voter-epoch voter))
+        :invalid
+        (let ((r (round-at voter view))
+              (kind (ecase (certificate-kind certificate)
+                      (:notarization :notarize) (:nullification :nullify)
+                      (:finalization :finalize))))
+          (record-activity voter sender)
+          (cond ((or (not (retains-p voter view)) (and r (member kind (vround-assembled r))))
+                 :ignored)
+                ((not (verify-artifact (voter-scheme voter) certificate)) :invalid)
+                (t (push kind (vround-assembled (ensure-round voter view)))
+                   (queue-event voter :certificate certificate)
+                   :valid))))))
 
 ;;; Actor (actor.rs)
 
 (defun handle-certificate (voter certificate)
-  "Record a verified certificate; true if new."
+  "Record a verified certificate (journaling it); true if new."
   (let ((added (etypecase certificate
                  (notarization (add-notarization voter certificate))
                  (nullification (add-nullification voter certificate))
                  (finalization (add-finalization voter certificate)))))
-    (when added (resolver-updated voter certificate))
+    (when added
+      (record voter certificate)
+      (resolver-updated voter certificate))
     added))
 
 (defun process-event (voter event)
@@ -774,17 +820,88 @@ votes and certificates to construct, or NIL when there is nothing to construct."
             (batcher-update voter)))))))
 
 (defun take-effects (voter)
+  "The effects of this call, once everything they depend on is durable in the journal."
+  (sync-journal voter)
   (nreverse (shiftf (voter-effects voter) '())))
+
+;;; Journal replay (actor.rs run: the floor, then every journaled artifact in view order)
+
+(defun replay-artifact (voter artifact)
+  (let* ((view (artifact-view artifact))
+         (r (ensure-round voter view)))
+    (flet ((ours (vote)
+             (invariant (eql (vote-signer vote) (voter-me voter))
+                        "journaled vote of view ~D is signer ~D's, not ours" view
+                        (vote-signer vote))))
+      (etypecase artifact
+        (notarize
+         (ours artifact)
+         (slot-record-verified r (notarize-proposal artifact))
+         (setf (vround-broadcast-notarize r) t))
+        (nullify
+         (ours artifact)
+         (invariant (not (eq (vround-decision r) :finalize))
+                    "journaled nullify of view ~D conflicts with our finalize" view)
+         (setf (vround-decision r) :nullify
+               (vround-retry-deadline r) (+ (now) (voter-retry-timeout voter))))
+        (finalize
+         (ours artifact)
+         (invariant (not (eq (vround-decision r) :nullify))
+                    "journaled finalize of view ~D conflicts with our nullify" view)
+         (setf (vround-decision r) :finalize))
+        (notarization
+         (setf (vround-broadcast-notarization r) t)
+         (pushnew :notarize (vround-assembled r))
+         (when (handle-certificate voter artifact) (effect voter :notarized artifact)))
+        (nullification
+         (setf (vround-broadcast-nullification r) t)
+         (pushnew :nullify (vround-assembled r))
+         (when (handle-certificate voter artifact) (effect voter :nullified artifact)))
+        (finalization
+         (setf (vround-broadcast-finalization r) t)
+         (pushnew :finalize (vround-assembled r))
+         (when (and (handle-certificate voter artifact)
+                    (> view (voter-reported-finalized voter)))
+           (setf (voter-reported-finalized voter) view)
+           (effect voter :finalized artifact)))
+        (certification-record
+         (let ((ok (certification-record-ok artifact)))
+           (when (eq (vround-certify r) :ready)
+             (let ((notarization (certified voter view ok)))
+               (when notarization (resolver-certified voter notarization ok))))))))))
+
+(defun replay-journal (voter)
+  "Restore what the journal holds; nothing replayed is journaled again."
+  (let ((journal (voter-journal voter)))
+    (setf (voter-journal voter) nil)
+    (unwind-protect
+         (dolist (octets (journal-replay journal (voter-epoch voter)))
+           (let ((artifact (decode-artifact octets)))
+             (when (plusp (artifact-view artifact))
+               (replay-artifact voter artifact))))
+      (setf (voter-journal voter) journal))))
 
 ;;; Interface
 
 (defun voter-start (voter)
-  "Enter view 1 on the genesis payload; returns effects."
+  "Enter view 1 on the genesis payload, replay the journal if any, and return effects (for a
+replayed journal: :notarized, :nullified and :finalized for the certificates it held)."
   (enter-view voter 1)
   (set-leader voter 1 nil)
+  (when (voter-journal voter) (replay-journal voter))
   (batcher-update voter)
   (pump voter)
   (take-effects voter))
+
+(defun voter-deliver (voter view certificate)
+  "Deliver CERTIFICATE answering our resolver request for VIEW. Returns (values effects
+outcome), OUTCOME :valid, :ignored (already held or no longer needed) or :invalid (not what
+an honest peer serves for VIEW, wrong epoch or a bad signature: penalize the peer)."
+  (let ((outcome (if (servable-p view certificate)
+                     (batcher-network-certificate voter nil certificate)
+                     :invalid)))
+    (pump voter)
+    (values (take-effects voter) outcome)))
 
 (defun participant-index (voter sender)
   (etypecase sender

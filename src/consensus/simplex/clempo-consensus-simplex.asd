@@ -7,6 +7,7 @@
   :components ((:file "package")
                (:file "elector")
                (:file "round")
+               (:file "journal")
                (:file "voter")))
 
 (defsystem "clempo-consensus-simplex/tests"
@@ -14,4 +15,5 @@
   :pathname "../../../tests/consensus/simplex/"
   :serial t
   :components ((:file "elector-tests")
-               (:file "voter-tests")))
+               (:file "voter-tests")
+               (:file "journal-tests")))
