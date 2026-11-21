@@ -78,7 +78,6 @@
 (deferror logo-uri-too-long "LogoURITooLong()")
 (deferror invalid-logo-uri "InvalidLogoURI()")
 (deferror root-key-retired "RootKeyRetired(address account)")
-(deferror guard-address-reserved "AddressReserved()") ; ReceivePolicyGuardError::address_reserved
 
 (defevent transfer "Transfer(address indexed from, address indexed to, uint256 amount)")
 (defevent approval "Approval(address indexed owner, address indexed spender, uint256 amount)")
@@ -130,7 +129,7 @@
 
 (defun transfer-policy-id (token)
   "The TIP-403 transfer policy of TOKEN: from T9 the registry's binding when it has one."
-  (or (fork-if (:since :t9) (funcall 'clempo.tip403:registered-token-transfer-policy-id token))
+  (or (fork-if (:since :t9) (clempo.tip403:registered-token-transfer-policy-id token))
       (legacy-transfer-policy-id token)))
 
 (defun validate-usd-currency (token)
@@ -200,10 +199,10 @@
 (defun transfer-authorized-p (token from to)
   "is_transfer_authorized: from T2 the recipient is not checked when the sender fails."
   (let* ((policy (transfer-policy-id token))
-         (sender-ok (funcall 'clempo.tip403:authorized-as-p policy from (auth-role :sender))))
+         (sender-ok (clempo.tip403:authorized-as-p policy from (auth-role :sender))))
     (if (and (not sender-ok) (fork-if (:since :t2) t nil))
         nil
-        (let ((recipient-ok (funcall 'clempo.tip403:authorized-as-p policy to (auth-role :recipient))))
+        (let ((recipient-ok (clempo.tip403:authorized-as-p policy to (auth-role :recipient))))
           (and sender-ok recipient-ok)))))
 
 (defun ensure-transfer-authorized (token from to)
@@ -211,14 +210,14 @@
 
 (defun ensure-receive-policy-authorized (token sender receiver)
   "TIP-1028: RECEIVER accepts TOKEN from SENDER."
-  (when (funcall 'clempo.tip403:check-receive-policy token sender receiver)
+  (when (clempo.tip403:check-receive-policy token sender receiver)
     (revert 'policy-forbids)))
 
 (defun ensure-authorized-as (token pairs)
   "PAIRS: (user . role) with ROLE passed to the registry as given."
   (let ((policy (transfer-policy-id token)))
     (loop for (user . role) in pairs
-          unless (funcall 'clempo.tip403:authorized-as-p policy user role)
+          unless (clempo.tip403:authorized-as-p policy user role)
             do (revert 'policy-forbids))))
 
 (defun check-and-update-spending-limit (token from amount)
@@ -255,9 +254,10 @@
 guard, store the claim receipt and return T."
   (fork-if (:before :t6) (return-from validate-inbound-or-block nil))
   (let ((target (recipient-target to)))
-    (when (= target +receive-policy-guard-address+) (revert 'guard-address-reserved))
+    (when (= target +receive-policy-guard-address+)
+      (revert 'clempo.receive-policy-guard:address-reserved))
     (multiple-value-bind (reason recovery)
-        (funcall 'clempo.tip403:check-receive-policy token originator target)
+        (clempo.tip403:check-receive-policy token originator target)
       (unless reason (return-from validate-inbound-or-block nil))
       (when (eq (evm-kind) :zone) (revert 'policy-forbids))
       (let ((guard (recipient-direct +receive-policy-guard-address+))
@@ -267,7 +267,7 @@ guard, store the claim receipt and return T."
                    (emit token 'mint +receive-policy-guard-address+ amount)
                    (setf kind 1))
             (%transfer token originator guard amount))
-        (funcall 'clempo.receive-policy-guard:store-blocked token originator target
+        (clempo.receive-policy-guard:store-blocked token originator target
                                                    (recipient-original to) recovery amount
                                                    reason kind memo)
         t))))
@@ -302,7 +302,7 @@ limit, then TIP-1028. The RECIPIENT to pay, or NIL when the funds went to the gu
       (let ((role (if (and (eq (evm-kind) :zone) (fork-if (:since :t13) t nil))
                       (auth-role :recipient)
                       (auth-role :mint-recipient))))
-        (unless (funcall 'clempo.tip403:authorized-as-p (transfer-policy-id token) (recipient-target to) role)
+        (unless (clempo.tip403:authorized-as-p (transfer-policy-id token) (recipient-target to) role)
           (revert 'policy-forbids)))
       (unless (validate-inbound-or-block token sender to amount total-supply memo)
         (values total-supply to)))))
@@ -360,7 +360,7 @@ on the implicit approval list)."
   (recipient-validate to)
   (check-and-update-spending-limit token from amount)
   (when (= (recipient-target to) +receive-policy-guard-address+)
-    (revert 'guard-address-reserved))
+    (revert 'clempo.receive-policy-guard:address-reserved))
   (ensure-receive-policy-authorized token receive-policy-sender (recipient-target to))
   (%transfer token from to amount)
   (emit-virtual-hop token to amount)
@@ -421,7 +421,7 @@ custody when CHECK-PROTECTED is false)."
   (fork-if (:since :t3) (check-not-paused token))
   (check-role token sender +burn-blocked-role+)
   (when check-protected (check-burn-address token owner))
-  (when (funcall 'clempo.tip403:authorized-as-p (transfer-policy-id token) owner (auth-role :sender))
+  (when (clempo.tip403:authorized-as-p (transfer-policy-id token) owner (auth-role :sender))
     (revert 'policy-forbids))
   (%transfer token (if check-protected owner +receive-policy-guard-address+)
              (recipient-direct 0) amount)
@@ -475,9 +475,9 @@ custody when CHECK-PROTECTED is false)."
 
 (defun change-transfer-policy-id (token sender policy-id)
   (check-role token sender +default-admin-role+)
-  (unless (funcall 'clempo.tip403:policy-exists-p policy-id) (revert 'invalid-transfer-policy-id))
+  (unless (clempo.tip403:policy-exists-p policy-id) (revert 'invalid-transfer-policy-id))
   (fork-if (:since :t9)
-           (funcall 'clempo.tip403:set-token-transfer-policy token policy-id)
+           (clempo.tip403:set-token-transfer-policy token policy-id)
            (write (token-transfer-policy-id token) policy-id))
   (emit token 'transfer-policy-update sender policy-id)
   (values))
@@ -563,7 +563,7 @@ custody when CHECK-PROTECTED is false)."
   (write (token-next-quote-token token) quote-token)
   (write (token-supply-cap token) +u128-max+)
   (fork-if (:since :t9)
-           (funcall 'clempo.tip403:set-token-transfer-policy token +allow-all-policy-id+)
+           (clempo.tip403:set-token-transfer-policy token +allow-all-policy-id+)
            (write (token-transfer-policy-id token) +allow-all-policy-id+))
   (initialize-roles token)
   (grant-default-admin token sender admin)
@@ -606,7 +606,7 @@ custody when CHECK-PROTECTED is false)."
     (if (or (eq recovery-mode :originator) (/= to receiver))
         (let ((subject (if (eq recovery-mode :originator) originator receiver)))
           (ensure-transfer-authorized token subject (recipient-target destination))
-          (when (funcall 'clempo.tip403:check-receive-policy token subject (recipient-target destination))
+          (when (clempo.tip403:check-receive-policy token subject (recipient-target destination))
             (revert 'policy-forbids))
           (unless (eq recovery-mode :third-party)
             (check-and-update-spending-limit token recovery-auth amount)))
