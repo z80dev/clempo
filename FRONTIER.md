@@ -43,3 +43,14 @@ and zero layer violations. Scoring took 0.526 s mainnet and 1.784 s moderato.
 The check-build codec benchmark (`time`, 100 decode/re-encode passes over the
 640 mainnet raw blocks, excluding JSON/file I/O) processed 64,000 blocks in
 0.320 s (200,000 blocks/s), consing 593,425,824 bytes, with 0.005 s GC.
+
+R4 devp2p path: `CLEMPO_BUILD=release bin/clempo-dev p2p-sync -from 0 -to 9999`
+connected to the local Rust Tempo node at `127.0.0.1:30311` and negotiated
+eth/69. All 10,000 mainnet blocks matched `clempo.archive` exactly (0.239 s,
+41,784 blocks/s). With `-version 68`, the same 10,000 blocks matched (0.244 s,
+40,971 blocks/s). Both versions also served 30 receipts for blocks 9970..9999;
+the first wire receipt was 265 bytes on eth/68 and 5 bytes on eth/69 (no bloom).
+The cold gate passed 116 tests, including reference Snappy, RLPx, SAKE/CUPS and
+Tempo Commonware lookup vectors. This demonstrates download, not live replay
+or finalization; R4 remains unscored. Public validator interoperability was not
+attempted because Tempo admits registered validator identities and addresses.
