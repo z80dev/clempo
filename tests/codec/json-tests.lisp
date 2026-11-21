@@ -23,3 +23,7 @@
   (signals json-error (parse-json "{\"a\":1,}"))
   (signals json-error (parse-json "[1 2]"))
   (signals json-error (parse-json "\"open")))
+
+(deftest json-control-escapes-are-lowercase ()
+  ;; The reference (serde_json) writes \u001f, not \u001F.
+  (is= "\"\\u001f\"" (to-json-string (string (code-char 31)))))

@@ -167,7 +167,7 @@
              (#\Backspace (write-string "\\b" out))
              (#\Page (write-string "\\f" out))
              (t (if (< (char-code c) 32)
-                    (format out "\\u~4,'0x" (char-code c))
+                    (format out "\\u~(~4,'0x~)" (char-code c))
                     (write-char c out)))))
   (write-char #\" out))
 
