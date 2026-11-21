@@ -37,3 +37,28 @@
                  (is (search "t_head 7" reply)))))
         (socket:socket-close client)
         (metrics:stop-metrics-server server)))))
+
+(deftest cells-count-without-the-lock ()
+  (let* ((metrics:*registry* (metrics:make-registry))
+         (calls (metrics:define-metric "t_calls_total" :counter "calls"))
+         (latency (metrics:define-metric "t_seconds" :summary "latency"))
+         (labels '(("method" . "eth_call"))))
+    (metrics:metric-inc calls :labels labels)            ; counted before the cell exists
+    (let ((cell (metrics:metric-cell calls labels)) (time (metrics:metric-cell latency nil)))
+      (is (eq cell (metrics:metric-cell calls labels)))
+      (mapc #'sb-thread:join-thread
+            (loop for k below 8
+                  collect (let ((k k))
+                            (sb-thread:make-thread
+                             (lambda ()
+                               (let ((metrics:*shard* (mod k 3)))
+                                 (dotimes (i 1000)
+                                   (metrics:cell-inc cell)
+                                   (metrics:cell-observe-ticks time (floor internal-time-units-per-second 1000)))))))))
+      (metrics:metric-inc calls :by 2 :labels labels)
+      (is= 8003 (metrics:metric-value calls :labels labels))
+      (is= 8000 (car (metrics:metric-value latency)))
+      (let ((text (metrics:render-metrics)))
+        (is (search "t_calls_total{method=\"eth_call\"} 8003" text))
+        (is (search "t_seconds_count 8000" text))
+        (is (search "t_seconds_sum 8.000000" text))))))

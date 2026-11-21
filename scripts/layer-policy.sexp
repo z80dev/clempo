@@ -101,7 +101,19 @@
   ("src/p2p/snappy.lisp"
    ("COMPRESS" 4 "Varint and copy loops consume finite input lengths and matches.")
    ("DECOMPRESS" 1 "Consumes compressed tags up to the finite input length, checking the declared output bound."))
-  ("src/rpc/defrpc.lisp" ("VALUE-SPANS" 1 "Advances through values of a fixed JSON slice."))
+  ("src/rpc/defrpc.lisp"
+   ("VALUE-SPANS" 1 "Advances through values of a fixed JSON slice.")
+   ("JSON-STRING-END" 1 "Advances one or two characters per step to the slice end.")
+   ("LOOKUP-METHOD" 1 "Copies a name of at most 64 characters.")
+   ("MEMBER-FIELDS" 2 "Walks the recorded member layout (at most +MEMBERS-MAX+ members) and the members before each.")
+   ("PLAIN-KEYS-P" 2 "Walks the recorded member layout and each key's characters.")
+   ("PUT-TEXT" 1 "Copies the given slice of a finite string.")
+   ("SPAN-IS" 1 "Compares a slice no longer than the given name.")
+   ("SPANS=" 1 "Compares two slices of equal finite length."))
+  ("src/rpc/params.lisp"
+   ("ASCII-HEX-P" 1 "Runs over the given slice of a finite string.")
+   ("HEX-SPAN-INTO" 1 "Advances two digits per octet over the given slice.")
+   ("PLAIN-BLOCK-SELECTOR" 1 "Runs over at most 15 hex digits."))
   ("src/rpc/peers.lisp"
    ("FORM-DECODE" 1 "Each step advances the index through the finite query string by one or three characters.")
    ("PARSE-ENR" 1 "Each key/value pair advances the position through the finite decoded record."))

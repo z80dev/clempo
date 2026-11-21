@@ -31,8 +31,11 @@ each block's receipts checked against its header's receipts root before they are
 
 (defclass backend ()
   ((lock :initform (sb-thread:make-mutex :name "backend") :reader backend-lock)
-   (readers :initform 0 :accessor backend-readers)
-   (writers :initform 0 :accessor backend-writers)   ; writers waiting for the readers to finish
+   ;; The writers waiting or writing, then the read holds counted per shard
+   ;; (CLEMPO.METRICS:*SHARD*), a 64-octet line each, so concurrent requests do not contend
+   ;; for one word.
+   (gate :initform (make-array (* 17 8) :element-type 'sb-ext:word :initial-element 0)
+         :reader backend-gate)
    (queue :initform (sb-thread:make-waitqueue) :reader backend-queue)
    ;; Decoded blocks by number (clempo.rpc.render's CHAIN-BLOCK).
    (block-cache :initform (make-hash-table :synchronized t) :reader backend-block-cache)
@@ -82,46 +85,92 @@ SENDER is the recovered sender as an integer and PENDING-P is false for a queued
   (:documentation "Remove every transaction from the pool; return how many were removed.")
   (:method (backend) (declare (ignore backend)) 0))
 
-;;; Readers and writers: many concurrent requests, one writer at a time between them.
+;;; Readers and writers: many concurrent requests, one writer at a time between them. A
+;;; reader counts itself in its shard without the lock; when it then finds a writer waiting
+;;; or writing, it takes its hold under the lock instead, which the writer keeps while it
+;;; writes. A writer waits under the lock (releasing it while it waits, so reads may still
+;;; start) until no read is held, then writes. A writer announces itself before it counts
+;;; the readers and a reader counts itself before it looks for a writer, each with an
+;;; atomic (fencing) update: one of the two always sees the other.
+
+(defconstant +writers+ 0 "The gate index of the writers count.")
+
+(declaim (inline shard-index fence))
+(defun shard-index () (* 8 (1+ clempo.metrics:*shard*)))
+(defun fence ()
+  "After an atomic update, before the load that must see the other side's (x86-64's atomic
+updates fence already)."
+  #-x86-64 (sb-thread:barrier (:memory)))
+
+(defun readers-held-p (gate)
+  (declare (type (simple-array sb-ext:word (*)) gate))
+  (loop for i from 8 below (length gate) by 8 thereis (plusp (aref gate i))))
+
+(defun wake-writer (backend)
+  "Under the lock: wake a writer waiting for the readers to finish."
+  (sb-thread:condition-broadcast (backend-queue backend)))
 
 (defun release-read (backend)
-  "Drop one read hold (under the backend lock): the last reader out wakes a waiting writer.
-No writer waiting, no wakeup (a broadcast is a system call on every request)."
-  (when (and (zerop (decf (backend-readers backend))) (plusp (backend-writers backend)))
-    (sb-thread:condition-broadcast (backend-queue backend))))
+  "Drop one read hold: the last reader out wakes a waiting writer. No writer waiting, no
+lock and no wakeup (a broadcast is a system call)."
+  (let ((gate (backend-gate backend)))
+    (declare (type (simple-array sb-ext:word (*)) gate))
+    (sb-ext:atomic-decf (aref gate (shard-index)))
+    (fence)
+    (when (plusp (aref gate +writers+))
+      (sb-thread:with-mutex ((backend-lock backend)) (wake-writer backend)))))
+
+(defun take-read (backend)
+  "Take one read hold."
+  (let ((gate (backend-gate backend)) (i (shard-index)))
+    (declare (type (simple-array sb-ext:word (*)) gate))
+    (sb-ext:atomic-incf (aref gate i))
+    (fence)
+    (when (plusp (aref gate +writers+))
+      ;; a writer is waiting or writing: back out, then hold under the lock, which a writer
+      ;; keeps while it writes
+      (sb-ext:atomic-decf (aref gate i))
+      (sb-thread:with-mutex ((backend-lock backend))
+        (wake-writer backend)
+        (sb-ext:atomic-incf (aref gate i))))))
 
 (defun call-with-backend-read (backend thunk)
-  (let ((lock (backend-lock backend)))
-    (sb-thread:with-mutex (lock) (incf (backend-readers backend)))
-    (unwind-protect
-         (let ((*backend* backend) (*head* (backend-head backend))
-               (clempo.executor:*chain* (backend-chain backend)))
-           (funcall thunk))
-      (sb-thread:with-mutex (lock) (release-read backend)))))
+  (take-read backend)
+  (unwind-protect
+       (let ((*backend* backend) (*head* (backend-head backend))
+             (clempo.executor:*chain* (backend-chain backend)))
+         (funcall thunk))
+    (release-read backend)))
 
 (defmacro with-backend-read ((backend) &body body)
-  `(call-with-backend-read ,backend (lambda () ,@body)))
+  (let ((thunk (gensym "READ")))
+    `(flet ((,thunk () ,@body))
+       (declare (dynamic-extent #',thunk))
+       (call-with-backend-read ,backend #',thunk))))
 
 (defun call-outside-backend-read (thunk)
   "Run THUNK with the current request's read hold on *BACKEND* released, so a writer may commit
 blocks meanwhile (a request that waits for a block). The hold is taken again before returning
 and *HEAD* is snapshotted anew."
-  (let* ((backend *backend*) (lock (backend-lock backend)))
-    (sb-thread:with-mutex (lock) (release-read backend))
+  (let ((backend *backend*))
+    (release-read backend)
     (unwind-protect (funcall thunk)
-      (sb-thread:with-mutex (lock) (incf (backend-readers backend)))
+      (take-read backend)
       (setf *head* (backend-head backend)))))
 
 (defun call-with-backend-write (backend thunk)
   "Wait until no request is running, then run THUNK with new requests held back."
-  (let ((lock (backend-lock backend)))
+  (let ((lock (backend-lock backend)) (gate (backend-gate backend)))
+    (declare (type (simple-array sb-ext:word (*)) gate))
     (sb-thread:with-mutex (lock)
-      (incf (backend-writers backend))
+      (sb-ext:atomic-incf (aref gate +writers+))
+      (fence)
       (unwind-protect
-           (loop until (zerop (backend-readers backend))
-                 do (sb-thread:condition-wait (backend-queue backend) lock))
-        (decf (backend-writers backend)))
-      (funcall thunk))))
+           (progn
+             (loop while (readers-held-p gate)
+                   do (sb-thread:condition-wait (backend-queue backend) lock))
+             (funcall thunk))
+        (sb-ext:atomic-decf (aref gate +writers+))))))
 
 (defmacro with-backend-write ((backend) &body body)
   `(call-with-backend-write ,backend (lambda () ,@body)))

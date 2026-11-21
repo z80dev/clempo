@@ -247,6 +247,13 @@ those accepted in the current request that start after its response."
           do (setf (schar s j) (code-char (aref o i))))
     s))
 
+(declaim (inline octet-position))
+(defun octet-position (byte o start end)
+  "The index of the first BYTE in O[START,END), or NIL."
+  (declare (type (unsigned-byte 8) byte) (type octets o) (type fixnum start end))
+  (loop for i of-type fixnum from start below end
+        when (= (aref o i) byte) return i))
+
 (defun next-line (c limit)
   "The next line of C's input, consumed: (values start end) of its octets in the input
 buffer, without its LF and trailing CRs (a last line cut by the end of stream is taken as it
@@ -255,7 +262,7 @@ is refused (431) as soon as that much of it is here."
   (declare (type fixnum limit))
   (let* ((in (connection-in c)) (req (connection-request c))
          (o (inbuf-octets in)) (start (inbuf-start in)) (end (inbuf-end in))
-         (lf (position 10 o :start (+ start (req-scanned req)) :end end)))
+         (lf (octet-position 10 o (+ start (req-scanned req)) end)))
     (declare (type fixnum start end))
     (cond (lf
            (when (> (- lf start) limit) (reject 431))
@@ -271,13 +278,14 @@ is refused (431) as soon as that much of it is here."
           (t (setf (req-scanned req) (- end start))
              :more))))
 
+(declaim (inline ci=))
 (defun ci= (o start end text)
   "Whether O[START,END) spells TEXT (lowercase ASCII), ignoring ASCII case."
-  (declare (type octets o) (type fixnum start end) (type simple-string text))
+  (declare (type octets o) (type fixnum start end) (type (simple-array character (*)) text))
   (and (= (- end start) (length text))
        (loop for i of-type fixnum from start below end
-             for ch across text
-             always (= (let ((b (aref o i))) (if (<= 65 b 90) (+ b 32) b)) (char-code ch)))))
+             for j of-type fixnum from 0
+             always (= (let ((b (aref o i))) (if (<= 65 b 90) (+ b 32) b)) (char-code (schar text j))))))
 
 (defun trim-spaces (o start end)
   "O[START,END) without leading and trailing spaces: (values start end)."
@@ -300,12 +308,14 @@ is refused (431) as soon as that much of it is here."
 
 (defun json-content-type-p (o start end)
   "Whether the Content-Type O[START,END) is application/json, parameters aside."
-  (multiple-value-bind (s e) (trim-spaces o start (or (position 59 o :start start :end end) end))
+  (declare (type octets o) (type fixnum start end))
+  (multiple-value-bind (s e) (trim-spaces o start (or (octet-position 59 o start end) end))
     (ci= o s e "application/json")))
 
 (defun take-request-line (req o start end)
-  (let* ((sp1 (position 32 o :start start :end end))
-         (sp2 (and sp1 (position 32 o :start (1+ sp1) :end end))))
+  (declare (type octets o) (type fixnum start end))
+  (let* ((sp1 (octet-position 32 o start end))
+         (sp2 (and sp1 (octet-position 32 o (1+ sp1) end))))
     (unless (and sp1 sp2 (> sp1 start)) (reject 400))
     (setf (req-method req) (cond ((ci= o start sp1 "post") :post)
                                  ((ci= o start sp1 "get") :get)
@@ -313,7 +323,8 @@ is refused (431) as soon as that much of it is here."
 
 (defun take-header (req o start end)
   "Note the header line O[START,END) if it is the first of a kind the server reads."
-  (let ((colon (position 58 o :start start :end end)))
+  (declare (type octets o) (type fixnum start end))
+  (let ((colon (octet-position 58 o start end)))
     (unless colon (reject 400))
     (multiple-value-bind (ns ne) (trim-spaces o start colon)
       (let ((bit (cond ((ci= o ns ne "content-length") 1)
@@ -434,34 +445,62 @@ first. Signals BAD-REQUEST for a request to refuse."
            (values (inbuf-octets in) (inbuf-start in) (+ (inbuf-start in) (req-need req))))
           (t (values (inbuf-octets in) 0 0)))))
 
+(defvar *text* nil
+  "The calling worker's buffer for request text (a base string), or NIL: a body's text lives
+there until the worker reads the next one.")
+
+(defconstant +text-keep+ (* 1024 1024) "The largest text buffer a worker keeps.")
+
 (defun body-text (octets start end)
-  "OCTETS[START,END) decoded as UTF-8: an ASCII body (nearly every request) becomes a base
-string, a byte a character, without the general decoder's buffers. Signals for bytes that
-are not UTF-8."
+  "OCTETS[START,END) decoded as UTF-8: (values text length). An ASCII body (nearly every
+request) becomes a base string, a byte a character, without the general decoder's buffers,
+in the worker's *TEXT* when that has room. Signals for bytes that are not UTF-8."
   (declare (type octets octets) (type fixnum start end))
-  (if (loop for i of-type fixnum from start below end always (< (aref octets i) #x80))
-      (let ((s (make-string (- end start) :element-type 'base-char)))
-        (loop for i of-type fixnum from start below end
-              for j of-type fixnum from 0
-              do (setf (schar s j) (code-char (aref octets i))))
-        s)
-      (octets->string octets :start start :end end)))
+  (invariant (<= 0 start end (length octets)) "body ~D..~D outside ~D octets" start end (length octets))
+  (let* ((n (- end start))
+         (s (let ((buffer *text*))
+              (cond ((and buffer (<= n (length buffer))) buffer)
+                    ((and buffer (<= n +text-keep+))
+                     (setf *text* (make-string (max n (* 2 (length buffer))) :element-type 'base-char)))
+                    (t (make-string n :element-type 'base-char))))))
+    (declare (type simple-base-string s) (type fixnum n))
+    (flet ((decoded ()
+             (let ((text (octets->string octets :start start :end end)))
+               (return-from body-text (values text (length text))))))
+      ;; a base character is an octet: eight at a time while none has its top bit
+      (let ((i start) (j 0))
+        (declare (type fixnum i j))
+        (sb-sys:with-pinned-objects (octets s)
+          (let ((from (sb-sys:vector-sap octets)) (to (sb-sys:vector-sap s)))
+            (loop while (<= (+ i 8) end)
+                  do (let ((w (sb-sys:sap-ref-64 from i)))
+                       (declare (type (unsigned-byte 64) w))
+                       (unless (zerop (logand w #x8080808080808080)) (decoded))
+                       (setf (sb-sys:sap-ref-64 to j) w)
+                       (incf i 8) (incf j 8)))))
+        (loop while (< i end)
+              do (let ((b (aref octets i)))
+                   (when (>= b #x80) (decoded))
+                   (setf (schar s j) (code-char b))
+                   (incf i) (incf j)))))
+    (values s n)))
 
 (defun run-body (octets &optional (start 0) (end (length octets)))
   "Answer one JSON-RPC body, OCTETS[START,END): (values status response), inside the
 backend's read lock. A body that is not UTF-8 is a parse error, as the reference answers it
 \(400 unless it starts as an object or array)."
-  (let ((text (handler-case (body-text octets start end)
-                (error ()
-                  (let ((first (find-if-not (lambda (b) (member b '(32 9 10 13))) octets
-                                            :start start :end end)))
-                    (return-from run-body
-                      (values (if (member first '(123 91)) 200 400)
-                              "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}"))))))
-        (backend (and *server* (server-backend *server*))))
-    (if backend
-        (chain:with-backend-read (backend) (rpc:handle-body text))
-        (rpc:handle-body text))))
+  (multiple-value-bind (text length)
+      (handler-case (body-text octets start end)
+        (error ()
+          (let ((first (find-if-not (lambda (b) (member b '(32 9 10 13))) octets
+                                    :start start :end end)))
+            (return-from run-body
+              (values (if (member first '(123 91)) 200 400)
+                      "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}")))))
+    (let ((backend (and *server* (server-backend *server*))))
+      (if backend
+          (chain:with-backend-read (backend) (rpc:handle-body text length))
+          (rpc:handle-body text length)))))
 
 ;;; HTTP responses, rendered into the worker's buffer
 
@@ -567,6 +606,30 @@ it can: the index of S reached (END when every one was)."
   "Octets of *OUT* before a response body, where its head is put once the body's length is
 known (the longest head is under 200).")
 
+(defparameter +json-type+ "application/json; charset=utf-8")
+
+(defun put-head-start (o status content-type)
+  "Write a response head into O up to the content length's digits; returns where they go."
+  (let* ((pos (put-ascii o 0 "HTTP/1.1 "))
+         (pos (put-decimal o pos status))
+         (pos (put-ascii o pos " "))
+         (pos (put-ascii o pos (reason status)))
+         (pos (put-ascii o pos #.(format nil "~C~Ccontent-type: " #\Return #\Newline)))
+         (pos (put-ascii o pos content-type)))
+    (put-ascii o pos #.(format nil "~C~Ccontent-length: " #\Return #\Newline))))
+
+(defparameter +ok-json-head+
+  (let ((o (make-octets 256))) (subseq o 0 (put-head-start o 200 +json-type+)))
+  "The head of every JSON answer with status 200, up to its content length's digits.")
+(defparameter +head-end+ (string->octets (format nil "~C~C~C~C" #\Return #\Newline #\Return #\Newline)))
+(defparameter +close-head-end+
+  (string->octets (format nil "~C~Cconnection: close~C~C~C~C"
+                          #\Return #\Newline #\Return #\Newline #\Return #\Newline)))
+
+(defun decimal-length (n)
+  (declare (type (integer 0 #.most-positive-fixnum) n))
+  (if (zerop n) 1 (loop for k of-type fixnum = n then (floor k 10) while (plusp k) count t)))
+
 (defun render-response (status content-type body refused)
   "Write BODY (a string) into *OUT* after +HEAD-ROOM+ octets, then the response head right
 before it: (values start end) of the response in *OUT*. A REFUSED request's answer says
@@ -587,20 +650,14 @@ Connection: close."
                                    (replace *out* bytes :start1 +head-room+)
                                    (length bytes))))))))
         (let* ((o *out*)
-               (head (make-octets 256))
-               (pos (put-ascii head 0 "HTTP/1.1 "))
-               (pos (put-decimal head pos status))
-               (pos (put-ascii head pos " "))
-               (pos (put-ascii head pos (reason status)))
-               (pos (put-ascii head pos #.(format nil "~C~Ccontent-type: " #\Return #\Newline)))
-               (pos (put-ascii head pos content-type))
-               (pos (put-ascii head pos #.(format nil "~C~Ccontent-length: " #\Return #\Newline)))
-               (pos (put-decimal head pos size))
-               (pos (put-ascii head pos (if refused
-                                            #.(format nil "~C~Cconnection: close~C~C~C~C" #\Return #\Newline #\Return #\Newline #\Return #\Newline)
-                                            #.(format nil "~C~C~C~C" #\Return #\Newline #\Return #\Newline))))
-               (start (- +head-room+ pos)))
-          (replace o head :start1 start :end2 pos)
+               (head (make-array 256 :element-type '(unsigned-byte 8)))
+               (prefix (if (and (eql status 200) (eq content-type +json-type+)) +ok-json-head+ head))
+               (prefix-end (if (eq prefix head) (put-head-start head status content-type) (length prefix)))
+               (tail (if refused +close-head-end+ +head-end+))
+               (start (- +head-room+ prefix-end (decimal-length size) (length tail))))
+          (declare (dynamic-extent head) (type octets prefix tail) (type fixnum prefix-end start))
+          (replace o prefix :start1 start :end2 prefix-end)
+          (replace o tail :start1 (put-decimal o (+ start prefix-end) size))
           (values start (+ +head-room+ size)))))))
 
 (defun send-out (c o start end)
@@ -637,12 +694,12 @@ in C until the socket can take more) or :FAILED."
            (send-response c 415 "text/plain"
                           "Supplied content type is not allowed. Content-Type: application/json is required"))
           (t (multiple-value-bind (status response) (multiple-value-call #'run-body (request-body c))
-               (send-response c status "application/json; charset=utf-8" response))))))
+               (send-response c status +json-type+ response))))))
 
 (defun refuse (c condition)
   "Answer a refused request and close once it is sent."
   (let ((status (bad-request-status condition)))
-    (send-response c status (if (= status 413) "application/json; charset=utf-8" "text/plain")
+    (send-response c status (if (= status 413) +json-type+ "text/plain")
                    (bad-request-body condition) :refused t)))
 
 (defun request-done (c)
@@ -999,9 +1056,17 @@ started."
               (sb-thread:make-thread (lambda () (reap-loop server)) :name "rpc reaper")
               (server-workers server)
               (loop for p across pollers
-                    collect (let ((p p))
+                    for i from 0
+                    collect (let ((p p) (shard (1+ (mod i 15))))
                               (sb-thread:make-thread
-                               (lambda () (call-with-rpc-thread server (lambda () (worker-loop server p))))
+                               (lambda ()
+                                 (call-with-rpc-thread
+                                  server
+                                  (lambda ()
+                                    ;; each worker counts into its own metrics shard
+                                    (let ((clempo.metrics:*shard* shard)
+                                          (*text* (make-string 4096 :element-type 'base-char)))
+                                      (worker-loop server p)))))
                                :name "rpc worker"))))
         server))))
 

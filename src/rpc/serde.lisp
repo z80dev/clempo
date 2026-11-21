@@ -31,6 +31,7 @@ representation.")
   (line-start 0 :type fixnum)
   (start 0 :type fixnum))
 
+(declaim (inline make-src))   ; a caller may keep a src on its stack (dynamic-extent)
 (defun make-src (text &key (start 0) (end (length text)))
   (let ((s (%make-src (coerce text 'simple-string) start end)))
     (setf (src-line-start s) start (src-start s) start)

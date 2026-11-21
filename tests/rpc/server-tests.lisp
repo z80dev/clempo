@@ -401,3 +401,99 @@
                                              :labels (list (cons "method" "no_suchMethod") (cons "outcome" "error")))))
       (is (plusp (car (clempo.metrics:metric-value rpc::*latency-metric*
                                                    :labels (list (cons "method" "web3_clientVersion")))))))))
+
+;;; The envelope read from the validator's member layout answers as the key-by-key read does
+
+(deftest envelope-layout-and-key-scan-agree ()
+  (let ((seeds (list "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":[\"0x5a8b0c3e1f2d4a6b8c9d0e1f2a3b4c5d6e7f8091\",\"latest\"]}"
+                     "{\"id\":\"a\\\"b\",\"jsonrpc\":\"2\\u002e0\",\"m\\u0065thod\":\"web3_sha3\",\"params\":[\"0x00\"]}"
+                     "{\"jsonrpc\":\"2.0\",\"id\":18446744073709551615,\"method\":\"eth_getBalance\",\"params\":[\"0X5A8B0C3E1F2D4A6B8C9D0E1F2A3B4C5D6E7F8091\",{\"blockNumber\":\"0x1\"}]}"
+                     "{\"id\":7,\"id\":8,\"jsonrpc\":\"2.0\",\"method\":\"eth_chainId\"}"
+                     " { \"jsonrpc\" : \"2.0\" , \"method\" : \"web3_clientVersion\" , \"x\" : [ 1 , { \"id\" : 2 } ] } "))
+        (alphabet "{}[]:,\"\\ -.0123456789abcdefxuijdmtphonrslXL")
+        (state (sb-ext:seed-random-state 11))
+        (b (make-instance 'fixed-backend))
+        (members (make-array 48 :element-type 'fixnum))
+        (cases 0) (disagree 0))
+    (flet ((check (text)
+             (multiple-value-bind (valid count) (json:json-valid-p text :members members)
+               (when (and valid count)
+                 (incf cases)
+                 (chain:with-backend-read (b)
+                   (unless (equal (rpc:handle-request-object text 0 (length text) members count)
+                                  (rpc:handle-request-object text 0 (length text)))
+                     (incf disagree)))))))
+      (dolist (seed seeds)
+        (check (coerce seed 'simple-base-string))
+        (dotimes (i 3000)
+          (let ((s (copy-seq seed)))
+            (dotimes (k (1+ (random 3 state)))
+              (let ((at (random (max 1 (length s)) state))
+                    (c (char alphabet (random (length alphabet) state))))
+                (setf s (if (zerop (random 2 state))
+                            (let ((s (copy-seq s))) (when (plusp (length s)) (setf (char s at) c)) s)
+                            (concatenate 'string (subseq s 0 at) (string c) (subseq s at))))))
+            (check (coerce s 'simple-base-string))))))
+    (is (> cases 1000) "~D valid mutated requests" cases)
+    (is= 0 disagree "of ~D requests" cases)))
+
+;;; Reads hold the backend without its lock; a writer still excludes them
+
+(deftest backend-writers-exclude-readers ()
+  (let ((b (make-instance 'fixed-backend)) (events '()) (lock (sb-thread:make-mutex)))
+    (flet ((note (e) (sb-thread:with-mutex (lock) (push e events)))
+           (seen (e) (sb-thread:with-mutex (lock) (member e events)))
+           (await (p) (loop repeat 2000 until (funcall p) do (sleep 0.005))))
+      ;; a writer waits for a held read, and a read taken meanwhile (nested) still starts
+      (let* ((release nil)
+             (reader (sb-thread:make-thread
+                      (lambda ()
+                        (chain:with-backend-read (b)
+                          (note :read)
+                          (await (lambda () release))
+                          (chain:with-backend-read (b) (note :nested))
+                          (note :read-done)))))
+             (writer (progn (await (lambda () (seen :read)))
+                            (sb-thread:make-thread
+                             (lambda () (chain:with-backend-write (b) (note :write)))))))
+        (sleep 0.05)
+        (is (not (seen :write)) "the writer waits for the read")
+        (setf release t)
+        (sb-thread:join-thread reader :timeout 10)
+        (sb-thread:join-thread writer :timeout 10)
+        (is (seen :nested))
+        (is (equal '(:write :read-done :nested :read) events) "~S" events))
+      ;; a read that starts while a writer writes waits for it
+      (setf events '())
+      (let* ((release nil)
+             (writer (sb-thread:make-thread
+                      (lambda ()
+                        (chain:with-backend-write (b)
+                          (note :write)
+                          (await (lambda () release))
+                          (note :write-done)))))
+             (reader (progn (await (lambda () (seen :write)))
+                            (sb-thread:make-thread
+                             (lambda () (chain:with-backend-read (b) (note :read)))))))
+        (sleep 0.05)
+        (is (not (seen :read)) "the read waits for the writer")
+        (setf release t)
+        (sb-thread:join-thread writer :timeout 10)
+        (sb-thread:join-thread reader :timeout 10)
+        (is (equal '(:read :write-done :write) events) "~S" events))
+      ;; many readers and writers at once: no read overlaps a write
+      (let ((reading 0) (overlaps 0))
+        (mapc (lambda (th) (sb-thread:join-thread th :timeout 60))
+              (loop for k below 8
+                    collect (let ((k k))
+                              (sb-thread:make-thread
+                               (lambda ()
+                                 (let ((clempo.metrics:*shard* (mod k 4)))
+                                   (dotimes (i 2000)
+                                     (if (zerop (mod (+ i k) 50))
+                                         (chain:with-backend-write (b)
+                                           (unless (zerop reading) (incf overlaps)))
+                                         (chain:with-backend-read (b)
+                                           (sb-thread:with-mutex (lock) (incf reading))
+                                           (sb-thread:with-mutex (lock) (decf reading)))))))))))
+        (is= 0 overlaps)))))

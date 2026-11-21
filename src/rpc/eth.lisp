@@ -88,9 +88,12 @@ everything that needs no execution.")
 (defrpc "eth_gasPrice" () "suggested gas price: the head's base fee"
   (let ((b (chain-block chain:*head*))) (q (or (cblock-base-fee b) 0))))
 
+(defparameter +native-balance-answer+ (q +native-balance-placeholder+)
+  "eth_getBalance's answer, written once.")
+
 (defrpc "eth_getBalance" ((address address) (block block-id :optional t))
   "Tempo's placeholder: native balances do not exist"
-  (q +native-balance-placeholder+))
+  +native-balance-answer+)
 
 ;;; eth: blocks
 
