@@ -43,4 +43,5 @@
                (:file "misc-tests")
                (:file "aa-request-tests")
                (:file "pool-tests")
-               (:file "server-tests")))
+               (:file "server-tests")
+               (:file "gap-tests")))

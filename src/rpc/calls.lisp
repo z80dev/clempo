@@ -1024,7 +1024,10 @@ the method."
   "reth call_many: the bundles' requests run one after another on one overlay at the
 position CONTEXT selects (after the whole block, or after its first transactionIndex
 transactions). Each request renders as RENDER (tracer request outcome gas) under a fresh
-(funcall TRACER), or as eth_callMany's {value}/{error}. Returns one vector per bundle."
+(funcall TRACER), or as eth_callMany's {value}/{error}. Returns one vector per bundle.
+An eth_callMany request that halts on an invalid opcode is named as revm names it
+(REFINE-HALT): the overlay is rebuilt, the requests before it rerun, and it runs again under
+the tracer that finds the opcode."
   (let* ((target (or (getf context :block-number) :latest))
          (n (block-id-number target)))
     (unless (and n (<= n chain:*head*)) (header-not-found target))
@@ -1034,30 +1037,48 @@ transactions). Each request renders as RENDER (tracer request outcome gas) under
            (index (getf context :transaction-index :all))
            (all (or (eq index :all) (>= index (length (cblock-txs b)))))
            (state (when all (state-at (list :hash (cblock-hash b)))))
-           (ctx (unless all
-                  (let ((ctx (block-context b)))
-                    (dotimes (i index ctx) (replay-tx ctx b i))))))
-      (coerce
-       (loop for bundle in bundles for bi from 0
-             collect (coerce
-                      (loop for request in (getf bundle :transactions) for ti from 0
-                            for overrides = (when (and (zerop bi) (zerop ti)) state-overrides)
-                            collect (let ((tr (and tracer (funcall tracer))))
-                                      (multiple-value-bind (outcome gas c)
-                                          (run-request b state request what
-                                                       :ctx ctx :tracer tr :budget budget
-                                                       :state-overrides overrides
-                                                       :block-overrides (getf bundle :block-override)
-                                                       :on-invalid (lambda (code message)
-                                                                     (rpc-fail code (format nil "call_many error in bundle ~D and transaction ~D: ~A"
-                                                                                            bi ti message))))
-                                        (setf ctx c)
-                                        (if render
-                                            (funcall render tr request outcome gas)
-                                            (handler-case (json:jobject "value" (hexbytes (call-result outcome gas what)))
-                                              (rpc-error (e) (json:jobject "error" (error-text e))))))))
-                      'simple-vector))
-       'simple-vector))))
+           (done '()))                  ; (request state-overrides block-overrides), newest first
+      (labels ((start ()
+                 "The overlay before the first request; NIL runs it on a fresh one over STATE."
+                 (unless all
+                   (let ((ctx (block-context b)))
+                     (dotimes (i index ctx) (replay-tx ctx b i)))))
+               (run (ctx budget request overrides block-overrides)
+                 (run-request b state request what :ctx ctx :budget budget
+                                                   :state-overrides overrides :block-overrides block-overrides))
+               (rerun ()
+                 "Every request so far again on a new overlay, only the last under *TRACER*."
+                 (let ((halt-tracer clempo.evm:*tracer*) (ctx (start)) (budget (make-budget)))
+                   (destructuring-bind (last &rest earlier) done
+                     (let ((clempo.evm:*tracer* nil))
+                       (loop for step in (reverse earlier)
+                             do (setf ctx (nth-value 2 (apply #'run ctx budget step)))))
+                     (let ((clempo.evm:*tracer* halt-tracer))
+                       (apply #'run ctx budget last))))))
+        (let ((ctx (start)))
+          (coerce
+           (loop for bundle in bundles for bi from 0
+                 collect (coerce
+                          (loop for request in (getf bundle :transactions) for ti from 0
+                                for overrides = (when (and (zerop bi) (zerop ti)) state-overrides)
+                                for block-overrides = (getf bundle :block-override)
+                                collect (let ((tr (and tracer (funcall tracer))))
+                                          (multiple-value-bind (outcome gas c)
+                                              (run-request b state request what
+                                                           :ctx ctx :tracer tr :budget budget
+                                                           :state-overrides overrides
+                                                           :block-overrides block-overrides
+                                                           :on-invalid (lambda (code message)
+                                                                         (rpc-fail code (format nil "call_many error in bundle ~D and transaction ~D: ~A"
+                                                                                                bi ti message))))
+                                            (setf ctx c)
+                                            (push (list request overrides block-overrides) done)
+                                            (if render
+                                                (funcall render tr request outcome gas)
+                                                (handler-case (json:jobject "value" (hexbytes (call-result (refine-halt outcome #'rerun) gas what)))
+                                                  (rpc-error (e) (json:jobject "error" (error-text e))))))))
+                          'simple-vector))
+           'simple-vector))))))
 
 (defrpc "eth_callMany" ((bundles bundles) (context state-context :optional t)
                         (state-overrides state-override :optional t))
