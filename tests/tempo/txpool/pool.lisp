@@ -18,12 +18,10 @@
   (mapcar #'clempo.transactions:transaction-nonce (apply #'pool-best-transactions pool options)))
 
 (deftest pool-fixture-measurement-scenarios ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (multiple-value-bind (accepted rejected ready) (run-fixture-validation)
     (is= 4 accepted) (is= 5 rejected) (is= 4 ready)))
 
 (deftest protocol-and-2d-nonce-gap-order ()
-  (skip-test "needs executor skip-nonce-check handling and T7 fee slots")
   (with-pool (pool reader)
     (let ((tx2 (fixture-transaction :nonce 2 :priority-fee 2000000000))
           (tx0 (fixture-transaction)) (tx1 (fixture-transaction :nonce 1)))
@@ -39,7 +37,6 @@
       (is= 2 (length (pool-best-transactions pool))))))
 
 (deftest current-state-nonce-not-assumed-zero ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (fixture-change-state reader (lambda (db) (fixture-set-nonce db (fixture-address 1) 9 5)))
     (rejects :nonce-too-low (submit-transaction pool (fixture-transaction :nonce-key 9 :nonce 4) reader))
@@ -49,7 +46,6 @@
     (is= '(5 6) (selected-nonces pool))))
 
 (deftest effective-tip-priority-and-fifo-ties ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (let ((low (fixture-transaction :private-key 1 :priority-fee 10 :fee-cap 2000000000))
           (first (fixture-transaction :private-key 2 :priority-fee 30 :fee-cap 2000000000))
@@ -59,7 +55,6 @@
       (is= (list first second low) (pool-best-transactions pool)))))
 
 (deftest priorities-recomputed-at-building-base-fee ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (let ((a (fixture-transaction :private-key 1 :fee-cap 2000000000 :priority-fee 1000000000))
           (b (fixture-transaction :private-key 2 :fee-cap 3000000000 :priority-fee 500000000)))
@@ -68,7 +63,6 @@
       (is= (list b a) (pool-best-transactions pool :base-fee 1900000000)))))
 
 (deftest dynamic-under-base-fee-queues-not-invalid ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (submit-transaction pool (fixture-transaction :fee-cap 700000000 :priority-fee 100) reader)
     (submit-transaction pool (fixture-transaction :nonce 1) reader)
@@ -76,7 +70,6 @@
     (is= '(0 1) (selected-nonces pool :base-fee 600000000))))
 
 (deftest replacement-bumps-both-fee-dimensions-and-is-atomic ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (let ((old (fixture-transaction)))
       (submit-transaction pool old reader)
@@ -91,7 +84,6 @@
       (is= 1 (pool-count pool)))))
 
 (deftest duplicate-and-nonce-boundaries ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (let ((tx (fixture-transaction)))
       (submit-transaction pool tx reader)
@@ -103,7 +95,6 @@
       (submit-transaction pool (fixture-transaction :private-key 2 :fee-cap 599999999 :priority-fee 0) reader))))
 
 (deftest time-boundaries-are-exclusive-before-inclusive-after ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (rejects :expired (submit-transaction pool (fixture-transaction :valid-before 1003) reader))
     (submit-transaction pool (fixture-transaction :valid-before 1004 :valid-after 1001) reader)
@@ -119,7 +110,6 @@
       (submit-transaction pool (fixture-transaction :private-key 2 :valid-after 1121) reader))))
 
 (deftest future-head-blocks-descendants-without-eviction ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (submit-transaction pool (fixture-transaction :valid-after 1010) reader)
     (submit-transaction pool (fixture-transaction :nonce 1 :priority-fee 2000000000) reader)
@@ -128,7 +118,6 @@
     (is= 2 (pool-count pool))))
 
 (deftest expiring-nonces-independent-dedup-and-expiry ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (let ((a (fixture-transaction :nonce-key clempo.txpool::+expiring-nonce-key+ :valid-before 1020
                                    :sponsor-private-key 2))
@@ -157,7 +146,6 @@
       (rejects :invalid-transaction (submit-transaction pool tx reader)))))
 
 (deftest sender-limits-and-gap-filler-eviction ()
-  (skip-test "needs executor skip-nonce-check handling and T7 fee slots")
   (with-pool (pool reader :max-transactions-per-sender 2)
     (submit-transaction pool (fixture-transaction :nonce 1) reader)
     (let ((highest (fixture-transaction :nonce 2)))
@@ -168,7 +156,6 @@
       (is (null (pool-remove-transaction pool (clempo.transactions:transaction-hash highest)))))))
 
 (deftest sponsor-counted-across-senders-and-replacement-frees-own-slot ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader :max-transactions-per-sender 2)
     (submit-transaction pool (fixture-transaction :private-key 1 :sponsor-private-key 4) reader)
     (submit-transaction pool (fixture-transaction :private-key 2 :sponsor-private-key 4) reader)
@@ -179,7 +166,6 @@
     (is= 2 (pool-count pool))))
 
 (deftest lane-limit-still-allows-current-nonce-gap-filler ()
-  (skip-test "needs executor skip-nonce-check handling and T7 fee slots")
   (with-pool (pool reader :max-transactions-per-sender 8 :max-transactions-per-lane 2)
     (submit-transaction pool (fixture-transaction :nonce 1) reader)
     (submit-transaction pool (fixture-transaction :nonce 2) reader)
@@ -188,7 +174,6 @@
     (is= '(0 1 2) (selected-nonces pool))))
 
 (deftest ethereum-standard-types-and-system-rejection ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (dolist (type '(0 1 2))
       (submit-transaction pool (fixture-transaction :type type :private-key (1+ type)) reader))
@@ -198,7 +183,6 @@
       (submit-transaction pool (fixture-transaction :type 2 :private-key 5 :value 1) reader))))
 
 (deftest recorded-ethereum-transaction-admitted-against-explicit-prestate ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (let* ((reader (make-fixture-reader :chain-id 42431))
          (pool (make-pool)) (tx (recorded-transaction "eth-0x2"))
          (sender (clempo.transactions:transaction-sender tx)))
@@ -218,7 +202,6 @@
     (rejects :invalid-transaction (submit-transaction pool (fixture-transaction :chain-id 42431) reader))))
 
 (deftest keychain-expiry-version-revocation-and-rollback ()
-  (skip-test "needs executor T6 keychain handling")
   (with-pool (pool reader)
     (fixture-change-state reader (lambda (db) (fixture-set-key db (fixture-address 1) (fixture-address 2) 1020)))
     (let ((tx (fixture-transaction :key-private-key 2)))
@@ -234,7 +217,7 @@
       (is= 0 (pool-count pool)))))
 
 (deftest inline-key-authorization-semantics-and-no-state-leak ()
-  (skip-test "needs executor T7 non-creditable fee slots")
+  (skip-test "needs executor stateless inline grant signer/account validation")
   (with-pool (pool reader)
     (let* ((authorization (fixture-key-authorization))
            (tx (fixture-transaction :key-private-key 2 :key-authorization authorization))
@@ -245,7 +228,7 @@
         (submit-transaction pool (fixture-transaction :private-key 3 :key-authorization authorization) reader)))))
 
 (deftest key-authorization-token-limits-reject-duplicates ()
-  (skip-test "needs executor T7 non-creditable fee slots")
+  (skip-test "needs keychain precompile T3 duplicate token-limit rejection")
   (with-pool (pool reader)
     (let* ((limit (list (integer->octets +fixture-token+ 20) 1000000))
            (authorization (fixture-key-authorization :limits (list limit limit))))
@@ -253,7 +236,6 @@
         (submit-transaction pool (fixture-transaction :key-authorization authorization) reader)))))
 
 (deftest revalidate-mined-nonce-and-fee-insolvency ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (submit-transaction pool (fixture-transaction) reader)
     (submit-transaction pool (fixture-transaction :nonce 1) reader)
@@ -265,7 +247,6 @@
     (is= 0 (pool-count pool))))
 
 (deftest revalidate-paused-fee-token ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (submit-transaction pool (fixture-transaction) reader)
     (fixture-change-state reader (lambda (db) (clempo.store:db-set-storage db +fixture-token+ 12 1)))
@@ -308,7 +289,6 @@
                                 (clempo.txpool.fixtures::mapping-slot id 3) (ash reserve 128))))
 
 (deftest amm-direct-reserve-boundary-and-recent-alternative-token ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (let* ((db (state-reader-db reader))
            (validator (1+ +fixture-token+))
@@ -330,7 +310,6 @@
         (is= 2 (pool-count pool))))))
 
 (deftest amm-two-hop-fallback-and-canonical-liquidity-revalidation ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (let* ((validator (1+ +fixture-token+)) (quote (+ 2 +fixture-token+))
            (routed (make-state-reader (state-reader-db reader) (state-reader-env reader)
@@ -369,7 +348,6 @@
     (is (typep (make-state-reader db env :recent-validator-tokens (list +fixture-token+)) 'state-reader))))
 
 (deftest ethereum-eip7702-admission ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (let* ((tx (fixture-transaction :type 4
                                     :authorization-list (list (fixture-eip7702-authorization))))
@@ -379,7 +357,6 @@
       (is-equalp root (clempo.store:db-state-root (state-reader-db reader))))))
 
 (deftest recorded-tempo-root-signature-and-create-validated-not-executed ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (let* ((reader (make-fixture-reader :chain-id 42431))
          (pool (make-pool)) (tx (recorded-transaction "tempo/secp256k1"))
          (sender (clempo.transactions:transaction-sender tx)))
@@ -390,7 +367,6 @@
       (is-equalp root (clempo.store:db-state-root (state-reader-db reader))))))
 
 (deftest access-key-capacity-counts-across-unrelated-account-lanes ()
-  (skip-test "needs executor T6 keychain handling")
   (with-pool (pool reader :max-transactions-per-sender 2)
     (fixture-change-state
      reader (lambda (db)
@@ -403,7 +379,6 @@
     (is= 2 (pool-count pool))))
 
 (deftest replacement-with-new-saturated-sponsor-preserves-old ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader :max-transactions-per-sender 2)
     (submit-transaction pool (fixture-transaction :private-key 2 :sponsor-private-key 4) reader)
     (submit-transaction pool (fixture-transaction :private-key 3 :sponsor-private-key 4) reader)
@@ -417,7 +392,6 @@
       (is= 3 (pool-count pool)))))
 
 (deftest pool-only-key-expiry-propagation-buffer ()
-  (skip-test "needs executor T6 keychain handling")
   (with-pool (pool reader)
     (fixture-change-state
      reader (lambda (db) (fixture-set-key db (fixture-address 1) (fixture-address 2) 1003)))
@@ -450,7 +424,6 @@
                                                   :limits (make-list 257 :initial-element limit))) reader)))))
 
 (deftest validated-fee-metadata-is-cached-for-builder ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (let ((tx (fixture-transaction :sponsor-private-key 2)))
       (submit-transaction pool tx reader)
@@ -470,7 +443,6 @@
       (rejects :oversized-transaction (submit-transaction small (fixture-transaction) reader)))))
 
 (deftest priority-saturates-u64-and-fifo-remains-deterministic ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (fixture-change-state reader
                           (lambda (db)
@@ -544,7 +516,6 @@
     (is= '(0 1) (selected-nonces pool))))
 
 (deftest fallback-fee-selection-metadata-not-confused-with-user-preference ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (with-pool (pool reader)
     (let* ((path-usd #x20c0000000000000000000000000000000000000)
            (sender (fixture-address 1))

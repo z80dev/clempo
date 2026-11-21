@@ -50,8 +50,8 @@ must suppress later transactions with the same `pool-transaction-lane` after one
 or does not fit. Expiring transactions have independent lane identities. Pool methods
 are synchronous; the caller serializes mutation and keeps each state snapshot stable.
 
-Integration status: 14 tests pass; 31 tests have explicit, temporary dependency
-skips authorized by the lead while executor T7 fee-slot handling, T6 keychain
-handling and future-nonce relaxation land. These skips must be removed during
-integration; they are not successful admission evidence. `pool-fixtures` remains
-strict and reports the missing executor capability as failure, never a fake score.
+Integration status: 43 tests pass; two tests have explicit, temporary dependency
+skips authorized by the lead: executor inline-grant signer/account validation and
+keychain T3 duplicate token-limit rejection. Remove them when those fixes land.
+The builder's 13 tests pass, including recorded-root and pooled-payload replay.
+`pool-fixtures` remains strict; it never turns missing capabilities into a fake score.

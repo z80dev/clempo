@@ -290,10 +290,13 @@ The heaviest sample improved about 3.5× in median and p95 (mean root consing
 Timings are wall-clock, including scheduling and any GC in the measured root
 call. This is not the full busy-range replay benchmark or an R4/R7 score.
 
-Pool integration (partial): `clempo.txpool` compiles strictly and its tests report
-14 passed, 0 failed, 31 explicitly skipped pending executor T7 fee-slot handling,
-T6 keychain handling, and relaxed future-nonce validation. The skips were authorized
-to publish the pool interface without claiming T13 admission acceptance. Passing
-cases include actual pre-T1 nonce-lane admission, fork-gated liquidity, malformed
-grant rejection, cardinality checks and unavailable-state refusal. Fixture funding
-and cached fee metadata use TIP-20's packed-layout balance mapping at slot 9.
+Pool/builder integration: strict combined tests report **56 passed, 0 failed,
+2 explicitly skipped** for executor inline-grant signer/account binding and the
+keychain precompile's T3 duplicate token-limit rejection. The pool has 43 passing
+tests; all 13 builder tests pass, including rebuilding 26 recorded mainnet blocks
+and a multi-transaction payload that re-executes to identical commitments.
+`bin/clempo-dev pool-fixtures -iterations 10 -json` measures 40 admissions,
+50 expected rejections and 40 selections in 0.139344 s (645.9 validations/s),
+allocating 79,780,352 bytes including state construction and signing. These are
+end-to-end fixture costs, not pool-only throughput. No production validation is
+bypassed; the two named test skips remain explicit integration limitations.

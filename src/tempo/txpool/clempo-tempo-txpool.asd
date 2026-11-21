@@ -9,7 +9,8 @@
   :description "Recorded pool prestate and deterministic signed fixture scenarios"
   :depends-on ("clempo-tempo-txpool")
   :serial t
-  :components ((:file "../../../tests/tempo/txpool/fixtures")))
+  :components ((:file "fixtures-package")
+               (:file "../../../tests/tempo/txpool/fixtures")))
 
 (defsystem "clempo-tempo-txpool/tests"
   :depends-on ("clempo-tempo-txpool/fixtures")

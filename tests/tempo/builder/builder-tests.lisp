@@ -241,16 +241,20 @@ no gas, no logs) is appended. Returns the BUILT-PAYLOAD."
 
 (deftest pooled-block-skips-spent-nonce-and-reexecutes ()
   (let* ((db (ex:genesis-db :chain :mainnet))
-         (later (member 3850 (entries) :key #'first))
+         (later (member 3851 (entries) :key #'first))
          (first-later (first later)))
     (dolist (e (ldiff (entries) later))
       (rebuild-recorded db e))
     (destructuring-bind (number parent block) first-later
       (declare (ignore number))
+      ;; Only these funding transactions can be admitted against this parent.
+      ;; Other recorded transactions spend balances/keys created by later blocks.
       (let* ((stale (pool-with db parent (recorded-attributes (blocks:block-header block))
-                               (loop for (nil nil b) in later append (user-transactions b))))
+                               (loop for (number nil b) in later
+                                     when (member number '(3851 3853 3856))
+                                       append (user-transactions b))))
              (spent (first (user-transactions block)))
-             ;; Block 3850 is built and committed from its own pool; STALE still holds its tx.
+             ;; Block 3851 is built and committed from its own pool; STALE still holds its tx.
              (parent (blocks:block-header (built-payload-block (rebuild-recorded db first-later))))
              (root (store:db-root-hash db))
              (attributes (recorded-attributes
@@ -274,7 +278,6 @@ no gas, no logs) is appended. Returns the BUILT-PAYLOAD."
           (store:db-revert-block db))))))
 
 (deftest spent-fee-balance-shortcut-uses-real-state ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (let* ((reader (clempo.txpool.fixtures:make-fixture-reader))
          (db (pool:state-reader-db reader))
          (p (pool:make-pool))
@@ -297,7 +300,6 @@ no gas, no logs) is appended. Returns the BUILT-PAYLOAD."
           (store:db-revert-block db))))))
 
 (deftest spent-fallback-fee-balance-keeps-alternatives ()
-  (skip-test "needs executor T7 non-creditable fee slots")
   (let* ((reader (clempo.txpool.fixtures:make-fixture-reader))
          (db (pool:state-reader-db reader))
          (sender (clempo.txpool.fixtures:fixture-address 1))
