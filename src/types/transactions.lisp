@@ -15,12 +15,58 @@
 ;; Wire layouts: bounded unsigned integers, byte strings, and nested RLP lists.
 ;; FIELDS deliberately retains the decoded RLP representation, including empty
 ;; strings versus empty lists. RAW is separate and used only for the received hash.
-(defparameter *layouts*
-  '((0 8 16 8 :destination 32 :bytes 8 32 32)
-    (1 8 8 16 8 :destination 32 :bytes :access 1 32 32)
-    (2 8 8 16 16 8 :destination 32 :bytes :access 1 32 32)
-    (4 8 8 16 16 8 :address 32 :bytes :access :authorizations 1 32 32)
-    (#x76 8 16 16 8 :calls :access 32 8 8 8 :destination :sponsor :tempo-authorizations)))
+(defmacro define-transaction-layouts (&rest layouts)
+  "Declare wire validation and public, typed field readers together."
+  (let ((names (remove-duplicates
+                (loop for layout in layouts append (mapcar #'first (rest layout))))))
+    `(progn
+       (defparameter *layouts*
+         ',(loop for (type . fields) in layouts
+                 collect (cons type (mapcar #'second fields))))
+       ,@(loop for name in names
+               for reader = (intern (format nil "TRANSACTION-~A" name))
+               collect
+               `(progn
+                  (export ',reader)
+                  (defun ,reader (tx)
+                    (case (transaction-type tx)
+                      ,@(loop for (type . fields) in layouts
+                              for index = (position name fields :key #'first)
+                              when index
+                                collect
+                                (let ((kind (second (nth index fields))))
+                                  `(,type
+                                    (let ((field (nth ,index (transaction-fields tx))))
+                                      ,(cond
+                                         ((member name '(valid-before valid-after))
+                                          '(let ((value (field-integer field 8)))
+                                             (unless (zerop value) value)))
+                                         ((integerp kind) `(field-integer field ,kind))
+                                         ((member kind '(:address :destination))
+                                          '(unless (zerop (length field))
+                                             (octets->integer field)))
+                                         (t 'field))))))
+                      ,@(when (eq name 'chain-id)
+                          '((0 (let ((v (field-integer (nth 6 (transaction-fields tx)) 8)))
+                                 (when (>= v 35) (floor (- v 35) 2))))))
+                      (otherwise nil))))))))
+
+(define-transaction-layouts
+  (0 (nonce 8) (gas-price 16) (gas-limit 8) (to :destination)
+     (value 32) (input :bytes) (v 8) (r 32) (s 32))
+  (1 (chain-id 8) (nonce 8) (gas-price 16) (gas-limit 8)
+     (to :destination) (value 32) (input :bytes) (access-list :access)
+     (v 1) (r 32) (s 32))
+  (2 (chain-id 8) (nonce 8) (max-priority-fee-per-gas 16) (max-fee-per-gas 16)
+     (gas-limit 8) (to :destination) (value 32) (input :bytes)
+     (access-list :access) (v 1) (r 32) (s 32))
+  (4 (chain-id 8) (nonce 8) (max-priority-fee-per-gas 16) (max-fee-per-gas 16)
+     (gas-limit 8) (to :address) (value 32) (input :bytes)
+     (access-list :access) (authorization-list :authorizations) (v 1) (r 32) (s 32))
+  (#x76 (chain-id 8) (max-priority-fee-per-gas 16) (max-fee-per-gas 16)
+        (gas-limit 8) (calls :calls) (access-list :access) (nonce-key 32) (nonce 8)
+        (valid-before 8) (valid-after 8) (fee-token :destination)
+        (fee-payer-signature :sponsor) (tempo-authorization-list :tempo-authorizations)))
 
 (defun field-integer (field &optional (width 32))
   (rlp-decode-integer field :max-bytes width))

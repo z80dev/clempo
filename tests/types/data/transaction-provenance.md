@@ -24,9 +24,10 @@ Rows contain label, raw EIP-2718 envelope, expected transaction hash, sender, fe
 - tempo/webAuthn: moderato block 4688661, 0xf12140bfb60cdd3ee045a6cd5ab4d5f93c5920f4a6aa9d5ff788d7d9e4dee671
 - tempo/webAuthn/sponsored: moderato block 21599013, 0x8360810994ef6699661440e99549e14a7cf178753187284315259e311c9e30e5
 
-Additional tests cite alloy-consensus 2.5.0 `src/transaction/eip2930.rs::test_decode_create`
+`transaction-2930.sexp` records the signed envelope and signing preimage from
+alloy-consensus 2.5.0 `src/transaction/eip2930.rs::test_decode_create`
 and alloy-primitives 1.7.3 `src/signature/sig.rs::test_signature`; that vector is an
-upstream encode/decode fixture, not a valid real-world signature for those fields.
+upstream encode/decode fixture, not a real-world signed transaction.
 The EIP-155 example comes from https://eips.ethereum.org/EIPS/eip-155 . The pre-155
 test intentionally varies its v/r/s to check the six-field signing preimage only.
 
@@ -35,3 +36,10 @@ Implementation wire layouts and sponsorship preimages follow
 Legacy system transactions use the zero-r/zero-s/even-parity marker and zero sender.
 Transaction fields expose decoded RLP strings/lists; address and key results are integers.
 Encoding reconstructs those fields, while hashing retains the exact received envelope.
+
+`define-transaction-layouts` generates public `transaction-<field>` readers from
+the named wire layouts. Chain ID, nonce, gas limit, gas price, maximum fees,
+destination (`transaction-to`), value, nonce key, validity bounds, and fee token
+are integers. Absent fields, contract-creation destinations, unprotected legacy
+chain IDs, and absent validity bounds return NIL. Calls, access lists, and
+authorization lists retain decoded RLP lists; input is an octet vector.

@@ -7,6 +7,11 @@
                                                     "../../tests/types/data/transaction-rpc.sexp"))
     (let ((*read-eval* nil)) (read in))))
 
+(defparameter *alloy-2930*
+  (with-open-file (in (asdf:system-relative-pathname "clempo-types"
+                                                    "../../tests/types/data/transaction-2930.sexp"))
+    (let ((*read-eval* nil)) (read in))))
+
 (deftest rpc-transaction-envelopes ()
   (dolist (fixture *rpc-transactions*)
     (destructuring-bind (label envelope hash sender payer key-id) fixture
@@ -33,11 +38,11 @@
 
 (deftest alloy-eip2930-create ()
   ;; alloy-consensus 2.5.0 eip2930.rs::test_decode_create, including its signature.
-  (let* ((raw (hex->octets "01f84d018001028003820102c080a0840cfc572845f5786e702984c2a582528cad4b49b2a10b9db1be7fca90058565a025e7109ceb98168d95b09b18bbf6b685130e0562f233877d492b94eee0c5b6d1"))
+  (let* ((raw (hex->octets (first *alloy-2930*)))
          (tx (decode-transaction raw)))
     (is= 1 (transaction-type tx))
     (is-equalp raw (encode-transaction tx))
-    (is-equalp (clempo.keccak:keccak256 (hex->octets "01ca018001028003820102c0"))
+    (is-equalp (clempo.keccak:keccak256 (hex->octets (second *alloy-2930*)))
                (transaction-signing-hash tx))))
 
 (deftest legacy-pre-eip155-signing ()
@@ -65,3 +70,25 @@
   (signals error (decode-transaction (hex->octets "76c0")))
   (let ((raw (hex->octets (second (first *rpc-transactions*)))))
     (signals error (decode-transaction (octets-concat raw (octets-of 0))))))
+
+(deftest typed-transaction-field-readers ()
+  (let ((tx (decode-transaction (hex->octets (first *alloy-2930*)))))
+    (is= 1 (transaction-chain-id tx))
+    (is= 0 (transaction-nonce tx))
+    (is= 1 (transaction-gas-price tx))
+    (is= 2 (transaction-gas-limit tx))
+    (is= 3 (transaction-value tx))
+    (is (null (transaction-to tx)))
+    (is (null (transaction-fee-token tx)))
+    (is-equalp (octets-of 1 2) (transaction-input tx)))
+  (let ((tx (decode-transaction (hex->octets (second (first *rpc-transactions*))))))
+    (is= 42431 (transaction-chain-id tx))
+    (is= 18 (transaction-nonce tx)))
+  (let ((tx (decode-transaction (hex->octets (second (fifth *rpc-transactions*))))))
+    (is= 42431 (transaction-chain-id tx))
+    (is= 0 (transaction-nonce-key tx))
+    (is= 5 (transaction-nonce tx))
+    (is= #x20c0000000000000000000000000000000000002 (transaction-fee-token tx))
+    (is (null (transaction-valid-before tx)))
+    (is (null (transaction-valid-after tx)))
+    (is (consp (transaction-calls tx)))))
