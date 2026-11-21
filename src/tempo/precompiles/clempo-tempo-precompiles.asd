@@ -20,4 +20,5 @@
   :pathname "../../../tests/tempo/precompiles/"
   :serial t
   :components ((:file "oracle")
-               (:file "precompiles-tests")))
+               (:file "precompiles-tests")
+               (:file "validator-tests")))

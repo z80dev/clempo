@@ -152,19 +152,37 @@ rewards, permits, memos, transfer policies, virtual addresses.")
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
   (:shadowing-import-from #:clempo.contract #:read #:write #:delete)
   (:documentation "ValidatorConfig v1 (validator-config.lisp).")
-  (:export #:validator-config))
+  (:export #:validator-config #:initialize #:owner #:validator-count #:validators-array
+           #:validators #:get-validators #:get-next-full-dkg-ceremony #:change-owner
+           #:add-validator #:update-validator #:change-validator-status
+           #:change-validator-status-by-index #:set-next-full-dkg-ceremony
+           #:unauthorized #:validator-already-exists #:validator-not-found
+           #:invalid-public-key #:not-host-port #:not-ip-port))
 
 (defpackage #:clempo.validator-config-v2
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
   (:shadowing-import-from #:clempo.contract #:read #:write #:delete)
   (:documentation "ValidatorConfigV2 (validator-config-v2*.lisp).")
-  (:export #:validator-config-v2))
+  (:export #:validator-config-v2 #:initialize #:owner #:get-initialized-at-height
+           #:is-initialized #:validator-count #:validator-by-index #:validator-by-address
+           #:validator-by-public-key #:get-active-validators
+           #:get-next-network-identity-rotation-epoch #:add-validator #:deactivate-validator
+           #:rotate-validator #:set-fee-recipient #:set-ip-addresses
+           #:transfer-validator-ownership #:transfer-ownership
+           #:set-network-identity-rotation-epoch #:migrate-validator #:initialize-if-migrated
+           #:already-initialized #:ingress-already-exists #:empty-v1-validator-set
+           #:invalid-migration-index #:invalid-ip #:invalid-owner #:invalid-public-key
+           #:invalid-signature #:invalid-signature-format #:invalid-validator-address
+           #:migration-not-complete #:not-initialized #:not-ip #:not-ip-port
+           #:public-key-already-exists #:unauthorized #:address-already-has-validator
+           #:validator-already-deactivated #:validator-not-found))
 
 (defpackage #:clempo.committee
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
   (:shadowing-import-from #:clempo.contract #:read #:write #:delete)
   (:documentation "CurrentCommittee (committee.lisp), T8.")
-  (:export #:current-committee))
+  (:export #:current-committee #:get-committee-members #:set-committee-members
+           #:unauthorized))
 
 (defpackage #:clempo.zone-factory
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
