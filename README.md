@@ -15,10 +15,10 @@ clempo is an independent implementation of the Tempo reference node, alongside o
 | R3p Precompiles | reference-oracle corpus of Tempo precompile calls, T0..T14 | 4,986/4,992 | 4,986/4,992 |
 | R4 Follow | live tip: executed, certified, RPC probed independently | 47,451 blocks executed and certified in the historical hour run; peak sampled lag 4 | yes |
 | R5 RPC | recorded reference answers, separated by comparison mode | see the [RPC evidence](FRONTIER.md#evidence) for verdicts and coverage | see [goempo's frontier](https://github.com/gakonst/goempo/blob/main/FRONTIER.md) |
-| R6 Validator | Simplex + DKG; clempo validators with Rust validators | seeded sims (4/5/7 validators, faults, reshares); devnet where clempo signers are required for quorum | the same |
-| R7 Speed | root-checked execution, vs Rust on the same Mac | 6.65× (Early), 1.58× (Busy), 2.86× (Recent) timed wall throughput | 17.65× (Early); Busy and Recent not yet measured on this host |
+| R6 Validator | Simplex and DKG; independent signers with Rust validators | seeded sims (4/5/7 validators, faults, reshares); devnet where clempo signers are required for quorum | seeded simulations and mixed-validator devnet |
+| R7 Speed | timed replay/import wall throughput vs Rust on the same Mac | 6.65× (Early), 1.58× (Busy), 2.86× (Recent) | 17.65× (Early), 1.36× (Busy); no same-host Recent result |
 
-The six R3p differences are T14 keychain grants where clempo follows a newer reference commit than the corpus. R7 ratios use timed replay/import, not end-to-end command time: clempo and goempo check every root; Rust checks import-chunk terminal roots. Clempo used more CPU than Rust on Busy (58.20 s vs 45.76 s), and less on Early and Recent. For command wall time, setup, RSS and methodology, see [docs/BENCH.md](docs/BENCH.md) and [FRONTIER.md](FRONTIER.md).
+The six R3p differences are T14 keychain grants where clempo follows a newer reference commit than the corpus. The R7 ratios come from the revisions and runs in [docs/BENCH.md](docs/BENCH.md#results-on-the-shared-dev-host), before the disk-backed store migration. They use timed replay/import, not end-to-end command time: clempo and goempo check every root; Rust checks import-chunk terminal roots. Clempo used more CPU than Rust on Busy (58.20 s vs 45.76 s), and less on Early and Recent.
 
 ## Why Lisp
 
