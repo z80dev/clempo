@@ -48,6 +48,9 @@ high/low multiplication contract. Its reader probes optional SBCL symbols with
 Recognized 64-bit ARM64/x86-64 intrinsics expand directly when present; otherwise
 real Common Lisp 32-bit-half arithmetic is compiled. Compiler-only intrinsics
 need not be `fboundp`. Outgoing subtraction carry is one for **no** borrow on
-both backends. ARM64 assembler, VOPs and assembler nicknames remain reader-gated
-by `#+arm64`; non-ARM64 compiles the arithmetic fallback. Coordinate import and
-export still require 64-bit SBCL bignum digits; this is not 32-bit SBCL support.
+both backends. Native ARM64 VOPs remain reader-gated by `#+arm64`; non-ARM64
+compiles the arithmetic fallback. ARM-only opcode and
+register names use `find-symbol` rather than foreign-package reader tokens, so
+the layer check can inspect both branches even when the ARM64 package is absent.
+Coordinate import and export still require 64-bit SBCL bignum digits; this is not
+32-bit SBCL support.

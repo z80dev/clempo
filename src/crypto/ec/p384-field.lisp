@@ -14,8 +14,9 @@
        (if (< ,index (sb-bignum:%bignum-length ,integer))
            (sb-bignum::%bignum-ref ,integer ,index) 0)))
 
-;; Keep the ARM64 assembler references inside reader guards. Other targets use
-;; the shared word macros below, including their portable arithmetic fallback.
+;; Resolve ARM64-only symbols at read time, inside reader guards. The layer
+;; checker reads both branches without evaluating #.; no foreign package is
+;; interned or required on other targets. Their arithmetic uses word macros.
 #+arm64
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (sb-c:defknown %p384-word-mac
@@ -39,12 +40,14 @@
     (:generator 1
       ;; All six registers are in the unboxed bank; no descriptor scratch,
       ;; allocation, raw heap pointer or pseudo-atomic guard is needed.
-      (sb-assem:inst sb-arm64-asm::mul lo a b)
-      (sb-assem:inst sb-arm64-asm::umulh hi a b)
-      (sb-assem:inst sb-arm64-asm::adds lo lo c)
-      (sb-assem:inst sb-arm64-asm::adc hi hi sb-vm::zr-tn)
-      (sb-assem:inst sb-arm64-asm::adds lo lo d)
-      (sb-assem:inst sb-arm64-asm::adc hi hi sb-vm::zr-tn))))
+      (sb-assem:inst #.(find-symbol "MUL" "SB-ARM64-ASM") lo a b)
+      (sb-assem:inst #.(find-symbol "UMULH" "SB-ARM64-ASM") hi a b)
+      (sb-assem:inst #.(find-symbol "ADDS" "SB-ARM64-ASM") lo lo c)
+      (sb-assem:inst #.(find-symbol "ADC" "SB-ARM64-ASM")
+                     hi hi #.(find-symbol "ZR-TN" "SB-VM"))
+      (sb-assem:inst #.(find-symbol "ADDS" "SB-ARM64-ASM") lo lo d)
+      (sb-assem:inst #.(find-symbol "ADC" "SB-ARM64-ASM")
+                     hi hi #.(find-symbol "ZR-TN" "SB-VM")))))
 
 (declaim (inline p384-mul-add-word))
 (defun p384-mul-add-word (a b c d)
@@ -73,10 +76,12 @@
     (:result-types sb-vm::unsigned-num sb-vm::unsigned-num)
     (:generator 1
       ;; m*(2^64-1)+c+d = m*2^64 + (c-m+d).
-      (sb-assem:inst sb-arm64-asm::subs lo c m)
-      (sb-assem:inst sb-arm64-asm::sbc hi m sb-vm::zr-tn)
-      (sb-assem:inst sb-arm64-asm::adds lo lo d)
-      (sb-assem:inst sb-arm64-asm::adc hi hi sb-vm::zr-tn))))
+      (sb-assem:inst #.(find-symbol "SUBS" "SB-ARM64-ASM") lo c m)
+      (sb-assem:inst #.(find-symbol "SBC" "SB-ARM64-ASM")
+                     hi m #.(find-symbol "ZR-TN" "SB-VM"))
+      (sb-assem:inst #.(find-symbol "ADDS" "SB-ARM64-ASM") lo lo d)
+      (sb-assem:inst #.(find-symbol "ADC" "SB-ARM64-ASM")
+                     hi hi #.(find-symbol "ZR-TN" "SB-VM")))))
 
 (declaim (inline p384-mul-add-minus-one))
 (defun p384-mul-add-minus-one (m c d)
