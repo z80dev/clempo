@@ -530,7 +530,8 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
 ;;; Views
 
 (defstruct (history-state (:constructor %make-history-state (history number probes tail-p)))
-  "The state after block NUMBER: a clempo.state backend (methods in clempo.executor)."
+  "The state after block NUMBER: an execution backend (its backend methods live in the
+executor layer, which may see this one)."
   history (number 0 :type fixnum)
   (probes '() :type list)               ; ((segment . bound) ...) newest first, ending at a full one
   tail-p)
