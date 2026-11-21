@@ -7,11 +7,19 @@
 (defconstant +default-sender-threads+ 8)
 (defconstant +pipeline-depth+ 4 "Blocks the producer may read and recover ahead.")
 
+(defun recover-sender (tx)
+  "TX's sender. A Tempo transaction's unique identifier (its expiring-nonce and channel key)
+is derived here too and memoized on TX, off the replay thread."
+  (let ((sender (clempo.transactions:transaction-sender tx)))
+    (when (= (clempo.transactions:transaction-type tx) #x76)
+      (clempo.transactions:transaction-unique-identifier tx sender))
+    sender))
+
 (defun recover-senders (block mapper batches threads)
   (let* ((txs (clempo.blocks:block-transactions block))
          (n (length txs)))
     (if (< n 4)
-        (mapcar #'clempo.transactions:transaction-sender txs)
+        (mapcar #'recover-sender txs)
         (let ((transactions (coerce txs 'simple-vector))
               (workers (min n threads))
               (out (make-array n)))
@@ -21,7 +29,7 @@
                        (let ((start (+ (* worker size) (min worker extra))))
                          (loop for i from start below (+ start size (if (< worker extra) 1 0))
                                do (setf (svref out i)
-                                        (clempo.transactions:transaction-sender (svref transactions i))))))
+                                        (recover-sender (svref transactions i))))))
                      (svref batches workers)))
           (coerce out 'list)))))
 

@@ -153,6 +153,7 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
 ;;; Intrinsic gas (evm2 intrinsic_and_floor_gas, Osaka: no EIP-2780).
 
 (defun calldata-tokens (data)
+  (declare (type octets data))
   (let ((zeros (count 0 data))) (+ zeros (* 4 (- (length data) zeros)))))
 
 (defun access-list-counts (access-list)

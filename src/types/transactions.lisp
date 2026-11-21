@@ -14,7 +14,10 @@
 (defstruct (transaction (:constructor %make-transaction (type fields raw)))
   (type 0 :type octet)
   (fields nil :type list)
-  (raw (make-octets 0) :type octets))
+  (raw (make-octets 0) :type octets)
+  ;; (sender . identifier) of the last TRANSACTION-UNIQUE-IDENTIFIER, so a replay can derive
+  ;; it on the thread that recovered the sender
+  (unique-id-memo nil :type (or null cons)))
 
 ;; Wire layouts: bounded unsigned integers, byte strings, and nested RLP lists.
 ;; FIELDS deliberately retains the decoded RLP representation, including empty
@@ -211,15 +214,21 @@
 
 (defun transaction-unique-identifier (tx sender)
   "Sender-scoped replay ID: Keccak(signing envelope || 20-byte sender).
-Unlike the received transaction hash, signatures do not affect this identifier."
-  (let* ((fields (transaction-signing-fields tx))
-         (prefix (if (zerop (transaction-type tx)) 0 1))
-         (size (+ prefix (clempo.rlp:rlp-encoded-length fields)))
-         (out (make-octets (+ size 20))))
-    (when (plusp prefix) (setf (aref out 0) (transaction-type tx)))
-    (clempo.rlp:rlp-encode-into fields out prefix)
-    (dotimes (i 20) (setf (aref out (+ size i)) (ldb (byte 8 (* 8 (- 19 i))) sender)))
-    (clempo.keccak:keccak256 out)))
+Unlike the received transaction hash, signatures do not affect this identifier. The result
+is shared: do not modify it."
+  (let ((memo (transaction-unique-id-memo tx)))
+    (if (and memo (eql (car memo) sender))
+        (cdr memo)
+        (let* ((fields (transaction-signing-fields tx))
+               (prefix (if (zerop (transaction-type tx)) 0 1))
+               (size (+ prefix (clempo.rlp:rlp-encoded-length fields)))
+               (out (make-octets (+ size 20))))
+          (when (plusp prefix) (setf (aref out 0) (transaction-type tx)))
+          (clempo.rlp:rlp-encode-into fields out prefix)
+          (integer-into-octets sender out size (+ size 20))
+          (let ((id (clempo.keccak:keccak256 out)))
+            (setf (transaction-unique-id-memo tx) (cons sender id))
+            id)))))
 
 (defun recover-ecdsa (hash v r s)
   (let ((pub (clempo.secp256k1:ecrecover hash r s v)))
