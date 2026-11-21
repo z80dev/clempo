@@ -5,14 +5,19 @@
  (("src/base/octets.lisp"
    ("INTEGER-INTO-OCTETS" 3 "Bounded by the destination width; wider paths consume whole digits first.")
    ("OCTETS=" 2 "Typed LOOP bindings precede finite bounds on the word comparison and byte tail.")
-   ("OCTETS->INTEGER" 2 "Bounded by the requested source slice."))
+   ("OCTETS->INTEGER" 2 "Bounded by the requested source slice.")
+   ("HEX->OCTETS" 1 "Advances two digits per octet to the end of the finite string.")
+   ("OCTETS->HEX" 1 "Runs over the requested source slice; the output index steps with it."))
   ("src/codec/abi.lisp"
    ("UTF8-DECODE" 1 "Cursor consumes one or more input bytes on each iteration.")
    ("UTF8-VALID-P" 1 "Cursor advances to the fixed input end, or rejects invalid UTF-8."))
   ("src/codec/commonware.lisp"
    ("READ-VARINT" 1 "Each continuation consumes a byte and advances its bit offset toward the width limit.")
    ("WRITE-VARINT" 1 "Each continuation shifts seven bits out of a nonnegative integer."))
-  ("src/codec/json.lisp" ("PARSE-JSON" 6 "Cursor advances through a fixed input, or rejects; nesting has its own limit."))
+  ("src/codec/json.lisp"
+   ("PARSE-JSON" 6 "Cursor advances through a fixed input, or rejects; nesting has its own limit.")
+   ("WRITE-JSON-INTEGER" 1 "Divides a fixnum by ten until zero (at most 19 digits).")
+   ("WRITE-JSON-STRING" 1 "Runs over the characters of the finite string."))
   ("src/codec/rlp.lisp" ("DECODE-AT" 1 "A child consumes at least its prefix byte within the parent list slice."))
   ("src/consensus/dkg/field.lisp"
    ("FR-EXPT" 1 "Right shifts consume exponent bits.")
@@ -105,6 +110,7 @@
    ("DO-OBJECT" 1 "Each member consumes input, or invalid JSON stops parsing.")
    ("F64-FROM-PARTS" 1 "Exponent processing is bounded by the parsed floating-point range.")
    ("PARSE-SERDE-NUMBER" 3 "Each numeric scan consumes digits of the finite JSON token.")
+   ("QUOTE-OR-ESCAPE" 1 "Scans the supplied input range once.")
    ("READ-STRING" 1 "Consumes characters or escapes from a bounded JSON input.")
    ("SKIP-NUMBER" 1 "Consumes characters of one number token.")
    ("SKIP-WS" 1 "Stops at end of supplied input."))

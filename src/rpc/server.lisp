@@ -578,10 +578,16 @@ so far when this one pushed the oldest out, else NIL."
                        (ignore-errors (sb-bsd-sockets:socket-close client))
                        (progn
                          (push connection (server-connections server))
-                         ;; Calls and traces run the EVM on this thread: give it its own scratch.
+                         ;; Calls and traces run the EVM on this thread: give it its own scratch,
+                         ;; and signature arenas (P-384 memoizing: an attestation's CA chain is
+                         ;; the same on every zone verification this connection replays).
                          (setf (connection-thread connection)
                                (sb-thread:make-thread
-                                (lambda () (clempo.evm:with-evm-thread (serve-connection server connection)))
+                                (lambda ()
+                                  (let ((clempo.secp256k1:*recovery-scratch* (clempo.secp256k1:make-recovery-scratch))
+                                        (clempo.p256:*p256-scratch* (clempo.p256:make-p256-scratch))
+                                        (clempo.p384:*p384-scratch* (clempo.p384:make-p384-scratch :memoize t)))
+                                    (clempo.evm:with-evm-thread (serve-connection server connection))))
                                 :name "rpc connection"))))))))))
 
 (defun start-server (&key (host "127.0.0.1") (port 8545) backend (max-connections 256)
