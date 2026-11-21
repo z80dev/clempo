@@ -1,44 +1,6 @@
 # Oracle cases (data/oracle.tar.gz) that still differ from the reference. The test
 # oracle-corpus-ratchet fails on a difference not listed here and on a listed case that passes:
 # remove a line when its case passes.
-zone/createZone/T11
-zone/createZone/T12
-zone/createZone/T13
-zone/createZone/T14
-zone/createZone-long-url/T11
-zone/createZone-long-url/T12
-zone/createZone-long-url/T13
-zone/createZone-long-url/T14
-zone/createZone-messenger/T11
-zone/createZone-messenger/T12
-zone/createZone-messenger/T13
-zone/createZone-messenger/T14
-zone/createZone-duplicate/T11
-zone/createZone-duplicate/T12
-zone/createZone-duplicate/T13
-zone/createZone-duplicate/T14
-zone/createZone-zero-admin/T11
-zone/createZone-zero-admin/T12
-zone/createZone-zero-admin/T13
-zone/createZone-zero-admin/T14
-zone/createZone-no-sequencers/T11
-zone/createZone-no-sequencers/T12
-zone/createZone-no-sequencers/T13
-zone/createZone-no-sequencers/T14
-zone/createZone-threshold/T11
-zone/createZone-threshold/T12
-zone/createZone-threshold/T13
-zone/createZone-threshold/T14
-zone/createZone-zero-sequencer/T11
-zone/createZone-zero-sequencer/T12
-zone/createZone-zero-sequencer/T13
-zone/createZone-zero-sequencer/T14
-zone/createZone-initialized-portal/T11
-zone/createZone-initialized-portal/T12
-zone/createZone-initialized-portal/T13
-zone/createZone-initialized-portal/T14
-zone/createZone-empty-lists
-zone/createZone-long-token-name
 channel/open/T11
 channel/open/T12
 channel/open/T13
