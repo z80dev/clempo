@@ -297,15 +297,8 @@ unknown query parameters, invalid curve keys and non-public endpoints."
     (octets-concat (integer->octets x 32) (integer->octets y 32))))
 
 (defun compressed-ecdh (key public)
-  (unless (and (typep key `(integer 1 ,(1- ec:+secp256k1-n+)))
-               (valid-public-key-p public))
-    (protocol-error "invalid discovery ECDH key"))
-  ;; Reuse the existing curve engine; the public ECDH API deliberately drops y.
-  (multiple-value-bind (x y)
-      (ec::secp-fast-mul key (ec::secp-table (octets->integer public :end 32)
-                                           (octets->integer public :start 32)) 5)
-    (unless x (protocol-error "invalid discovery shared point"))
-    (octets-concat (octets-of (+ 2 (logand y 1))) (integer->octets x 32))))
+  (or (ec:ecdh key public :compressed t)
+      (protocol-error "invalid discovery shared point")))
 
 (defun v5-keys (key public challenge initiator-id recipient-id)
   (let ((keys (sha:hkdf-sha256 challenge (compressed-ecdh key public)
