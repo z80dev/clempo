@@ -119,6 +119,9 @@
    ("BOUNDARY-EXTRA" 1 "Scans the finite finalized ancestry until the epoch boundary.")
    ("ON-FINALIZATION" 1 "Walks finalized ancestry to the local head."))
   ("src/state/world.lisp" ("ROLLBACK" 1 "Pops entries until the requested journal marker."))
+  ("src/sync/finalizations.lisp"
+   ("DESCEND-HEADER-CHAIN" 1 "Walks a fixed height interval in batches, checking the expected hash of each header.")
+   ("DISCOVER-CERTIFY-FROM" 1 "Binary search narrows the certificate-retention height range."))
   ("src/store/backed.lisp"
    ("NODE-VALUE-SPLIT" 1 "Consumes the count prefix, bounded by the stored value and overlong-varint guard.")
    ("WRITE-NODES" 1 "Each removed trie node is marked dead once; pending edge release traverses a finite trie."))
@@ -239,6 +242,7 @@
  (("src/p2p/eth.lisp" "CALL-WITH-ETH-LISTENER" 2 "CALL-WITH-ETH-LISTENER"
    "Listener and peer sessions join in the listener's cleanup.")
   ("src/sync/archive.lisp" "FETCH-RANGE" 1 "FETCH-RANGE" "Joins the archive worker group before returning.")
+  ("src/store/kv.lisp" "KV-MERGE-TIERS" 1 "KV-WAIT-MERGES" "Waits for the tracked segment merge worker before compaction or close.")
   ("src/sync/metrics.lisp" "START-METRICS-SERVER" 1 "STOP-METRICS-SERVER" "Metrics service joins its listener.")
   ("src/rpc/chain.lisp" "BUILD-INDEX" 1 "BUILD-INDEX" "Joins index worker group before publishing the index.")
   ("src/rpc/sender.lisp" "BUILD-SENDER-INDEX" 1 "BUILD-SENDER-INDEX" "Joins sender-index workers before writing the index.")

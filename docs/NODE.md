@@ -20,12 +20,12 @@ default. Certification is enabled unless `--no-certify` is passed; `--cert-rpc`
 selects a certificate endpoint independently of `--upstream` (default: the
 public Tempo endpoint for the selected chain).
 
-The starting epoch is authenticated using locally executed boundary blocks or
-a boundary certificate verified against the published network identity. Below
-`--certify-from`, blocks are checked by parent linkage and execution only.
-Defaults are mainnet 41,166,893 and Moderato 36,627,280, the earliest heights
-probed with certificates on the public endpoints. An anchor above the
-threshold that predates the published identity fails closed. An invalid or
+The starting epoch is authenticated against already executed state or the
+published network identity. When the anchor predates that identity, the
+follower can check its ancestry against a certified descendant. Unless
+`--certify-from` is supplied, the follower probes the certificate provider
+for the first available height. Below that height, blocks are checked by
+parent linkage and execution only. An invalid or
 missing certificate cannot advance the head. Transport and certificate
 failures are retried with capped backoff (bounded attempts for `--once` or
 `--seconds`); execution failures stop the follower.
