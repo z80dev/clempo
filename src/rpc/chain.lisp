@@ -14,7 +14,7 @@ each block's receipts checked against its header's receipts root before they are
   (:export #:backend #:backend-head #:backend-block-raw #:backend-block-number
            #:backend-tx-location #:backend-receipts-raw #:backend-chain-id
            #:with-backend-read #:with-backend-write #:*backend* #:*head*
-           #:archive-backend #:make-archive-backend
+           #:archive-backend #:make-archive-backend #:archive-backend-head #:backend-state
            #:build-index #:index-dir #:index-covered-height
            #:block-hash-of-raw #:scan-block-hashes
            #:receipts-store-get #:receipts-store-put #:missing-receipts))
@@ -38,6 +38,10 @@ each block's receipts checked against its header's receipts root before they are
   (:documentation "(values block-number index) of the transaction with hash HASH, or NIL."))
 (defgeneric backend-receipts-raw (backend number)
   (:documentation "Block NUMBER's EIP-2718 receipt envelopes as a list of octets, or NIL."))
+(defgeneric backend-state (backend number)
+  (:documentation "A read-only view of the state after block NUMBER, or NIL when the backend
+has none (historical state). State methods answer an error for NIL.")
+  (:method (backend number) (declare (ignore backend number)) nil))
 
 ;;; Readers and writers: many concurrent requests, one writer at a time between them.
 
@@ -304,17 +308,24 @@ Returns (values header-start header-end tx-bounds) where tx-bounds is a list of 
    (receipts :initarg :receipts :reader archive-backend-receipts)
    (upstream :initarg :upstream :initform nil :reader archive-backend-upstream)))
 
-(defun make-archive-backend (&key (archive-dir (archive:archive-dir)) (index-dir (index-dir))
-                               head (upstream nil) (receipts-dir (receipts-dir)))
+(defun make-archive-backend (&rest initargs &key (class 'archive-backend) (archive-dir (archive:archive-dir))
+                                                 (index-dir (index-dir)) head (upstream nil)
+                                                 (receipts-dir (receipts-dir))
+                              &allow-other-keys)
   "A backend over the raw block archive. HEAD defaults to the archive's contiguous height.
-UPSTREAM, a JSON-RPC URL, fills the receipts store on first use."
-  (make-instance 'archive-backend
-                 :archive-dir archive-dir
-                 :head (or head (archive:archive-contiguous-height archive-dir))
-                 :blocks-index (open-index (index-path index-dir "blocks"))
-                 :txs-index (open-index (index-path index-dir "txs"))
-                 :receipts (make-rstore :dir receipts-dir)
-                 :upstream upstream))
+UPSTREAM, a JSON-RPC URL, fills the receipts store on first use. CLASS (a subclass of
+ARCHIVE-BACKEND) is instantiated with the remaining INITARGS as well."
+  (let ((extra (loop for (k v) on initargs by #'cddr
+                     unless (member k '(:class :archive-dir :index-dir :head :upstream :receipts-dir))
+                       append (list k v))))
+    (apply #'make-instance class
+           :archive-dir archive-dir
+           :head (or head (archive:archive-contiguous-height archive-dir))
+           :blocks-index (open-index (index-path index-dir "blocks"))
+           :txs-index (open-index (index-path index-dir "txs"))
+           :receipts (make-rstore :dir receipts-dir)
+           :upstream upstream
+           extra)))
 
 (defmethod backend-head ((b archive-backend)) (archive-backend-head b))
 
@@ -372,18 +383,18 @@ UPSTREAM, a JSON-RPC URL, fills the receipts store on first use."
         (gethash hash (car tables)))))
 
 (defmethod backend-tx-location ((b archive-backend) hash)
-  (or (and (txs-index b)
-           (loop for v in (index-lookup (txs-index b) (hash-prefix hash))
-                 for n = (ash v -20) for j = (ldb (byte 20 0) v)
-                 when (and (<= n (archive-backend-head b))
-                           (let ((tx (nth j (nth-value 2 (block-parts (backend-block-raw b n)))))
-                                 (raw (backend-block-raw b n)))
-                             (and tx (octets= hash (clempo.keccak:keccak256 raw :start (car tx) :end (cdr tx))))))
-                   return (values n j)))
-      (let ((tables (tail-tables b)))
-        (fill-tail b tables)
-        (let ((loc (gethash hash (cdr tables))))
-          (when loc (values (car loc) (cdr loc)))))))
+  (let ((loc (or (and (txs-index b)
+                      (loop for v in (index-lookup (txs-index b) (hash-prefix hash))
+                            for n = (ash v -20) for j = (ldb (byte 20 0) v)
+                            when (and (<= n (archive-backend-head b))
+                                      (let* ((raw (backend-block-raw b n))
+                                             (tx (nth j (nth-value 2 (block-parts raw)))))
+                                        (and tx (octets= hash (clempo.keccak:keccak256 raw :start (car tx) :end (cdr tx))))))
+                              return (cons n j)))
+                 (let ((tables (tail-tables b)))
+                   (fill-tail b tables)
+                   (gethash hash (cdr tables))))))
+    (when loc (values (car loc) (cdr loc)))))
 
 (defun fetch-receipts (url n)
   (let ((r (rpc:rpc-call "debug_getRawReceipts" (list (quantity->hex n)) :url url)))

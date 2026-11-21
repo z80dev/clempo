@@ -156,9 +156,11 @@ everything that needs no execution.")
   (let ((b (block-or-fail id)))
     (map 'simple-vector #'hexbytes (chain:backend-receipts-raw chain:*backend* (cblock-number b)))))
 
-(defrpc "debug_getRawTransactions" ((id block-id)) "EIP-2718 transactions"
-  (let ((b (block-or-fail id)))
-    (coerce (loop for i from 0 below (length (cblock-txs b)) collect (hexbytes (cblock-tx-raw b i))) 'simple-vector)))
+(defrpc "debug_getRawTransactions" ((id block-id)) "EIP-2718 transactions; [] for an unknown block"
+  (let ((b (resolve-block id)))
+    (if b
+        (coerce (loop for i from 0 below (length (cblock-txs b)) collect (hexbytes (cblock-tx-raw b i))) 'simple-vector)
+        #())))
 
 (defrpc "debug_getRawTransaction" ((hash hash)) "EIP-2718 bytes by hash"
   (multiple-value-bind (b i) (tx-location hash) (if b (hexbytes (cblock-tx-raw b i)) :null)))

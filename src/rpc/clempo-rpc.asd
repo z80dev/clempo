@@ -2,7 +2,7 @@
 (defsystem "clempo-rpc"
   :description "JSON-RPC server (HTTP and WebSocket) serving the reference node's method set"
   :depends-on ("clempo-base" "clempo-io" "clempo-crypto" "clempo-codec" "clempo-trie" "clempo-types"
-               "clempo-sync" (:require "sb-bsd-sockets"))
+               "clempo-sync" "clempo-tempo-chainspec" (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "serde")
                (:file "defrpc")
@@ -11,7 +11,8 @@
                (:file "websocket")
                (:file "server")
                (:file "render")
-               (:file "eth")))
+               (:file "eth")
+               (:file "logs")))
 
 (defsystem "clempo-rpc/tests"
   :depends-on ("clempo-rpc")

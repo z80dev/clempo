@@ -102,7 +102,7 @@
                                  (invalid-type src "a string"))))
                ((string= key "blockHash") (setf hash (read-param 'hash src)))
                ((string= key "requireCanonical") (setf canonical (read-bool src "a boolean")))
-               (t (serde-fail-here src "unknown field `~A`, expected one of `blockNumber`, `blockHash`, `requireCanonical`" key))))
+               (t (serde-fail-after-key src "unknown field `~A`, expected one of `blockNumber`, `blockHash`, `requireCanonical`" key))))
        (cond (hash (list :hash hash :require-canonical canonical))
              (number number)
              (t (serde-fail-here src "Expected `blockNumber` or `blockHash` with `requireCanonical` optionally")))))

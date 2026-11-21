@@ -95,6 +95,25 @@
               (loop for r in results count (fourth r))
               (length results)))))
 
+(defun json-difference (want got &optional (path "$"))
+  "The first place WANT and GOT differ, as \"path: want X got Y\", or NIL."
+  (cond ((and (clempo.json:jobject-p want) (clempo.json:jobject-p got))
+         (or (loop for (k . v) in (cdr want)
+                   for cell = (assoc k (cdr got) :test #'string=)
+                   thereis (if cell
+                               (json-difference v (cdr cell) (format nil "~A.~A" path k))
+                               (format nil "~A.~A: missing" path k)))
+             (loop for (k) in (cdr got)
+                   unless (assoc k (cdr want) :test #'string=)
+                     return (format nil "~A.~A: unexpected" path k))))
+        ((and (vectorp want) (not (stringp want)) (vectorp got) (not (stringp got)))
+         (or (loop for i from 0 below (min (length want) (length got))
+                   thereis (json-difference (aref want i) (aref got i) (format nil "~A[~D]" path i)))
+             (unless (= (length want) (length got))
+               (format nil "~A: length ~D vs ~D" path (length want) (length got)))))
+        ((clempo.json:json-equal want got) nil)
+        (t (format nil "~A: want ~A got ~A" path (short-json want 120) (short-json got 120)))))
+
 (defun short-json (v &optional (n 400))
   (let ((s (if (stringp v) v (clempo.json:to-json-string v))))
     (if (> (length s) n) (concatenate 'string (subseq s 0 n) "...") s)))
@@ -115,10 +134,11 @@
                     (let ((m (clempo.json:jget c "method")))
                       (when (and (not ok) (< (gethash m shown 0) limit))
                         (incf (gethash m shown 0))
-                        (format t "~&--- ~A [~A] ~A~%  want ~A ~A~%  got  ~A ~A~%"
+                        (format t "~&--- ~A [~A] ~A~%  want ~A ~A~%  got  ~A ~A~%  diff ~A~%"
                                 m (case-compare-class c) (short-json (clempo.json:jget c "request") 300)
                                 (clempo.json:jget c "status") (short-json (clempo.json:jget c "response"))
-                                status (short-json response)))))))
+                                status (short-json response)
+                                (json-difference (clempo.json:jget c "response") response)))))))
               (format t "missing reference methods: ~{~A~^ ~}~%" missing))
             (clempo.json:jobject
              "score" (format nil "~D/~D methods, ~D/~D cases" methods-ok (length rows) cases-ok total)

@@ -304,13 +304,12 @@ senders and receipts, which are filled in on first use.")
                          "signature" (tempo-signature-json (car (last fields)) key-id)
                          "gasPrice" (q (effective-gas-price tx (cblock-base-fee b)))))))))
         (apply #'json:jobject
-               (append (if (= type 0) body body)
+               (append body
                        (list "hash" (hex32 (svref (cblock-tx-hashes b) i))
                              "blockHash" (hex32 (cblock-hash b))
                              "blockNumber" (q (cblock-number b))
                              "transactionIndex" (q i)
                              "from" (addr sender))
-                       (when (= type 0) (list "gasPrice" (q (tx:transaction-gas-price tx))))
                        (list "blockTimestamp" (q (cblock-timestamp b)))))))))
 
 ;;; Receipts and logs

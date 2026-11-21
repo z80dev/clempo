@@ -13,6 +13,7 @@ representation.")
            #:skip-ws #:peek #:peek-kind #:at-end-p #:expect-end
            #:read-string #:read-bool #:read-number #:read-null-p #:skip-value #:read-value
            #:read-raw-value #:invalid-type #:do-object #:do-array #:unexpected-text
+           #:*key-end* #:serde-fail-after-key
            #:rust-debug-string))
 
 (in-package #:clempo.serde)
@@ -51,6 +52,12 @@ representation.")
 (defun serde-fail-at (src pos fmt &rest args)
   (error 'serde-error :message (concatenate 'string (apply #'format nil fmt args) (position-suffix src pos))))
 
+
+(defvar *key-end* 0 "Inside DO-OBJECT: the position just after the current key.")
+
+(defun serde-fail-after-key (src fmt &rest args)
+  "An error positioned just after the current object key (unknown field, duplicate field)."
+  (apply #'serde-fail-at src *key-end* fmt args))
 (defun skip-ws (src)
   (let ((text (src-text src)))
     (loop while (and (< (src-pos src) (src-end src))
@@ -210,7 +217,8 @@ consume the value. A non-object fails with invalid type against EXPECTED."
        (advance-1 ,s)
        (unless (eql (peek ,s) #\})
          (loop
-           (let ((,key (read-string ,s)))
+           (let* ((,key (read-string ,s))
+                  (*key-end* (src-pos ,s)))
              (peek ,s) (advance-1 ,s)          ; the colon
              ,@body)
            (if (eql (peek ,s) #\,) (advance-1 ,s) (return))))
