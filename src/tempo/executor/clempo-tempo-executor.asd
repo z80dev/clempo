@@ -15,7 +15,8 @@
                (:file "handler")
                (:file "aa")
                (:file "system-calls")
-               (:file "replay")))
+               (:file "replay")
+               (:file "call")))                ; HistoryAgent: call contexts over any state view
 
 (defsystem "clempo-tempo-executor/tests"
   :depends-on ("clempo-tempo-executor" "clempo-io")

@@ -1,11 +1,13 @@
 (defpackage #:clempo.rpc.state
   (:use #:cl #:clempo.base #:clempo.rpc #:clempo.rpc.render)
   (:local-nicknames (#:json #:clempo.json) (#:serde #:clempo.serde) (#:chain #:clempo.rpc.chain)
-                    (#:store #:clempo.store) (#:trie #:clempo.trie))
+                    (#:store #:clempo.store) (#:trie #:clempo.trie) (#:state #:clempo.state)
+                    (#:history #:clempo.history))
   (:documentation "The eth and debug methods that read the world state at a block: code,
 storage, nonces, accounts, account info and Merkle proofs (reth's EthState over a state
 provider). A block id selects a state the way reth's state_by_block_id does; the state itself
-comes from the backend (clempo.rpc.chain:backend-state), which serves only the states it keeps.
+comes from the backend (clempo.rpc.chain:backend-state): the head's state database or a
+clempo.history view of an older block, both read through the clempo.state backend generics.
 A state it does not keep is answered with an internal error naming the block, never a guess.")
   (:export #:*eth-proof-window* #:block-id-number #:block-id-text #:header-not-found
            #:state-at #:state-block #:state-unavailable #:ensure-within-proof-window
@@ -118,9 +120,10 @@ found\" as reth's state_by_block_id does."
     n))
 
 (defun state-at (id)
-  "The state database after the block ID selects (see STATE-BLOCK); a known block the backend
-keeps no state for, and that is too far from genesis to rebuild, fails with STATE-UNAVAILABLE.
-Returns (values statedb number)."
+  "The state after the block ID selects (see STATE-BLOCK), a clempo.state backend: the
+head's state database or a historical view. A known block the backend keeps no state for, and
+that is too far from genesis to rebuild, fails with STATE-UNAVAILABLE.
+Returns (values state number)."
   (let ((n (state-block id)))
     (values (or (chain:backend-state chain:*backend* n) (replayed-state n) (state-unavailable n)) n)))
 
@@ -132,27 +135,32 @@ proof window."
     (when (> (- chain:*head* (min n chain:*head*)) *eth-proof-window*)
       (rpc-fail 4444 "distance to target block exceeds maximum proof window"))))
 
-;;; Reading the state database
+;;; Reading a state: a state database or a historical view, through the backend generics.
 
-(defun account-fields (db address)
-  "(values exists nonce balance code-hash-octets storage-root-octets)"
-  (let ((a (store:db-account db address)))
-    (if a
-        (values t (store:account-nonce a) (store:account-balance a) (store:account-code-hash a)
-                (store:account-storage-root a))
-        (values nil 0 0 trie:+empty-code-hash+ trie:+empty-trie-root+))))
+(defun account-fields (state address)
+  "(values exists nonce balance code-hash-octets storage-root-octets); the storage root only
+from a state database (proofs and eth_getAccount answer within the proof window, at the head)."
+  (multiple-value-bind (exists nonce balance code-hash) (state:backend-account state address)
+    (values exists nonce balance (if exists code-hash trie:+empty-code-hash+)
+            (cond ((not exists) trie:+empty-trie-root+)
+                  ((typep state 'store:statedb) (store:account-storage-root (store:db-account state address)))
+                  (t (internal-error "storage roots are kept only for the head state"))))))
 
-(defun account-code (db address)
-  (multiple-value-bind (exists nonce balance code-hash) (account-fields db address)
-    (declare (ignore exists nonce balance))
-    (store:db-code db code-hash)))
+(defun account-basics (state address)
+  "(values exists nonce balance code-hash-octets)"
+  (multiple-value-bind (exists nonce balance code-hash) (state:backend-account state address)
+    (values exists nonce balance (if exists code-hash trie:+empty-code-hash+))))
 
-(defun code-by-hash (db hash)
+(defun account-code (state address)
+  (state:backend-code state (nth-value 3 (account-basics state address))))
+
+(defun code-by-hash (state hash)
   "The code whose hash is the octets HASH, or NIL. Code is never removed from the store, as
 reth's Bytecodes table, so the answer does not depend on the block."
-  (if (octets= hash trie:+empty-code-hash+)
-      (make-octets 0)
-      (handler-case (store:db-code db hash) (simple-error () nil))))
+  (cond ((octets= hash trie:+empty-code-hash+) (make-octets 0))
+        ((typep state 'history:history-state)
+         (history:history-code-by-hash (history:history-state-history state) hash))
+        (t (handler-case (store:db-code state hash) (simple-error () nil)))))
 
 ;;; Storage keys: alloy-serde JsonStorageKey
 
@@ -229,10 +237,15 @@ quantity."
 
 ;;; Proofs: the store's proof readers over the committed tries.
 
-(defun account-proof (db address) (store:db-account-proof db address))
+(defun proof-db (state)
+  (if (typep state 'store:statedb)
+      state
+      (internal-error "Merkle proofs are served for the head state only")))
 
-(defun storage-proofs (db address slots)
-  (mapcar (lambda (slot) (store:db-storage-proof db address slot)) slots))
+(defun account-proof (state address) (store:db-account-proof (proof-db state) address))
+
+(defun storage-proofs (state address slots)
+  (mapcar (lambda (slot) (store:db-storage-proof (proof-db state) address slot)) slots))
 
 (defun proof-json (db address keys)
   "alloy EIP1186AccountProofResponse for ADDRESS with storage KEYS (storage-key structs)."
@@ -250,11 +263,11 @@ quantity."
                     (map 'simple-vector
                          (lambda (k proof)
                            (json:jobject "key" (storage-key-json k)
-                                         "value" (q (store:db-storage db address (storage-key-value k)))
+                                         "value" (q (state:backend-storage db address (storage-key-value k)))
                                          "proof" (funcall nodes proof)))
                          keys proofs)))))
 
-(defun slot-hex (db address slot) (integer->hex (store:db-storage db address slot) :bytes 32))
+(defun slot-hex (state address slot) (integer->hex (state:backend-storage state address slot) :bytes 32))
 
 ;;; Methods
 
@@ -267,7 +280,7 @@ quantity."
 
 (defrpc "eth_getTransactionCount" ((address address) (block block-id :optional t))
   "the account nonce (the pool is empty, so pending adds nothing)"
-  (q (nth-value 1 (account-fields (state-at block) address))))
+  (q (nth-value 1 (account-basics (state-at block) address))))
 
 (defrpc "eth_getStorageValues" ((requests storage-requests) (block block-id :optional t))
   "several slots of several accounts"
@@ -291,7 +304,7 @@ quantity."
 
 (defrpc "eth_getAccountInfo" ((address address) (block block-id)) "balance, nonce and code"
   (let ((db (state-at block)))
-    (multiple-value-bind (exists nonce balance) (account-fields db address)
+    (multiple-value-bind (exists nonce balance) (account-basics db address)
       (declare (ignore exists))
       (json:jobject "balance" (q balance) "nonce" (q nonce) "code" (hexbytes (account-code db address))))))
 
@@ -324,7 +337,14 @@ quantity."
   ;; The empty code's hash names the empty code whatever the state holds.
   (let ((code (if (octets= hash trie:+empty-code-hash+)
                   (progn (state-block block) (make-octets 0))
-                  (code-by-hash (state-at block) hash))))
+                  ;; Codes are never removed: the history's code table answers for any block.
+                  (let* ((n (state-block block))
+                         (h (and (typep chain:*backend* 'chain:archive-backend)
+                                 (chain:backend-history chain:*backend*)))
+                         (state (chain:backend-state chain:*backend* n)))
+                    (cond (state (code-by-hash state hash))
+                          (h (history:history-code-by-hash h hash))
+                          (t (code-by-hash (state-at block) hash)))))))
     (if code (hexbytes code) :null)))
 
 ;;; This node: admin_nodeInfo describes clempo itself. Its devp2p identity is a secp256k1 key

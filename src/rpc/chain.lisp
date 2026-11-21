@@ -15,6 +15,7 @@ each block's receipts checked against its header's receipts root before they are
            #:backend-tx-location #:backend-receipts-raw #:backend-chain-id
            #:with-backend-read #:with-backend-write #:*backend* #:*head*
            #:archive-backend #:make-archive-backend #:archive-backend-head #:backend-state
+           #:history-dir #:backend-history
            #:build-index #:index-dir #:index-covered-height
            #:block-hash-of-raw #:scan-block-hashes #:block-parts
            #:receipts-store-get #:receipts-store-put #:missing-receipts))
@@ -306,7 +307,10 @@ Returns (values header-start header-end tx-bounds) where tx-bounds is a list of 
    (txs-index :initarg :txs-index :reader txs-index)
    (tail :initform nil :accessor archive-backend-tail)            ; (blocks-table . txs-table) above the index
    (receipts :initarg :receipts :reader archive-backend-receipts)
-   (upstream :initarg :upstream :initform nil :reader archive-backend-upstream)))
+   (upstream :initarg :upstream :initform nil :reader archive-backend-upstream)
+   (history :initarg :history :initform :unopened)                ; clempo.history, NIL or :unopened
+   (history-lock :initform (sb-thread:make-mutex :name "history") :reader history-lock)
+   (history-checked :initform 0 :accessor history-checked)))     ; last refresh, internal real time
 
 (defun make-archive-backend (&rest initargs &key (class 'archive-backend) (archive-dir (archive:archive-dir))
                                                  (index-dir (index-dir)) head (upstream nil)
@@ -328,6 +332,37 @@ ARCHIVE-BACKEND) is instantiated with the remaining INITARGS as well."
            extra)))
 
 (defmethod backend-head ((b archive-backend)) (archive-backend-head b))
+
+;;; Historical state: a clempo.history directory built by `clempo-dev history-build`.
+
+(defun history-dir (&optional (chain "mainnet"))
+  "$CLEMPO_HISTORY, or ~/cache/clempo/history/<chain>/."
+  (or (io:getenv "CLEMPO_HISTORY")
+      (format nil "~A/cache/clempo/history/~A/" (io:getenv "HOME") chain)))
+
+(defun backend-history (b)
+  "B's history, opened on first use (NIL when the directory does not exist)."
+  (sb-thread:with-mutex ((history-lock b))
+    (let ((h (slot-value b 'history)))
+      (if (eq h :unopened)
+          (setf (slot-value b 'history)
+                (let ((dir (history-dir (if (eql (backend-chain-id b) 4217) "mainnet" (backend-chain-id b)))))
+                  (when (probe-file dir) (clempo.history:open-history dir))))
+          h))))
+
+(defparameter *history-refresh-seconds* 10
+  "How often a miss looks for segments a running history build has added.")
+
+(defmethod backend-state ((b archive-backend) number)
+  "The state after block NUMBER from the history, or NIL when it does not cover it."
+  (let ((h (backend-history b)))
+    (when h
+      (or (clempo.history:history-state h number)
+          (let ((now (get-internal-real-time)))
+            (when (> (- now (history-checked b)) (* *history-refresh-seconds* internal-time-units-per-second))
+              (setf (history-checked b) now)
+              (clempo.history:history-refresh h)
+              (clempo.history:history-state h number)))))))
 
 (defun archive-chunk (b first)
   (sb-thread:with-mutex ((chunk-lock b))
