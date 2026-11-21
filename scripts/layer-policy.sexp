@@ -4,6 +4,7 @@
 (:loops
  (("src/base/octets.lisp"
    ("INTEGER-INTO-OCTETS" 3 "Bounded by the destination width; wider paths consume whole digits first.")
+   ("OCTETS=" 2 "Typed LOOP bindings precede finite bounds on the word comparison and byte tail.")
    ("OCTETS->INTEGER" 2 "Bounded by the requested source slice."))
   ("src/codec/abi.lisp"
    ("UTF8-DECODE" 1 "Cursor consumes one or more input bytes on each iteration.")
@@ -124,6 +125,7 @@
   ("src/tempo/builder/builder.lisp" ("BUILD-PAYLOAD" 1 "Discards or consumes candidates from the finite pool snapshot subject to payload limits."))
   ("src/tempo/contract/backends.lisp" ("HOST-REVERT" 1 "Pops finite memory-host journal entries to the snapshot marker."))
   ("src/tempo/contract/layout.lisp" ("SPLIT-DASHES" 1 "Advances past separators in a finite field name."))
+  ("src/tempo/executor/block.lisp" ("RLP-LIST-P" 2 "The length scan is bounded by the RLP length-field size, and each valid child advances within its enclosing slice."))
   ("src/tempo/executor/call.lisp" ("ESTIMATE-GAS" 1 "Rounded binary search narrows the gas interval."))
   ("src/tempo/executor/replay.lisp" ("REPLAY-BLOCKS" 1 "The outer range is finite; only its explicitly requested retry restart repeats a block."))
   ("src/tempo/precompiles/dex.lisp"
