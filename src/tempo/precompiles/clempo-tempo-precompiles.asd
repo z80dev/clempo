@@ -6,7 +6,7 @@
 
 (defsystem "clempo-tempo-precompiles"
   :description "Owner: the precompiles agent. Tempo precompiles."
-  :depends-on ("clempo-base" "clempo-crypto" "clempo-codec" "clempo-tempo-forks" "clempo-tempo-contract")
+  :depends-on ("clempo-base" "clempo-crypto" "clempo-codec" "clempo-types" "clempo-tempo-forks" "clempo-tempo-contract")
   :serial t
   :components #.(let* ((here (make-pathname :name nil :type nil :defaults *load-truename*))
                        (first '("packages" "common"))

@@ -120,9 +120,12 @@ rewards, permits, memos, transfer policies, virtual addresses.")
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
   (:shadowing-import-from #:clempo.contract #:read #:write #:delete)
   (:documentation "AccountKeychain (keychain*.lisp): access keys, spending limits, call scopes.")
-  (:export #:account-keychain #:authorize-key #:revoke-key #:get-key #:authorize-transfer
-           #:authorize-approve #:refund-spending-limit #:validate-keychain-authorization
-           #:set-transaction-key #:set-tx-origin))
+  (:export #:account-keychain #:authorize-key #:authorize-admin-key #:revoke-key #:get-key
+           #:authorize-transfer #:authorize-approve #:refund-spending-limit
+           #:validate-keychain-authorization #:validate-call-scope
+           #:set-transaction-key #:set-tx-origin #:update-spending-limit
+           #:authorized-key #:authorized-key-signature-type #:authorized-key-expiry
+           #:authorized-key-enforce-limits #:authorized-key-is-revoked #:authorized-key-is-admin))
 
 (defpackage #:clempo.signature-verifier
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
@@ -134,7 +137,8 @@ rewards, permits, memos, transfer policies, virtual addresses.")
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
   (:shadowing-import-from #:clempo.contract #:read #:write #:delete)
   (:documentation "ConfigurableAccount (configurable-account.lisp): T14 multi-owner accounts.")
-  (:export #:configurable-account))
+  (:export #:configurable-account #:valid-account-p #:valid-account-code-p #:set-authority
+           #:register #:shim-call))
 
 (defpackage #:clempo.storage-credits
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
