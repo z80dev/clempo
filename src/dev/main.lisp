@@ -12,9 +12,10 @@ src/dev/ adds commands with DEFCOMMAND; this file only dispatches.")
 (defmacro defcommand (name (args-var) doc &body body)
   "Define a clempo-dev subcommand. ARGS-VAR is bound to the parsed argument plist:
 -flag value pairs become (:flag \"value\"); a -flag followed by another flag or nothing
-becomes (:flag t). Positional words collect under :rest. The body returns an exit code."
+becomes (:flag t). Positional words collect under :rest. The body returns an exit code;
+(return-from command code) leaves early."
   `(setf (gethash ,name *commands*)
-         (cons (lambda (,args-var) (declare (ignorable ,args-var)) ,@body) ,doc)))
+         (cons (lambda (,args-var) (declare (ignorable ,args-var)) (block command ,@body)) ,doc)))
 
 (defun parse-args (words)
   (let ((plist '()) (rest '()))

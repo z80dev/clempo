@@ -10,7 +10,7 @@ SBCL=(sbcl --dynamic-space-size "${CLEMPO_HEAP:-8192}" --noinform --non-interact
 
 rm -rf build/fasl/check
 "${SBCL[@]}" --load scripts/build.lisp \
-  --eval '(clempo-build:load-all :force t :strict t)' \
+  --eval '(clempo-build:load-all :strict t)' \
   --eval '(clempo-build:test-all :strict t)'
 
 "${SBCL[@]}" --load scripts/build.lisp --load scripts/check-layers.lisp

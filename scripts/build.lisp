@@ -61,19 +61,30 @@ variables, which SBCL reports only as style warnings at the end of a compilation
       (sb-ext:exit :code 1 :abort t))
     t))
 
+(defun layer-primary-systems (layer)
+  "Every system defined by an .asd file under src/<dir>/, the layer's own system first."
+  (let ((names (mapcar #'pathname-name
+                       (directory (merge-pathnames (format nil "src/~A/**/*.asd" (getf layer :dir))
+                                                   *root*)))))
+    (cons (layer-system layer)
+          (sort (remove (layer-system layer) names :test #'string=) #'string<))))
+
 (defun load-all (&key force strict)
   "Load every present layer. With STRICT, warnings and undefined references fail."
   (call-strictly strict
                  (lambda ()
                    (dolist (l (present-layers))
-                     (asdf:load-system (layer-system l) :force (and force :all))))))
+                     (dolist (s (layer-primary-systems l))
+                       (when (system-exists-p s)
+                         (asdf:load-system s :force (and force :all))))))))
 
 (defun test-systems (&optional dirs)
   (loop for l in (present-layers)
-        for name = (format nil "~A/tests" (layer-system l))
-        when (and (or (null dirs) (member (getf l :dir) dirs :test #'string=))
-                  (system-exists-p name))
-          collect name))
+        when (or (null dirs) (member (getf l :dir) dirs :test #'string=))
+          nconc (loop for s in (layer-primary-systems l)
+                      for name = (format nil "~A/tests" s)
+                      when (and (system-exists-p s) (system-exists-p name))
+                        collect name)))
 
 (defun test-all (&key dirs strict)
   "Load the test systems of DIRS (all when NIL) and run them. Exits non-zero on failure."
