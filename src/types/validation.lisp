@@ -46,7 +46,8 @@ CLEMPO.SIGNATURES:AUTHORIZATION-SIGNER; state/code and chain checks belong to ex
           (field-integer (third item) 8) (fourth item)))
 
 (defun validation-fork-at-least-p (fork target)
-  (let* ((forks '(:t0 :t1 :t1a :t1b :t1c :t2 :t3 :t4 :t5 :t6 :t7 :t8
+  ;; :genesis precedes :t0 (moderato runs blocks under it), as in clempo.forks.
+  (let* ((forks '(:genesis :t0 :t1 :t1a :t1b :t1c :t2 :t3 :t4 :t5 :t6 :t7 :t8
                   :t9 :t10 :t11 :t12 :t13 :t14 :t15))
          (index (position fork forks)) (minimum (position target forks)))
     (invariant (and index minimum) "Unknown validation fork ~S / ~S" fork target)

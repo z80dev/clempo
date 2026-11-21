@@ -103,3 +103,8 @@
         (is-equalp (direct receipts) (clempo.receipts:receipts-root receipts)))
       (is-equalp (clempo.receipts:receipts-bloom logged) (clempo.receipts:logs-bloom (list log)))
       (is (every #'zerop (clempo.receipts:receipts-bloom (plain 0 1)))))))
+
+(deftest validation-fork-order-includes-genesis ()
+  ;; Moderato executes transactions under :genesis (before :t0).
+  (is (not (clempo.transactions::validation-fork-at-least-p :genesis :t6)))
+  (is (clempo.transactions::validation-fork-at-least-p :t6 :genesis)))
