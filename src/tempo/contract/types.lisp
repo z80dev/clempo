@@ -33,7 +33,8 @@
   (count 0 :type fixnum)         ; array length
   (struct nil))                  ; :struct, the STRUCT-LAYOUT
 
-(defvar *stypes* (make-hash-table :test 'equal) "spec -> stype")
+(defvar *stypes* (make-hash-table :test 'equal :synchronized t)
+  "spec -> stype. Synchronized: places are resolved lazily from concurrent RPC threads.")
 
 (defun prim (spec word bytes)
   (%make-stype :spec spec :kind :prim :word word :bytes bytes :slots 1 :packable (< bytes 32)))
