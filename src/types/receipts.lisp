@@ -16,6 +16,7 @@
 (defun bloom-accrue (bloom bytes)
   (declare (type octets bloom bytes) #.clempo.base:*hot*)
   (let ((hash (clempo.keccak:keccak256 bytes)))
+    (declare (type octets hash))
     (dotimes (i 3)
       (let* ((bit (logand #x7ff (logior (ash (aref hash (* i 2)) 8) (aref hash (1+ (* i 2))))))
              (byte (- 255 (ash bit -3))))
