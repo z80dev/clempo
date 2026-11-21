@@ -23,6 +23,8 @@
   (cumulative 0) (block-gas 0) (receipts '()) (index 0)
   skip-nonce-check skip-valid-after-check skip-base-fee-check skip-liquidity-check
   skip-gas-caps                         ; RPC requests: no transaction or block gas cap
+  skip-fee-charge                       ; RPC requests: no fee collection, balance check or settlement
+  skip-eip3607                          ; RPC requests: a sender with code may send
   key-expiry                            ; access-key expiry resolved for the running tx
   validate-only)                        ; stop after fee collection (pool admission)
 
@@ -237,7 +239,7 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
 (defun resolve-fee-context (ctx v fee-payer)
   (let* ((env (ctx-env ctx))
          (price (txv-effective-gas-price v (block-env-base-fee env)))
-         (collected (calc-gas-balance-spending (txv-gas-limit v) price))
+         (collected (if (ctx-skip-fee-charge ctx) 0 (calc-gas-balance-spending (txv-gas-limit v) price)))
          (max-fee (calc-gas-balance-spending (txv-gas-limit v) (txv-max-fee-per-gas v))))
     (setf *non-creditable* nil)
     (with-protocol-storage ()
@@ -253,9 +255,10 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
       (unless (tip20-address-p token) (invalid "fee token ~X is not TIP-20" token))
       (unless (zerop max-fee)
         (unless (valid-fee-token-p token) (invalid "fee token ~X is not USD" token)))
-      (let ((balance (with-protocol-storage (:static t) (clempo.tip20:balance-of token fee-payer))))
-        (when (< balance max-fee)
-          (invalid "insufficient fee token balance: ~D < ~D" balance max-fee)))
+      (unless (ctx-skip-fee-charge ctx)
+        (let ((balance (with-protocol-storage (:static t) (clempo.tip20:balance-of token fee-payer))))
+          (when (< balance max-fee)
+            (invalid "insufficient fee token balance: ~D < ~D" balance max-fee))))
       (make-fee-context :payer fee-payer :token token :collected collected :max-fee max-fee
                         :fallback-p fallback-p))))
 
@@ -305,7 +308,7 @@ back as refund gas. Returns the refund to add."
 (defstruct (tx-outcome (:constructor make-tx-outcome
                            (status gas-used block-gas logs
                             &key fee-token fallback-fee-token-p fee-payer key-expiry (validator-fee 0)
-                              storage-changes (output (make-octets 0)) halt)))
+                              storage-changes (output (make-octets 0)) halt (refunded 0))))
   "One executed transaction: receipt status, gas, logs, and the fee metadata the pool and
 builder read (Rust TempoTxResult / ResolvedFeeToken / key_expiry). OUTPUT is the top frame's
 return or revert data; HALT is NIL on success or revert, else the EVM's halt keyword
@@ -313,14 +316,16 @@ return or revert data; HALT is NIL on success or revert, else the EVM's halt key
   status gas-used block-gas (logs '() :type list)
   fee-token fallback-fee-token-p fee-payer key-expiry (validator-fee 0)
   (storage-changes '() :type list)      ; ((address slot original current) ...) of TIP-20 slots
-  (output (make-octets 0)) halt)
+  (output (make-octets 0)) halt
+  (refunded 0))                         ; the refund settlement applied (evm2 final_refunded)
 
 (defun halt-kind (status)
   "The halt keyword of an EVM frame STATUS: NIL for success and revert."
   (unless (member status '(:stop :return :revert)) status))
 
 (defun settle (ctx v fee price gas-left extra-refund floor &key (status t))
-  "config.rs settle_transaction + evm2 finalize_gas. Returns the gas used."
+  "config.rs settle_transaction + evm2 finalize_gas. Returns (values gas-used validator-fee
+refund-applied)."
   (let* ((gp (evm:spec-gas evm:*spec*))
          (gas-limit (txv-gas-limit v))
          (refund-counter (+ (state:world-refund evm:*world*) extra-refund (settle-storage-credits status)))
@@ -333,13 +338,14 @@ return or revert data; HALT is NIL on success or revert, else the EVM's halt key
          (actual (calc-gas-balance-spending used price))
          (collected (calc-gas-balance-spending gas-limit price))
          (validator-fee 0))
-    (unless (and (zerop collected) (not (zerop actual)))
+    ;; Without fee charging (RPC calls) settlement ends with the gas accounting.
+    (unless (or (ctx-skip-fee-charge ctx) (and (zerop collected) (not (zerop actual))))
       (unless (and (zerop actual) (zerop (- collected actual)))
         (setf validator-fee
               (with-protocol-storage ()
                 (clempo.fee-manager:collect-fee-post-tx (fee-payer fee) actual (- collected actual)
                        (fee-token fee) (block-env-beneficiary (ctx-env ctx)))))))
-    (values used validator-fee)))
+    (values used validator-fee refund)))
 
 ;;; The top-level frame (evm2 prepare_initial_frame + execute_initial_frame).
 
@@ -400,7 +406,7 @@ return or revert data; HALT is NIL on success or revert, else the EVM's halt key
       ;; validate_sender_and_bump_nonce
       (let* ((account (state:get-account world sender))
              (code (state:account-code world account)))
-        (when (and (plusp (length code)) (not (state:delegation-target code)))
+        (when (and (not (ctx-skip-eip3607 ctx)) (plusp (length code)) (not (state:delegation-target code)))
           (invalid "sender has code"))
         (when (and (not (ctx-skip-nonce-check ctx)) (/= (state:account-nonce account) (txv-nonce v)))
           (if (< (txv-nonce v) (state:account-nonce account))
@@ -427,10 +433,10 @@ return or revert data; HALT is NIL on success or revert, else the EVM's halt key
               (multiple-value-bind (status gas-left output)
                   (run-initial-frame sender sender-nonce (txv-to v) (txv-input v) 0 (- gas-limit intrinsic))
                 (let ((ok (evm:success-p status)))
-                  (multiple-value-bind (used validator-fee) (settle ctx v fee price gas-left 0 floor :status ok)
+                  (multiple-value-bind (used validator-fee refunded) (settle ctx v fee price gas-left 0 floor :status ok)
                     (make-tx-outcome ok used used (tx-logs) :fee-token (fee-token fee) :fee-payer (fee-payer fee)
                                                              :fallback-fee-token-p (fee-fallback-p fee)
-                                                             :validator-fee validator-fee
+                                                             :validator-fee validator-fee :refunded refunded
                                                              :output (or output (make-octets 0))
                                                              :halt (halt-kind status))))))))))))
 
@@ -652,16 +658,21 @@ transactions (type #x76, the default when :calls is given), :calls ((to-or-nil v
                 (txv-authorizations v) authorizations))
       v)))
 
-(defun execute-request (ctx request &key skip-nonce-check skip-base-fee-check skip-gas-caps)
+(defun execute-request (ctx request &key skip-nonce-check skip-base-fee-check skip-gas-caps
+                                         skip-fee-charge skip-eip3607)
   "Execute the unsigned REQUEST (see REQUEST-TXV) in the overlay block CTX after the requests
 before it; returns its TX-OUTCOME or signals INVALID-TRANSACTION with the world unchanged.
-Requests take no gas lane and leave no receipt. SKIP-GAS-CAPS lifts the transaction and block
-gas caps (reth prepare_call_env)."
+Requests take no gas lane and leave no receipt. The flags drop evm2 features as reth's
+prepare_call_env does: SKIP-GAS-CAPS the transaction and block gas caps; SKIP-FEE-CHARGE fee
+collection, the fee-token balance check and settlement (the fee token is still resolved);
+SKIP-EIP3607 the sender-has-code check."
   (let ((*tx-index* (ctx-index ctx))
         (*ctx* ctx))
     (setf (ctx-skip-nonce-check ctx) skip-nonce-check
           (ctx-skip-base-fee-check ctx) skip-base-fee-check
-          (ctx-skip-gas-caps ctx) skip-gas-caps)
+          (ctx-skip-gas-caps ctx) skip-gas-caps
+          (ctx-skip-fee-charge ctx) skip-fee-charge
+          (ctx-skip-eip3607 ctx) skip-eip3607)
     (unwind-protect
          (with-block-context (ctx)
            (let ((outcome (execute-txv ctx (request-txv request *tx-index*))))
@@ -671,4 +682,6 @@ gas caps (reth prepare_call_env)."
              outcome))
       (setf (ctx-skip-nonce-check ctx) nil
             (ctx-skip-base-fee-check ctx) nil
-            (ctx-skip-gas-caps ctx) nil))))
+            (ctx-skip-gas-caps ctx) nil
+            (ctx-skip-fee-charge ctx) nil
+            (ctx-skip-eip3607 ctx) nil))))

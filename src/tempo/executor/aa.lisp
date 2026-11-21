@@ -117,7 +117,7 @@
          (caller (txv-sender v))
          (account (state:get-account world caller))
          (code (state:account-code world account)))
-    (when (and (plusp (length code)) (not (state:delegation-target code)))
+    (when (and (not (ctx-skip-eip3607 *ctx*)) (plusp (length code)) (not (state:delegation-target code)))
       (invalid "sender has code"))
     (state:touch-account world account)
     (let ((protocol-nonce (state:account-nonce account)))
@@ -411,20 +411,20 @@ output): the failing call's status and output, else the last call's."
               (if (or (eq key-gas :out-of-gas) (> key-gas remaining))
                   ;; The metered key authorization ran out of gas: the transaction is included
                   ;; as an out-of-gas halt that spends all its execution gas and runs no call.
-                  (multiple-value-bind (used validator-fee) (settle ctx v fee price 0 0 floor :status nil)
+                  (multiple-value-bind (used validator-fee refunded) (settle ctx v fee price 0 0 floor :status nil)
                     (make-tx-outcome nil used used (tx-logs)
                                      :fee-token (fee-token fee) :fallback-fee-token-p (fee-fallback-p fee)
                                      :fee-payer (fee-payer fee) :key-expiry (ctx-key-expiry ctx)
-                                     :validator-fee validator-fee :halt :out-of-gas))
+                                     :validator-fee validator-fee :halt :out-of-gas :refunded refunded))
                   (let ((execution-gas (progn (incf intrinsic key-gas)
                                               (if (and (forks:fork< fork :t0) (> intrinsic gas-limit))
                                                   +max-u64+ (- gas-limit intrinsic)))))
                     (multiple-value-bind (ok gas-left status output)
                         (execute-batch v caller (kc-access-key kc) create-nonce price execution-gas)
-                      (multiple-value-bind (used validator-fee)
+                      (multiple-value-bind (used validator-fee refunded)
                           (settle ctx v fee price (min gas-left gas-limit) auth-refund floor :status ok)
                         (make-tx-outcome ok used used (tx-logs)
                                          :fee-token (fee-token fee) :fallback-fee-token-p (fee-fallback-p fee)
                                          :fee-payer (fee-payer fee) :key-expiry (ctx-key-expiry ctx)
-                                         :validator-fee validator-fee
+                                         :validator-fee validator-fee :refunded refunded
                                          :output (or output (make-octets 0)) :halt (halt-kind status)))))))))))))

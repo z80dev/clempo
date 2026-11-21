@@ -123,6 +123,11 @@ transactions touched."
       (is (tx-outcome-status (execute-request (begin-call-block db env)
                                               (list* :gas 50000000 :max-fee 0 :max-priority 0 request)
                                               :skip-gas-caps t :skip-base-fee-check t)))
+      ;; eth_call's features: full fees and 50M gas but no fee charge, so no balance limit
+      (let ((call (execute-request (begin-call-block db env) (list* :gas 50000000 request)
+                                   :skip-gas-caps t :skip-fee-charge t :skip-eip3607 t)))
+        (is (tx-outcome-status call))
+        (is (= (tx-outcome-gas-used call) (tx-outcome-gas-used outcome))))
       (is (equalp root (clempo.store:db-root-hash db))))))
 
 (defblock-test t7-sstore-storage-credits 29152422
