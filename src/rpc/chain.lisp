@@ -22,7 +22,8 @@ each block's receipts checked against its header's receipts root before they are
            #:build-index #:index-dir #:index-covered-height
            #:block-hash-of-raw #:scan-block-hashes #:block-parts
            #:receipts-store-get #:receipts-store-put #:missing-receipts
-           #:archive-backend-receipts #:archive-backend-upstream))
+           #:archive-backend-receipts #:archive-backend-upstream
+           #:write-index #:open-index #:index-lookup #:hash-prefix))
 
 (in-package #:clempo.rpc.chain)
 
