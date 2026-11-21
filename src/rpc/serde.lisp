@@ -16,7 +16,7 @@ representation.")
            #:read-raw-value #:invalid-type #:do-object #:do-array #:unexpected-text
            #:*key-end* #:serde-fail-after-key
            #:rust-debug-string #:rust-float #:number-unexpected #:parse-serde-number
-           #:read-integer #:read-content))
+           #:read-integer #:read-content #:*depth* #:*recursion-limit* #:refuse-map))
 
 (in-package #:clempo.serde)
 
@@ -251,6 +251,14 @@ form (1e-6, 1.5e+20) below 1e-5 and from 1e16, else positional with at least one
   (let ((what (unexpected-text src)))
     (serde-fail-here src "invalid type: ~A, expected ~A" what expected)))
 
+(defun refuse-map (src expected)
+  "Fail as serde_json's deserialize_any does when its visitor refuses the map at SRC: the
+brace is consumed, and the closing one too when the map is empty (serde_json ends the map
+before it reports the error, recorded: `{}` fails at column 2, `{\"a\":1}` at column 1)."
+  (advance src 1)
+  (when (eql (peek src) #\}) (advance src 1))
+  (serde-fail-here src "invalid type: map, expected ~A" expected))
+
 (defun read-integer (src min max expected)
   "A Rust primitive integer (u8, i32, u64, usize ...) from a JSON number, as serde's
 primitive visitors take it: an integer out of [MIN, MAX] is an invalid value, a float an
@@ -262,15 +270,30 @@ invalid type, anything else an invalid type against EXPECTED."
               (t (serde-fail-here src "invalid value: integer `~D`, expected ~A" n expected))))
       (invalid-type src expected)))
 
-(defconstant +recursion-limit+ 128 "serde_json's remaining_depth: nested arrays and objects it buffers.")
+(defconstant +recursion-limit+ 128
+  "serde_json's recursion limit: nested arrays and objects one param may open, those it
+skips included (recorded from the reference: 127 nested objects in an eth_call request
+answer, 128 fail with \"recursion limit exceeded\").")
+
+(defvar *depth* 0 "Arrays and objects open around the value being read, within one param.")
+
+(defvar *recursion-limit* +recursion-limit+
+  "The nesting at which reading fails, or NIL while scanning the request envelope, which
+jsonrpsee does without serde's limit.")
+
+(defun enter-container (src)
+  "The depth inside a container whose opening bracket SRC just consumed; fails past the limit."
+  (let ((depth (1+ *depth*)))
+    (when (and *recursion-limit* (>= depth *recursion-limit*))
+      (serde-fail-here src "recursion limit exceeded"))
+    depth))
 
 (defun skip-value (src &optional numbers)
   "Consume the next value. With NUMBERS, numbers are converted as serde_json does when it
 buffers a value (a Value or a flattened struct's Content), so one beyond the double range
-fails where it ends, and nesting deeper than +RECURSION-LIMIT+ fails as serde_json's
-recursion limit does; without, they are only scanned and nesting is unbounded (serde's
-IgnoredAny). Iterative: no input exhausts the control stack."
-  (prog ((stack '()) (depth 0))          ; closers (#\] or #\}) of the open containers
+fails where it ends; without, they are only scanned (serde's IgnoredAny). Nesting counts
+toward +RECURSION-LIMIT+ from *DEPTH*. Iterative: no input exhausts the control stack."
+  (prog ((stack '()) (*depth* *depth*))   ; closers (#\] or #\}) of the open containers
    value
      (ecase (peek-kind src)
        (:string (read-string src))
@@ -281,8 +304,7 @@ IgnoredAny). Iterative: no input exhausts the control stack."
        ((:object :array)
         (let ((closer (if (eq (peek-kind src) :object) #\} #\])))
           (advance src 1)
-          (when (and numbers (>= (incf depth) +recursion-limit+))
-            (serde-fail-here src "recursion limit exceeded"))
+          (setf *depth* (enter-container src))
           (push closer stack)
           (unless (eql (peek src) closer)
             (when (eql closer #\}) (read-string src) (peek src) (advance src 1))
@@ -295,7 +317,7 @@ IgnoredAny). Iterative: no input exhausts the control stack."
             (advance src 1)
             (when (eql (first stack) #\}) (read-string src) (peek src) (advance src 1))
             (go value))
-           (t (peek src) (advance src 1) (pop stack) (decf depth) (go after)))))
+           (t (peek src) (advance src 1) (pop stack) (decf *depth*) (go after)))))
 
 (defun read-raw-value (src &optional numbers)
   "The raw text of the next value (NUMBERS as for SKIP-VALUE)."
@@ -311,7 +333,7 @@ IgnoredAny). Iterative: no input exhausts the control stack."
 (defun read-value (src)
   "The next value as clempo.json data; a number beyond the double range fails as it does
 when serde_json reads a Value."
-  (clempo.json:parse-json (read-raw-value src t)))
+  (clempo.json:parse-json (read-raw-value src t) :max-depth nil))   ; READ-RAW-VALUE bounds it
 
 (defmacro do-object ((key src &key (expected "a map")) &body body)
   "Walk the object at SRC: KEY is bound to each key (consumed, the value not yet); BODY must
@@ -320,13 +342,14 @@ consume the value. A non-object fails with invalid type against EXPECTED."
     `(let ((,s ,src))
        (unless (eq (peek-kind ,s) :object) (invalid-type ,s ,expected))
        (advance-1 ,s)
-       (unless (eql (peek ,s) #\})
-         (loop
-           (let* ((,key (read-string ,s))
-                  (*key-end* (src-pos ,s)))
-             (peek ,s) (advance-1 ,s)          ; the colon
-             ,@body)
-           (if (eql (peek ,s) #\,) (advance-1 ,s) (return))))
+       (let ((*depth* (enter-container ,s)))
+         (unless (eql (peek ,s) #\})
+           (loop
+             (let* ((,key (read-string ,s))
+                    (*key-end* (src-pos ,s)))
+               (peek ,s) (advance-1 ,s)          ; the colon
+               ,@body)
+             (if (eql (peek ,s) #\,) (advance-1 ,s) (return)))))
        (peek ,s) (advance-1 ,s))))
 
 (defmacro do-array ((index src &key (expected "a sequence")) &body body)
@@ -336,9 +359,10 @@ consume the value. A non-object fails with invalid type against EXPECTED."
        (declare (ignorable ,index))
        (unless (eq (peek-kind ,s) :array) (invalid-type ,s ,expected))
        (advance-1 ,s)
-       (unless (eql (peek ,s) #\])
-         (loop ,@body (incf ,index)
-               (if (eql (peek ,s) #\,) (advance-1 ,s) (return))))
+       (let ((*depth* (enter-container ,s)))
+         (unless (eql (peek ,s) #\])
+           (loop ,@body (incf ,index)
+                 (if (eql (peek ,s) #\,) (advance-1 ,s) (return)))))
        (peek ,s) (advance-1 ,s))))
 
 (defun advance-1 (src) (advance src 1))

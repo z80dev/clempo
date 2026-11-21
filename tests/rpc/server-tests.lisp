@@ -329,3 +329,40 @@
             (is= "filter not found" (json:jget* (call "eth_getFilterChanges" id) "error" "message"))
             (is= "filter not found" (json:jget* (call "eth_getFilterChanges" kept) "error" "message"))))
         (is (zerop (hash-table-count logs::*filters*)))))))
+
+;;; Nesting: unbounded in the envelope and in params a method ignores, serde_json's limit of
+;;; 128 within a typed param (answers recorded from the reference, 2026-11-21).
+
+(deftest nesting-as-the-reference-answers ()
+  (let ((b (make-instance 'fixed-backend))
+        (deep (format nil "~A~A" (make-string 20000 :initial-element #\[) (make-string 20000 :initial-element #\]))))
+    (flet ((nested-call (n)
+             (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_call\",\"params\":[~{~A~}\"0x\"~A]}"
+                     (loop repeat n collect "{\"a\":") (make-string n :initial-element #\}))))
+      (is= "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":\"0x1079\"}"
+           (chain:with-backend-read (b)
+             (handle (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_chainId\",\"params\":[~A]}" deep))))
+      (is= "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"Invalid params\",\"data\":\"invalid type: sequence, expected u8 at line 1 column 1\"}}"
+           (handle (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"web3_sha3\",\"params\":[~A]}" deep)))
+      (is= "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32602,\"message\":\"Invalid params\",\"data\":\"recursion limit exceeded at line 1 column 636\"}}"
+           (chain:with-backend-read (b) (handle (nested-call 128))))
+      (is (not (search "recursion limit" (chain:with-backend-read (b) (handle (nested-call 127)))))))))
+
+(deftest sha3-reads-u8-arrays-as-the-reference ()
+  ;; recorded from the reference, 2026-11-21
+  (loop for (params answer) in
+        '(("[[1,2]]" "\"result\":\"0x22ae6da6b482f9b1b19b0b897c3fd43884180a1c5ee361e1107a1bc635649dda\"")
+          ("[[]]" "\"result\":\"0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470\"")
+          ("[[256]]" "\"data\":\"invalid value: integer `256`, expected u8 at line 1 column 4\"")
+          ("[[\"a\"]]" "\"data\":\"invalid type: string \\\"a\\\", expected u8 at line 1 column 4\"")
+          ("[[1,[2]]]" "\"data\":\"invalid type: sequence, expected u8 at line 1 column 3\"")
+          ("[{}]" "\"data\":\"invalid type: map, expected a variable number of bytes represented as a hex string, an array of u8, or raw bytes at line 1 column 2\""))
+        do (is (search answer (handle (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"web3_sha3\",\"params\":~A}" params)))
+               "~A" params)))
+
+(deftest byte-params-refuse-maps-where-the-reference-does ()
+  ;; serde_json ends an empty map before reporting (recorded from the reference, 2026-11-21)
+  (loop for (params column) in '(("[{}]" 2) ("[{\"a\":1}]" 1) ("[{\"a\":[1,2]}]" 1))
+        do (is (search (format nil "an array of u8, or raw bytes at line 1 column ~D\"" column)
+                       (handle (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBalance\",\"params\":~A}" params)))
+               "~A" params)))
