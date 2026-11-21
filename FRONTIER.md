@@ -38,6 +38,23 @@ measured **417 MB/s** for Keccak-256 on 64 MiB (0.161 s wall) and **62.396 µs
 CPU / 62.452 µs wall** per ecrecover with caller-owned output and scratch
 ([command](docs/BENCH.md#native-curve-kernels)). These use the portable crypto paths.
 
+**Linux arm64** (`eebfce9`, Ubuntu 24.04, kernel 6.8, colima VM with 10
+vCPUs on Apple Silicon; SBCL 2.6.8 built from the official source with
+`--fancy`): the cold strict `scripts/verify.sh` gate passed (808 tests, 0
+failed, 0 layer violations, 3 m 34 s) with no code change. The kernel reports
+`sha2` and `sha3` in AT_HWCAP, so `clempo.io:cpu-feature-p` selects the VOPs:
+after loading every layer, `clempo.keccak-arm64:**native**` and
+`clempo.sha256-arm64:**native**` were both `T`, `keccak256("abc")` and
+`sha256("abc")` gave the standard digests, and one 64 MiB pass ran at
+828 MB/s (Keccak-256) and 2,485 MB/s (SHA-256) in a release build. The
+secp256k1 and P-384 field words compile to their `#+arm64` VOPs
+unconditionally. With `CLEMPO_BUILD=release`: `score -rung R1 -json` 673/673,
+`score -rung R2 -json` yes for mainnet and Moderato, `statetest
+"$FIXTURES/state_tests/" -threads 4` 61,903/61,903 in 10.7 s, and
+`replay -to 1000000 -datadir "$D" -sender-threads 4` from a fresh datadir
+matched every block 1–1,000,000 with no heals or skips (3.2 s replay,
+310,845 blocks/s).
+
 **Full disk-backed R3 replay** (`6354034`, Linux x86-64, SBCL 2.6.8
 release): a fresh datadir replayed blocks 1–50,049,999 from genesis with
 every root checked, no heals and no skips. It processed 35,979,413

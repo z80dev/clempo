@@ -71,7 +71,7 @@ The bet was that a node in Lisp could be smaller and easier to keep in step with
 
 ## Quick start
 
-Requirements: [SBCL](https://www.sbcl.org) 2.6.8 and `git`. The gate has passed on Apple Silicon macOS and Linux x86-64. Linux evidence also covers mainnet and Moderato genesis, 61,903 execution-spec-tests v5.4.0 state cases and mainnet replay to block 1,000,000. See [FRONTIER.md](FRONTIER.md#evidence) for commands and timings. clempo speaks TLS 1.3 itself (`src/net`), validating certificates against the system roots (macOS keychain or the Linux CA bundle; `CLEMPO_CA_FILE` overrides).
+Requirements: [SBCL](https://www.sbcl.org) 2.6.8 and `git`. The gate has passed on Apple Silicon macOS, Linux x86-64 and Linux arm64. Linux evidence also covers mainnet and Moderato genesis, 61,903 execution-spec-tests v5.4.0 state cases and mainnet replay to block 1,000,000 on both architectures. See [FRONTIER.md](FRONTIER.md#evidence) for commands and timings. clempo speaks TLS 1.3 itself (`src/net`), validating certificates against the system roots (macOS keychain or the Linux CA bundle; `CLEMPO_CA_FILE` overrides).
 
 ```sh
 git clone https://github.com/z80dev/clempo.git && cd clempo
@@ -122,7 +122,7 @@ On Linux x86-64, the [full disk-backed replay](FRONTIER.md#evidence) verified ma
 - **Execution and validator scope.** Replay and live-hour evidence are for the recorded mainnet ranges; mixed-validator evidence is for devnets, not mainnet signing. See [the T14/T15 coverage notes](docs/DEVIATIONS.md) and [docs/DEVNET.md](docs/DEVNET.md).
 - **Constant time.** Secret-key operations (signing, ECDH) are not hardened against timing or cache side channels.
 - **Not for production use.** Treat clempo as an independent implementation for testing and research. It has not run as a mainnet validator.
-- **Platform coverage differs.** The same-host speed comparisons in the status table were run on Apple Silicon; full mainnet replay and live following have been exercised on Apple Silicon and Linux x86-64. Linux arm64 uses the portable Lisp crypto code; the ARM64 VOP paths have not been exercised on Linux arm64.
+- **Platform coverage differs.** The same-host speed comparisons in the status table were run on Apple Silicon; full mainnet replay and live following have been exercised on Apple Silicon and Linux x86-64. On Linux arm64 (Ubuntu 24.04 VM on Apple Silicon) the gate, R1, R2, the state tests and replay to block 1,000,000 pass with the arm64 Keccak, SHA-256 and secp256k1 field VOPs active; the full 50M-block replay and live following have not been run there.
 
 ## How it was built
 
