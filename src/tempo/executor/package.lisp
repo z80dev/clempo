@@ -37,7 +37,7 @@ with RETRY-BLOCK, HEAL-FROM-REFERENCE, SKIP-BLOCK and ABORT-REPLAY restarts.")
    #:tx-outcome-logs #:tx-outcome-fee-token #:tx-outcome-fee-payer #:tx-outcome-key-expiry
    #:tx-outcome-validator-fee #:tx-outcome-fallback-fee-token-p #:tempo-evm-spec
    ;; overlay blocks (RPC requests and trace replays)
-   #:begin-call-block #:call-block-world #:execute-request #:next-call-block
+   #:begin-call-block #:call-block-world #:execute-request #:next-call-block #:finish-call-block
    #:tx-outcome-output #:tx-outcome-halt #:tx-outcome-refunded
    ;; call.lisp (HistoryAgent): calls on any state view
    #:block-prefix-context #:call-request #:*call-flags*

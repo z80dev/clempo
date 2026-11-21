@@ -24,7 +24,7 @@ missing piece.")
            #:req-value #:req-nonce #:req-chain-id #:req-access-list #:req-authorizations
            #:req-type #:req-calls #:req-fee-token #:req-nonce-key
            #:request-input #:aa-request-p #:request-type #:request-plist #:request-gas
-           #:call-env #:block-hash-fn #:apply-state-overrides #:check-state-overrides
+           #:call-env #:block-hash-fn #:apply-state-overrides #:check-state-overrides #:replay-tx
            #:run-request #:call-result #:revert-reason #:invalid-request-error #:error-text
            #:+invalid-transaction-errors+ #:*rpc-gas-cap* #:header-base-fee))
 

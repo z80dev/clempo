@@ -94,6 +94,27 @@ invalid."
                                    parent-beacon-block-root +evm-system-call-gas-limit+)))
             (history))))))
 
+;;; EIP-7002 and EIP-7251, after the transactions (before T13).
+
+(define-constant +withdrawal-request-address+ #x00000961Ef480Eb55e80D19ad83579A64c007002
+  "EIP-7002. Never deployed on Tempo mainnet.")
+(define-constant +consolidation-request-address+ #x0000BBdDc7CE488642fb579F8B00f3a590007251
+  "EIP-7251. Never deployed on Tempo mainnet.")
+
+(defun apply-request-calls (ctx)
+  "Before T13 under Prague, the inner Ethereum executor's post-execution request calls
+\(post_execution_system_call_state_changes): EIP-7002 then EIP-7251, from +SYSTEM-ADDRESS+
+with no input and +EVM-SYSTEM-CALL-GAS-LIMIT+ gas; a failed call makes the block invalid.
+Their targets carry no code on Tempo chains, so the calls only load the two accounts: the
+overlay blocks run them (FINISH-CALL-BLOCK, where an observer such as the RPC's block access
+list sees those loads) and FINISH-BLOCK, which only writes state, leaves them out."
+  (let ((env (ctx-env ctx)))
+    (when (and (not (forks:fork>= (block-env-spec env) :t13))
+               (ethereum-fork-active-p "pragueTime" (block-env-timestamp env)))
+      (dolist (target (list +withdrawal-request-address+ +consolidation-request-address+))
+        (unless (run-system-call ctx +system-address+ target (make-octets 0) +evm-system-call-gas-limit+)
+          (fail-tx 'invalid-transaction nil "request system call to ~(~40,'0x~) failed" target))))))
+
 ;;; The CurrentCommittee call at an epoch's last block (T8).
 ;;; OnchainDkgOutcome (crates/dkg-onchain-artifacts) in the commonware codec, read with
 ;;; MAX_VALIDATORS and ModeVersion v0; only the epoch and the players are used here.
@@ -243,22 +264,21 @@ portal). The code hashes are computed once here: the runtime check runs every bl
 
 (defun install-zone-runtimes (world runtimes)
   "install_zone_runtimes: give each (address code code-hash) its code, keeping nonce,
-balance and storage; an account that already has that code is left alone."
+balance and storage; an account that already has that code is left alone. The check reads
+untracked; the installation is a tracked write."
   (loop for (address code hash) in runtimes
-        for account = (state:get-account world address)
-        unless (octets= (state:account-code-hash account) hash)
-          do (state:set-code world account code)))
+        unless (octets= (untracked (world) (state:get-code-hash world address)) hash)
+          do (state:set-code world address code)))
 
 (defun deploy-zone-factory (world)
   "deploy_zone_factory_at_boundary: unless the factory already has code (a genesis allocation
-or an earlier installation), give it the 0xEF marker and its initial configuration in slot
-0, and install the initial (T10) runtimes."
-  (let ((factory (state:get-account world pc:+zone-factory-address+)))
-    (unless (has-code-p factory)
-      (state:set-code world factory (octets-of #xef))
-      (state:sstore world pc:+zone-factory-address+ 0
-                    (initial-zone-factory-config +initial-factory-owner+))
-      (install-zone-runtimes world (zone-runtimes :t10)))))
+or an earlier installation; read untracked), give it the 0xEF marker and its initial
+configuration in slot 0, and install the initial (T10) runtimes."
+  (unless (has-code-p (untracked (world) (state:get-account world pc:+zone-factory-address+)))
+    (state:set-code world pc:+zone-factory-address+ (octets-of #xef))
+    (state:sstore world pc:+zone-factory-address+ 0
+                  (initial-zone-factory-config +initial-factory-owner+))
+    (install-zone-runtimes world (zone-runtimes :t10))))
 
 (defun apply-zone-factory (ctx)
   "block.rs apply_pre_execution_changes, zone part: from T10 the factory installation, then,

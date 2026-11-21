@@ -22,7 +22,8 @@
                (:file "revert")
                (:file "calls")
                (:file "tempo-request")
-               (:file "simulate")))
+               (:file "simulate")
+               (:file "bal")))
 
 (defsystem "clempo-rpc/tests"
   :depends-on ("clempo-rpc")
@@ -31,4 +32,5 @@
   :components ((:file "rpc-tests")
                (:file "ws-tests")
                (:file "state-tests")
-               (:file "serde-tests")))
+               (:file "serde-tests")
+               (:file "bal-tests")))

@@ -610,22 +610,32 @@ EXECUTE) or signals INVALID-TRANSACTION."
       (apply-zone-factory ctx)))
   ctx)
 
-(defun begin-call-block (backend env &key block-hash-fn)
+(defun begin-call-block (backend env &key block-hash-fn world)
   "An overlay block context on BACKEND (any clempo.state backend: a state database or a
 historical view) for ENV, after the block's pre-execution changes. BLOCK-HASH-FN (number ->
-hash octets or NIL) answers BLOCKHASH; a state database answers it itself. APPLY-TRANSACTION
-replays signed transactions on it; EXECUTE-REQUEST runs unsigned requests."
-  (open-call-block (make-context backend env :block-hash-fn block-hash-fn :overlay t)))
+hash octets or NIL) answers BLOCKHASH; a state database answers it itself. WORLD, when given,
+is a fresh clempo.state world over BACKEND to hold the block (a caller observing every access
+sets its observer first). APPLY-TRANSACTION replays signed transactions on it; EXECUTE-REQUEST
+runs unsigned requests."
+  (open-call-block (make-context backend env :block-hash-fn block-hash-fn :overlay t :world world)))
 
 (defun call-block-world (ctx)
   "The clempo.state world holding CTX's writes (for state overrides before the first request,
 and for reading results)."
   (ctx-world ctx))
 
+(defun finish-call-block (ctx)
+  "Run CTX's post-execution system calls into its world: the CurrentCommittee call and, before
+T13, the inner Ethereum executor's request calls (APPLY-REQUEST-CALLS)."
+  (with-block-context (ctx)
+    (apply-committee-call ctx)
+    (apply-request-calls ctx))
+  ctx)
+
 (defun next-call-block (ctx env &key block-hash-fn)
-  "Close CTX's block (its post-execution system calls) and open the next overlay block for ENV
-on the same world: eth_simulateV1's block sequence."
-  (with-block-context (ctx) (apply-committee-call ctx))
+  "Close CTX's block (FINISH-CALL-BLOCK) and open the next overlay block for ENV on the same
+world: eth_simulateV1's block sequence."
+  (finish-call-block ctx)
   (open-call-block (make-context (state:world-backend (ctx-world ctx)) env
                                  :world (ctx-world ctx) :block-hash-fn block-hash-fn :overlay t)))
 

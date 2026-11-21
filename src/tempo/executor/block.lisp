@@ -121,11 +121,21 @@ their fork is active (once; an account that already has code is left alone).")
     (dolist (m *fork-markers*)
       (when (forks:fork>= spec (car m)) (deploy-marker db (cdr m))))))
 
+(defmacro untracked ((world) &body body)
+  "Run BODY with WORLD's observer off: evm2's account_info_untracked / storage_slot_untracked,
+reads a block access list does not record (block.rs reads the boundary installations' targets
+so)."
+  (let ((w (gensym "WORLD")) (observer (gensym "OBSERVER")))
+    `(let* ((,w ,world) (,observer (state:world-observer ,w)))
+       (setf (state:world-observer ,w) nil)
+       (unwind-protect (progn ,@body)
+         (setf (state:world-observer ,w) ,observer)))))
+
 (defun deploy-markers-in-world (world env)
   "APPLY-PRE-EXECUTION-CHANGES's markers written into WORLD (an overlay block: no database)."
   (let ((spec (block-env-spec env)))
     (dolist (m *fork-markers*)
-      (when (and (forks:fork>= spec (car m)) (zerop (state:code-size world (cdr m))))
+      (when (and (forks:fork>= spec (car m)) (zerop (untracked (world) (state:code-size world (cdr m)))))
         (state:set-code world (cdr m) (octets-of #xef))))
     (state:finalize-tx world)))
 
