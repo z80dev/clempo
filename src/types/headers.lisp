@@ -14,6 +14,7 @@
            #:header #:make-header #:decode-header #:encode-header #:header-from-items #:header-to-items
            #:header-general-gas-limit #:header-shared-gas-limit #:header-timestamp-millis-part
            #:header-inner #:header-consensus-context #:header-raw #:header-hash #:header-timestamp-millis
+           #:header-extra-data #:header-state-root #:header-parent-hash #:header-number #:header-timestamp
            #:consensus-context #:make-consensus-context #:consensus-context-epoch
            #:consensus-context-view #:consensus-context-parent-view #:consensus-context-proposer))
 (in-package #:clempo.headers)
@@ -64,3 +65,14 @@
   (min #xffffffffffffffff
        (+ (min #xffffffffffffffff (* 1000 (ethereum-header-timestamp (header-inner header))))
           (header-timestamp-millis-part header))))
+
+(defmacro define-inner-header-readers (&rest fields)
+  `(progn
+     ,@(loop for field in fields
+             for outer = (intern (format nil "HEADER-~A" field))
+             for inner = (intern (format nil "ETHEREUM-HEADER-~A" field))
+             collect `(progn
+                        (declaim (inline ,outer))
+                        (defun ,outer (header) (,inner (header-inner header)))))))
+
+(define-inner-header-readers extra-data state-root parent-hash number timestamp)

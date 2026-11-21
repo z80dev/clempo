@@ -3,7 +3,7 @@
   (:shadow #:block)
   (:export #:block #:make-block #:block-header #:block-transactions #:block-ommers
            #:block-withdrawals #:block-withdrawals-present-p #:block-raw
-           #:decode-block #:encode-block #:block-hash #:transactions-root))
+           #:decode-block #:encode-block #:block-hash #:transactions-root #:block-body-mismatches))
 (in-package #:clempo.blocks)
 
 (defstruct block
@@ -55,3 +55,26 @@
 
 (defun transactions-root (transactions)
   (clempo.trie:ordered-trie-root (mapcar #'clempo.transactions:encode-transaction transactions)))
+
+(defun block-body-mismatches (block)
+  "Return (FIELD EXPECTED ACTUAL) triples for body commitments, NIL on success.
+FIELD is :TRANSACTIONS-ROOT, :OMMERS-HASH, :WITHDRAWALS-PRESENT-P or
+:WITHDRAWALS-ROOT. Expected commitments come from the header. Withdrawal
+presence is checked independently: an empty present list is not an absent list."
+  (let* ((header (clempo.headers:header-inner (block-header block)))
+         (root (clempo.headers:ethereum-header-withdrawals-root header))
+         (present (block-withdrawals-present-p block))
+         (mismatches nil))
+    (flet ((check (field expected actual)
+             (unless (equalp expected actual) (push (list field expected actual) mismatches))))
+      (check :transactions-root (clempo.headers:ethereum-header-transactions-root header)
+             (transactions-root (block-transactions block)))
+      (check :ommers-hash (clempo.headers:ethereum-header-ommers-hash header)
+             (clempo.keccak:keccak256
+              (clempo.rlp:rlp-encode (mapcar #'clempo.headers:header-to-items (block-ommers block)))))
+      (check :withdrawals-present-p (not (null root)) present)
+      (when (and root present)
+        (check :withdrawals-root root
+               (clempo.trie:ordered-trie-root
+                (mapcar #'clempo.rlp:rlp-encode (block-withdrawals block))))))
+    (nreverse mismatches)))
