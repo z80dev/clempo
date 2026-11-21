@@ -34,7 +34,7 @@ R6 mixed Rust devnet (`origin/r6-validator`, built against the `e378f45`
 builder checkpoint): separate loopback T13 networks, four-member committee and
 3-of-4 threshold, with only slots `0,2,3` launched from genesis. On each fresh
 root, provisioned with `scripts/devnet/devnet.sh --root "$NET" provision --tempo
-"$HOME/dev/tempo/target/release/tempo" --base-port "$PORT"` (ports 24100 and 25100)
+"$HOME/dev/tempo/target/release/tempo" --base-port "$PORT"` (ports 26100 and 27100)
 then ran:
 
 ```sh
@@ -42,20 +42,19 @@ D=scripts/devnet/devnet.sh
 # Set C=3 for two Rust + one Clempo; C=2,3 for one Rust + two Clempo.
 CLEMPO_BUILD=release $D --root "$NET" start --slots 0,2,3 --clempo "$C"
 $D --root "$NET" capture --slots 0,2,3 --clempo "$C" --quorum \
-  --seconds 95 --stall 20 --report "$NET/mixed-proof.jsonl"
+  --seconds 115 --stall 20 --report "$NET/mixed-proof.jsonl"
 $D --root "$NET" stop --slots 0,2,3
 ```
 
-The two-Rust run compared 122 heights (0–121) and two boundaries (59 and
-119). Clempo slot 3 authored 40 independently finalized proposals and
-continued signing with the new share after both reshares. The one-Rust run
-compared 119 heights (0–118), including boundary 59. Slots 2 and 3 authored
-39 and 40 finalized proposals respectively; both were on-chain dealers and
-finalized blocks with the reshared key material in epoch 1. In both runs
-every Clempo signer was necessary for quorum. `CLEMPO_BUILD=release
-bin/clempo-dev score -rung R6-devnet -json -one "$Q1" -two "$Q2"` returned `2`;
-the reports (`mixed-proof.jsonl`) and node logs are under
-`~/scratch/clempo/devnet/quorum-{1,2}/`. The CLI is on the integration branch
+The two-Rust run compared 147 heights (0–146); Clempo slot 3 authored 48
+proposals independently finalized by Rust. The one-Rust run compared 142
+heights (0–141); Clempo slots 2 and 3 authored 47 and 46 finalized proposals
+respectively. Both runs crossed boundaries 59 and 119. Every Clempo signer
+was necessary for quorum, was selected as an on-chain dealer at both
+boundaries, and finalized blocks with a new share in epochs 1 and 2.
+`CLEMPO_BUILD=release bin/clempo-dev score -rung R6-devnet -json -one "$Q1"
+-two "$Q2"` returned `2`; the reports (`mixed-proof.jsonl`) and node logs are
+under `~/scratch/clempo/devnet/topic-quorum-{1,2}/`. The CLI is on the integration branch
 pending the builder and validator merge.
 
 Reference baseline: four Rust validators agreed on 146 heights (0–145),
