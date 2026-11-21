@@ -22,6 +22,7 @@
   (non-shared-left 0) (non-payment-left 0)
   (cumulative 0) (block-gas 0) (receipts '()) (index 0)
   skip-nonce-check skip-valid-after-check skip-base-fee-check skip-liquidity-check
+  skip-gas-caps                         ; RPC requests: no transaction or block gas cap
   key-expiry                            ; access-key expiry resolved for the running tx
   validate-only)                        ; stop after fee collection (pool admission)
 
@@ -304,12 +305,19 @@ back as refund gas. Returns the refund to add."
 (defstruct (tx-outcome (:constructor make-tx-outcome
                            (status gas-used block-gas logs
                             &key fee-token fallback-fee-token-p fee-payer key-expiry (validator-fee 0)
-                              storage-changes)))
+                              storage-changes (output (make-octets 0)) halt)))
   "One executed transaction: receipt status, gas, logs, and the fee metadata the pool and
-builder read (Rust TempoTxResult / ResolvedFeeToken / key_expiry)."
+builder read (Rust TempoTxResult / ResolvedFeeToken / key_expiry). OUTPUT is the top frame's
+return or revert data; HALT is NIL on success or revert, else the EVM's halt keyword
+\(:out-of-gas, :create-collision, :invalid-opcode, ...)."
   status gas-used block-gas (logs '() :type list)
   fee-token fallback-fee-token-p fee-payer key-expiry (validator-fee 0)
-  (storage-changes '() :type list))     ; ((address slot original current) ...) of TIP-20 slots
+  (storage-changes '() :type list)      ; ((address slot original current) ...) of TIP-20 slots
+  (output (make-octets 0)) halt)
+
+(defun halt-kind (status)
+  "The halt keyword of an EVM frame STATUS: NIL for success and revert."
+  (unless (member status '(:stop :return :revert)) status))
 
 (defun settle (ctx v fee price gas-left extra-refund floor &key (status t))
   "config.rs settle_transaction + evm2 finalize_gas. Returns the gas used."
@@ -374,8 +382,9 @@ builder read (Rust TempoTxResult / ResolvedFeeToken / key_expiry)."
     (when (and (not (ctx-skip-base-fee-check ctx)) (< price base-fee)) (invalid "fee cap below base fee"))
     (let ((chain-id (txv-chain-id v)))
       (when (and chain-id (/= chain-id (block-env-chain-id env))) (invalid "wrong chain id")))
-    (when (> gas-limit (evm:gas-params-tx-gas-cap gp)) (invalid "gas limit above the transaction cap"))
-    (when (> gas-limit (block-env-gas-limit env)) (invalid "gas limit above the block's"))
+    (unless (ctx-skip-gas-caps ctx)
+      (when (> gas-limit (evm:gas-params-tx-gas-cap gp)) (invalid "gas limit above the transaction cap"))
+      (when (> gas-limit (block-env-gas-limit env)) (invalid "gas limit above the block's")))
     (when (and (null (txv-to v)) (> (length (txv-input v)) (evm:gas-params-max-initcode-size gp)))
       (invalid "initcode too large"))
     (when (= (txv-nonce v) +max-u64+) (invalid "nonce overflow"))
@@ -415,13 +424,15 @@ builder read (Rust TempoTxResult / ResolvedFeeToken / key_expiry)."
             (collect-fee ctx fee nil)
             (when (ctx-validate-only ctx) (return-from execute-ethereum-transaction (validated-outcome fee)))
             (let ((evm:*tx-env* (evm:make-tx-env :origin sender :gas-price price)))
-              (multiple-value-bind (status gas-left)
+              (multiple-value-bind (status gas-left output)
                   (run-initial-frame sender sender-nonce (txv-to v) (txv-input v) 0 (- gas-limit intrinsic))
                 (let ((ok (evm:success-p status)))
                   (multiple-value-bind (used validator-fee) (settle ctx v fee price gas-left 0 floor :status ok)
                     (make-tx-outcome ok used used (tx-logs) :fee-token (fee-token fee) :fee-payer (fee-payer fee)
                                                              :fallback-fee-token-p (fee-fallback-p fee)
-                                                             :validator-fee validator-fee)))))))))))
+                                                             :validator-fee validator-fee
+                                                             :output (or output (make-octets 0))
+                                                             :halt (halt-kind status))))))))))))
 
 ;;; The block context: the incremental API execute-block is built on.
 
@@ -641,14 +652,16 @@ transactions (type #x76, the default when :calls is given), :calls ((to-or-nil v
                 (txv-authorizations v) authorizations))
       v)))
 
-(defun execute-request (ctx request &key skip-nonce-check skip-base-fee-check)
+(defun execute-request (ctx request &key skip-nonce-check skip-base-fee-check skip-gas-caps)
   "Execute the unsigned REQUEST (see REQUEST-TXV) in the overlay block CTX after the requests
 before it; returns its TX-OUTCOME or signals INVALID-TRANSACTION with the world unchanged.
-Requests take no gas lane and leave no receipt."
+Requests take no gas lane and leave no receipt. SKIP-GAS-CAPS lifts the transaction and block
+gas caps (reth prepare_call_env)."
   (let ((*tx-index* (ctx-index ctx))
         (*ctx* ctx))
     (setf (ctx-skip-nonce-check ctx) skip-nonce-check
-          (ctx-skip-base-fee-check ctx) skip-base-fee-check)
+          (ctx-skip-base-fee-check ctx) skip-base-fee-check
+          (ctx-skip-gas-caps ctx) skip-gas-caps)
     (unwind-protect
          (with-block-context (ctx)
            (let ((outcome (execute-txv ctx (request-txv request *tx-index*))))
@@ -657,4 +670,5 @@ Requests take no gas lane and leave no receipt."
              (incf (ctx-index ctx))
              outcome))
       (setf (ctx-skip-nonce-check ctx) nil
-            (ctx-skip-base-fee-check ctx) nil))))
+            (ctx-skip-base-fee-check ctx) nil
+            (ctx-skip-gas-caps ctx) nil))))
