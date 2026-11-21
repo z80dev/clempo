@@ -82,7 +82,7 @@ InvalidReceipt."
   "resolve_receipt: decode, resolve the recipient (any failure is InvalidClaimAddress) and
 classify. Returns (values receipt receiver mode)."
   (let* ((r (decode-receipt octets))
-         (receiver (handler-case (clempo.address-registry:resolve-recipient (receipt-recipient r))
+         (receiver (handler-case (funcall 'clempo.address-registry:resolve-recipient (receipt-recipient r))
                      (precompile-condition () (revert 'invalid-claim-address)))))
     (values r receiver (recovery-mode r receiver))))
 
@@ -130,7 +130,7 @@ virtual address or the target; REASON the BlockedReason discriminant (1 TOKEN_FI
         (when (zerop amount) (revert 'invalid-receipt))
         (write place 0)
         (check-tip20 (receipt-token r))
-        (clempo.tip20:release-blocked-funds (receipt-token r) (receipt-originator r) receiver to
+        (funcall 'clempo.tip20:release-blocked-funds (receipt-token r) (receipt-originator r) receiver to
                                             amount mode authority)
         (emit +receive-policy-guard-address+ 'receipt-claimed (receipt-token r) receiver
               (receipt-blocked-nonce r) (receipt-blocked-at r) (receipt-version r)
@@ -145,7 +145,7 @@ virtual address or the target; REASON the BlockedReason discriminant (1 TOKEN_FI
            (amount (read place)))
       (when (zerop amount) (revert 'invalid-receipt))
       (check-tip20 (receipt-token r))
-      (clempo.tip20:burn-blocked (receipt-token r) sender
+      (funcall 'clempo.tip20:burn-blocked (receipt-token r) sender
                                  (policy-subject mode (receipt-originator r) receiver)
                                  amount nil)
       (write place 0)

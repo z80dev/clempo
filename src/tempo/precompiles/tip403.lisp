@@ -169,19 +169,19 @@
 
 (defun token-transfer-policy-id (token)
   "(values set-p policy-id)."
-  (unless (clempo.tip20-factory:tip20-p token) (revert 'invalid-token))
+  (unless (funcall 'clempo.tip20-factory:tip20-p token) (revert 'invalid-token))
   (let ((registered (registered-token-transfer-policy-id token)))
     (values (and registered t)
-            (or registered (clempo.tip20:legacy-transfer-policy-id token)))))
+            (or registered (funcall 'clempo.tip20:legacy-transfer-policy-id token)))))
 
 (defun migrate-transfer-policy-ids (tokens)
   (let ((migrated 0))
     (dolist (token tokens migrated)
-      (unless (or (not (clempo.tip20-factory:tip20-p token))
+      (unless (or (not (funcall 'clempo.tip20-factory:tip20-p token))
                   (registered-token-transfer-policy-id token))
-        (let ((policy-id (clempo.tip20:legacy-transfer-policy-id token)))
+        (let ((policy-id (funcall 'clempo.tip20:legacy-transfer-policy-id token)))
           (set-token-transfer-policy token policy-id)
-          (clempo.tip20:delete-legacy-transfer-policy-id token)
+          (funcall 'clempo.tip20:delete-legacy-transfer-policy-id token)
           (incf migrated))))))
 
 (defun policy-data* (policy-id)
