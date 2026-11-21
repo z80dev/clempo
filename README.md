@@ -113,7 +113,7 @@ base io crypto net codec trie types store state evm tempo consensus p2p sync rpc
 | `consensus`, `p2p`, `validator`, `sim` | certificates, Simplex, DKG; devp2p and commonware networking; the validator; the seeded simulator |
 | `sync`, `rpc`, `node`, `dev` | archive and follower, JSON-RPC and WebSocket server, the node binary, the `clempo-dev` tools |
 
-On Linux x86-64, the [bounded-memory Recent replay](docs/BENCH.md#bounded-memory-recent-replay-on-linux) checked all 40,000 block roots at 2.58 GB peak RSS. The previous in-memory store exhausted the same 4 GiB heap limit.
+On Linux x86-64, the [full disk-backed replay](FRONTIER.md#evidence) verified mainnet from genesis through block 50,049,999 with no heals or skips, using a 4.6 GiB datadir and an 8 GiB heap cap. Separately, the [bounded-memory Recent replay](docs/BENCH.md#bounded-memory-recent-replay-on-linux) checked all 40,000 block roots at 2.58 GB peak RSS; the previous in-memory store exhausted the same 4 GiB heap limit.
 
 ## Limitations
 
@@ -121,7 +121,7 @@ On Linux x86-64, the [bounded-memory Recent replay](docs/BENCH.md#bounded-memory
 - **Execution and validator scope.** Replay and live-hour evidence are for the recorded mainnet ranges; mixed-validator evidence is for devnets, not mainnet signing. See [the T14/T15 coverage notes](docs/DEVIATIONS.md) and [docs/DEVNET.md](docs/DEVNET.md).
 - **Constant time.** Secret-key operations (signing, ECDH) are not hardened against timing or cache side channels.
 - **Not for production use.** Treat clempo as an independent implementation for testing and research. It has not run as a mainnet validator.
-- **Linux coverage is limited.** The full mainnet replay, live following, mixed-validator devnet and same-host speed comparisons were run on Apple Silicon. Linux arm64 uses the portable Lisp crypto code; the ARM64 VOP paths have not been exercised on Linux arm64.
+- **Platform coverage differs.** The live follow and same-host speed comparisons in the status table were run on Apple Silicon; the full mainnet replay was run on Apple Silicon and Linux x86-64. Linux arm64 uses the portable Lisp crypto code; the ARM64 VOP paths have not been exercised on Linux arm64.
 
 ## How it was built
 

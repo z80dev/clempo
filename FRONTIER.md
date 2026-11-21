@@ -7,7 +7,7 @@ These measurements are revision-specific. Paths under `logs/` describe local art
 | R0 Gate | yes: `scripts/verify.sh` (cold strict compile of every layer, ~540 tests incl. the precompile oracle, layer and determinism check, spec/ drift check) | `6bff662` | 2026-11-21 |
 | R1 Decode | mainnet 640/640 (T0..T13), moderato 33/33; full archive 50,050,000/50,050,000 blocks (35,979,413 txs) re-encoded and checked against eth_getBlockByNumber, 0 failures | 1edd52f, 4e28f4d | 2026-11-21 |
 | R2 Genesis | yes: matching state roots and block hashes on mainnet and Moderato | `ec20b6b` | 2026-11-21 |
-| R3 Replay | **50,049,999** (the archive tip; goempo's frontier 49,399,999): every mainnet block 1..50,049,999 executed from genesis matches gas used, receipts root, logs bloom and state root, state on disk, no heals, no skips, through every fork T0..T13 | `d1d277e` (replay), `0fad06f` | 2026-11-21 |
+| R3 Replay | **50,049,999** (the archive tip; goempo's frontier 49,399,999): every mainnet block executed from genesis matches gas used, receipts root, logs bloom and state root. The disk-backed Linux replay reached the same height with no heals or skips. | `6354034` (disk-backed), `d1d277e` (earlier replay), `0fad06f` | 2026-11-21 |
 | R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `750c66b` | 2026-11-21 |
 | R3p Precompiles | 4,986/4,992 (goempo's frontier; every Tempo precompile T0..T14; the 6 differences are T14 keychain grants where clempo follows tempo c8b89f9, newer than the corpus: +2,600 gas root-retirement probe) | `fd2d4cf` | 2026-11-21 |
 | R4 Follow | No: 74,779 mainnet blocks executed and certified through 50,124,778; 3,783.9 s independently sampled, peak lag 4, p95 1, no incorrect responses. The longest gap between valid samples was 20.0195 s (limit 20 s). | `6763415` | 2026-11-21 |
@@ -37,6 +37,32 @@ blocks/s), 9.44 s command wall time. The release microbenchmarks below
 measured **417 MB/s** for Keccak-256 on 64 MiB (0.161 s wall) and **62.396 µs
 CPU / 62.452 µs wall** per ecrecover with caller-owned output and scratch
 ([command](docs/BENCH.md#native-curve-kernels)). These use the portable crypto paths.
+
+**Full disk-backed R3 replay** (`6354034`, Linux x86-64, SBCL 2.6.8
+release): a fresh datadir replayed blocks 1–50,049,999 from genesis with
+every root checked, no heals and no skips. It processed 35,979,413
+transactions and 3,513,348,765,570 gas in 6,909.253 s (7,243.9 blocks/s,
+508.5 Mgas/s). The final datadir occupied about 4.6 GiB. Linux `VmHWM`
+was 15,787,332 KiB (about 15.1 GiB); this includes resident, file-backed
+segment mappings and is not the Lisp heap, which was capped at 8 GiB.
+With the mainnet archive available in the default cache:
+
+```sh
+CLEMPO_HEAP=8192 CLEMPO_BUILD=release bin/clempo-dev replay \
+  -to 50049999 -datadir "$FRESH_DIR" -result "$REPORT" -sender-threads 8 \
+  -cache-accounts 262144 -cache-slots 2097152 \
+  -cache-trie-nodes 1048576 -cache-code-mb 128
+```
+
+**Store read-ahead** (`c190f13`): opening a datadir asks the kernel to
+read segments sequentially on a background thread (`madvise(WILLNEED)`),
+newest first, with a default target of one quarter of physical RAM,
+rounded to whole segments. This targets cold random reads: the Mac SSD
+took 60–80 µs per read, and Recent measurements at `af18223` from APFS
+clones incurred about 69,600 page-ins for clempo versus about 460 for
+goempo. These observations motivated read-ahead; they do not measure its
+speedup. An earlier, separate lookup change (`9a80d5b`) reduced Recent
+replay CPU from 8.99–9.24 s to 7.85–8.05 s in paired runs.
 
 T14/T15 reference devnet (2026-11-21): `scripts/devnet/devnet.sh --root NET provision
 --tempo ~/dev/tempo/target/release/tempo --hardfork t15 --base-port 24000` (tempo
