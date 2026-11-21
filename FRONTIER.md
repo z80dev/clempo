@@ -113,3 +113,17 @@ against the same upstream verified 21,000 blocks (11,401 transactions)
 in 1.312 s and wrote two complete 10,000-block chunks. These runs checked
 canonical linkage and transaction, ommer, and withdrawal roots; they did
 not execute blocks or check finalization.
+
+Crypto EC (2026-11-21): secp256k1 recovery/signing/ECDH, EIP-7951 P256,
+BN254 EIP-196/197, all seven BLS EIP-2537 operations, RFC9380, commonware
+MinSig/MinPk/threshold signatures, KZG point evaluation and modular
+exponentiation pass their recorded fixtures. `scripts/verify.sh` passed
+173 tests with zero failures/skips and zero layer violations.
+`CLEMPO_BUILD=release sbcl --dynamic-space-size 8192 --non-interactive --load scripts/build.lisp --eval '(asdf:load-system "clempo-crypto-ec")' --load tests/crypto/ec/benchmark.lisp`
+measures recovery at 87.74 us (under its 150 us target), P256 verification at
+636.70 us, BN254 pairing (two pairs) at 9.974 ms, BLS pairing (two pairs) at
+24.718 ms, BLS G1 MSM (128 points) at 205.979 ms, and BLS MinSig verification
+at 61.807 ms. Pairing/MSM measurements include byte decoding and subgroup
+checks. APIs, fixture/setup provenance, representation measurements and
+side-channel limitations are documented in `tests/crypto/ec/README.md`.
+These crypto-vector results alone do not score the Tempo precompile oracle.

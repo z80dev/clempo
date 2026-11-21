@@ -78,14 +78,12 @@ Every success and failure row is exercised, including the historical G1 MUL
 file through the one-tuple MSM API. RFC9380 and commonware vector provenance
 is documented by the two companion READMEs.
 
-ASDF test component order: `ec/bls12-381/precompile-tests`,
-`ec/bls12-381/hash-tests`, `ec/bls12-381/signature-tests`,
-`ec/bls12-381/signature-min-sig-vectors`,
-`ec/bls12-381/signature-min-pk-vectors`. Keep the adjacent `.sexp` files.
+The ASDF test system registers the precompile, hash, signature and both
+commonware signature-vector components. Keep the adjacent `.sexp` files.
 The test files exercise subgroup rejection versus addition acceptance,
 noncanonical padding, compressed flags/infinity, scalar identities, pairing
 bilinearity, RFC hash vectors, namespace framing, POP, aggregation, randomized
 batch verification and threshold interpolation in both participant modes.
 
-Builds, tests, and formatters were intentionally not run by the implementation
-agents; the integration owner runs the strict crypto compilation and test suite.
+The strict crypto suite passed all imported success/failure vectors, RFC9380
+vectors and commonware signature vectors. `scripts/verify.sh` is the full gate.

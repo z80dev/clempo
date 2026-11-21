@@ -115,6 +115,5 @@ invalid pairing results, and field-tower square/inverse/sparse/Frobenius identit
 Fixture reading disables reader evaluation. Fixture files are runtime test data,
 not Lisp components to compile or load as code.
 
-No builds, tests, formatters, or timing runs were executed by this worker, as
-requested. The integrator should run the strict crypto build and registered
-`clempo.bn254.tests` tests after adding the two component paths above.
+The strict crypto suite passed all vectors and validity boundaries. Run
+`scripts/verify.sh` for the cold compile, full test suite and layer checks.

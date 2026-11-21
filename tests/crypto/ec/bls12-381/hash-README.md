@@ -42,6 +42,5 @@ padding, or a noncanonical field element. G2 input is real then imaginary.
 The tests exercise both wrappers against every EIP map vector and malformed
 length, padding, and field-boundary inputs.
 
-No builds, tests, linters or external cryptographic runtimes were run for this
-change. The integrating agent should run the strict crypto build and tests,
-including all RFC and EIP map fixtures, after registering these components.
+The integrating strict crypto suite passed all RFC and EIP map fixtures.
+Run `scripts/verify.sh` for the full cold-compilation and layer gate.

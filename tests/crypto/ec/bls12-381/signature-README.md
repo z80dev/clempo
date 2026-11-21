@@ -74,8 +74,8 @@ matching Rust's root orientation.
   public key and exact signing context before accepting it. Recovery does not
   establish correctness of individual shares.
 
-Load signature-tests.lisp before the two signature-*-vectors.lisp files. The main
-integrator owns ASDF registration. No checks were run by this component agent.
+The ASDF test system loads signature-tests.lisp before both vector files.
+All commonware vectors, aggregate/batch/POP and threshold tests passed.
 
 `bls-batch-verify-same-signer(variant, public, entries, scalar-source)` accepts
 nonempty `(namespace message signature)` entries and returns T/NIL. It decodes
