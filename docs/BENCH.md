@@ -2,7 +2,9 @@
 
 Paths under `logs/` are the measuring host's local run logs and result files; they are not part of the repository. Each evidence paragraph gives the command that regenerates them.
 
-These inclusive ranges use mainnet raw blocks from the same `CLBK` archive on both clients:
+The inclusive ranges are fixed. Clempo and Rust use the same mainnet `CLBK`
+archive (Rust imports an RLP export); goempo fetches the same blocks from the
+archive RPC into its own chunk format.
 
 | `-range` | First | Last | Parent |
 |---|---:|---:|---:|
@@ -13,6 +15,47 @@ These inclusive ranges use mainnet raw blocks from the same `CLBK` archive on bo
 Busy is goempo's published Busy workload. Recent starts 1,084 blocks later than its historical recent trial, so compare only the measurements on the range above.
 
 ## Results on the shared dev host
+
+Same Mac (`Mac15,9`), Clempo `4940311` (SBCL 2.6.8 release, persistent
+WAL, eight sender-recovery participants), goempo `92e996c` (Go 1.27.1,
+vendored build, `GOMAXPROCS=16` as detected on the host), and Rust Tempo
+1.19.0-dev release `568b4fb4258c`. Wall / aggregate CPU seconds:
+
+| Range | Clempo replay | Clempo whole command | goempo whole command | Rust whole import |
+|---|---:|---:|---:|---:|
+| Early | 8.830868 / 9.646726 | 27.15 / 25.51 (cold compile) | 3.38 / 10.19 | 58.714867 / 36.406385 |
+| Busy | 22.748234 / 58.196338 | 23.75 / 59.10 | not measured | 35.929221 / 45.764508 |
+| Recent | 19.971085 / 23.816374 | 34.87 / 38.48 | not measured | 57.125123 / 24.420341 |
+
+Run order was Rust → Clempo for Early, Clempo → Rust for Busy, Rust →
+Clempo for Recent, then goempo Early in the same exclusive benchmark slot.
+Clempo's Early command rebuilt the release fasls in a new checkout; its
+replay-only timing shows the warm-code interval, not a second run. Clempo
+and goempo checked gas, receipts root, bloom and state root at every block,
+without healing or skipping. Rust ran its staged import with
+`--fail-on-invalid-block`; it checks state roots only at chunk terminals.
+Do not interpret these as equal root-check workloads or isolated executor
+benchmarks. No Go timings from another host are substituted for missing
+samples.
+
+Raw local results: `logs/r7-parity/{clempo,rust}-{early,busy,recent}.{json,log}`
+and `logs/r7-parity/go-early.{json,log}`. For Clempo use the commands below
+with `/usr/bin/time -l` before `bin/clempo-dev`; for Rust use the documented
+import harness with fresh working copies of the exact parents. The Rust
+Busy and Recent working parents were APFS clones of previously completed
+imports, unwound to 9,889,999 and 49,409,999 outside the slot. The harness
+checked the parent-stage heights and both terminal checkpoints.
+
+Early completed 1,000,000 blocks, 1,000,635 transactions and 135,315,780
+gas. Go's scored input compared byte for byte against the Rust import's
+1,200,376,462-byte export (`sha256`
+`4c4236f4db6ea38916a0b2c5ccd56598888560b6b42a6209d22a3d7312198145`).
+Go's own replay interval was 3.326632 s wall / 10.206818 s CPU; process
+`time -l` recorded 3.38 real, 8.75 user and 1.44 sys. Busy completed
+20,000 blocks, 659,246 transactions and 31,499,321,696 gas; Recent
+completed 40,000 blocks, 18,733 transactions and 3,768,403,621 gas.
+
+### Earlier measurements
 
 Apple Silicon `Mac15,9`, SBCL 2.6.8 release, Tempo 1.19.0-dev release
 (`568b4fb4258c`). Clempo uses persistent WAL, eight sender-recovery participants,
@@ -207,6 +250,56 @@ bignum. Bind `clempo.secp256k1:*recovery-scratch*` and
 `clempo.p256:*p256-scratch*` separately per worker, never globally share them.
 The 25-µs recovery target remains unmet. See
 [arithmetic, GC safety, exact timings and allocation-counter rounding](../tests/crypto/ec/secp256k1/performance.md).
+
+## Go replay on the same host
+
+Use goempo's own archive and state formats; its binary cannot open a Clempo
+checkpoint. Starting with an empty block cache and datadir, build and prepare
+with goempo's vendored dependencies and the same archive RPC that supplied
+Clempo's `CLBK` files:
+
+```sh
+(cd "$goempo_src" && go build -mod=vendor -o "$goempo_dev" ./cmd/goempo-dev)
+"$goempo_dev" fetch-range -rpc "$CLEMPO_RPC" -dir "$go_chunks" -from 0 -to 49449999
+```
+
+For each scored range use goempo's `scripts/bench/export-rlp.py` with
+`-chunks "$go_chunks" -from "$first" -to "$last" -out "$go_rlp"`, then
+`cmp "$go_rlp" "$rust_rlp"` to check all scored blocks are byte-identical to
+the Rust import input. This is not part of the timer.
+
+```sh
+# First score Early from a fresh datadir with last=1000000.
+# For Busy, clone the completed Early datadir to a preparation datadir.
+# For Recent, continue the preparation datadir from the exact Busy parent.
+# In both cases replay up to parent (9889999 or 49409999) off the clock:
+"$goempo_dev" replay -dir "$go_chunks" -datadir "$prepare" \
+  -to "$parent" -checkpoint 100000 -heal 0 -diagnose off -result "$prepared"
+cp -cR "$prepare" "$go_work"      # Fresh APFS clone; use cp -R elsewhere.
+
+/usr/bin/time -l "$goempo_dev" replay -dir "$go_chunks" -datadir "$go_work" \
+  -to "$last" -checkpoint 100000 -heal 0 -diagnose off -result "$go_result"
+jq -e --argjson end "$last" --argjson count "$((last-first+1))" \
+  '.height == $end and .target == $end and (has("mismatch") | not)
+   and .bench.blocks == $count' "$go_result"
+```
+
+Also verify the preparation result reached the exact parent with no mismatch
+and no replay I/O error. A zero Go process exit status alone does not establish
+that the target was reached. Inspect stderr for cache, flush and close errors:
+these are not necessarily reflected in the JSON. At startup the replayer checks
+the persisted root against its archived parent; every scored block is checked
+for gas used, receipts root, logs bloom and state root.
+
+For process-level comparisons use `real` and `user + sys` from macOS
+`/usr/bin/time -l` on the Go and Lisp commands, and the Rust harness's
+monotonic wall clock and child `wait4` CPU counters. Go's own replay seconds
+exclude opening the datadir and flushing at exit; Clempo's exclude copying and
+opening the parent but include final WAL sync. The process-level Clempo time
+includes its built-in parent copy, whereas the input Rust and Go working
+parents are provisioned before timing. Rust still performs its staged import
+and checks chunk-terminal roots rather than every block root. Report these
+differences rather than interpreting the timings as an executor-only comparison.
 
 ## Rust reference
 
