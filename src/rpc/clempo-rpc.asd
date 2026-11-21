@@ -15,6 +15,7 @@
                (:file "logs")
                (:file "config")
                (:file "stubs")
+               (:file "sender")
                (:file "subscribe")))
 
 (defsystem "clempo-rpc/tests"

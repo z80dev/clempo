@@ -16,7 +16,7 @@ each block's receipts checked against its header's receipts root before they are
            #:with-backend-read #:with-backend-write #:*backend* #:*head*
            #:archive-backend #:make-archive-backend #:archive-backend-head #:backend-state
            #:build-index #:index-dir #:index-covered-height
-           #:block-hash-of-raw #:scan-block-hashes
+           #:block-hash-of-raw #:scan-block-hashes #:block-parts
            #:receipts-store-get #:receipts-store-put #:missing-receipts))
 
 (in-package #:clempo.rpc.chain)
