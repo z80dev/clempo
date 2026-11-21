@@ -1,13 +1,19 @@
 (defpackage #:clempo.trie
   (:use #:cl #:clempo.base)
   (:import-from #:clempo.keccak #:keccak256)
-  (:import-from #:clempo.rlp #:rlp-encode #:rlp-encoded-length #:rlp-encode-into)
-  (:export #:ordered-trie-root #:+empty-trie-root+))
+  (:import-from #:clempo.rlp #:rlp-encode #:rlp-encoded-length #:rlp-encode-into
+                            #:rlp-item-bounds #:rlp-decode #:rlp-decode-integer #:rlp-error)
+  (:export #:trie #:make-trie #:make-secure-trie #:trie-clone
+           #:trie-get #:trie-put #:trie-delete #:trie-root #:ordered-trie-root
+           #:trie-proof #:verify-proof #:node-store-get #:node-store-put
+           #:trie-node-error #:encode-account #:decode-account
+           #:+empty-trie-root+ #:+empty-code-hash+))
 
 (in-package #:clempo.trie)
 
 (define-constant +empty-trie-root+ (keccak256 (rlp-encode 0)))
 (defparameter *empty-bytes* (make-octets 0))
+(define-constant +empty-code-hash+ (keccak256 (make-octets 0)))
 
 ;;; Immutable paths use Ethereum's hex-prefix representation directly. The
 ;;; first nibble is flags (leaf, odd length), not part of the key.
@@ -71,9 +77,53 @@
   (children #() :type simple-vector)
   (value nil :type (or null octets)))
 
-(defstruct (trie (:constructor make-trie ()) (:copier nil))
+(defstruct (stored-node (:constructor make-stored-node (hash &optional root-p)))
+  (hash *empty-bytes* :type octets :read-only t)
+  (root-p nil :read-only t)
+  loaded)
+
+(defstruct (trie (:constructor %make-trie (root-node store secure-p)) (:copier nil))
   root-node
-  (owner (cons nil nil)))
+  (store nil :read-only t)
+  (secure-p nil :read-only t)
+  (owner (cons nil nil))
+  root-hash)
+
+(defgeneric node-store-get (store hash)
+  (:documentation "Read immutable encoded node bytes by HASH, or return NIL if absent."))
+
+(defgeneric node-store-put (store hash bytes)
+  (:documentation "Persist immutable BYTES by HASH. Writes must be idempotent; signal on failure."))
+
+(define-condition trie-node-error (error)
+  ((reason :initarg :reason :reader trie-node-error-reason))
+  (:report (lambda (c s) (format s "Trie node: ~A" (trie-node-error-reason c)))))
+
+(defun bad-node (reason)
+  (error 'trie-node-error :reason reason))
+
+(defun make-trie (&key secure store root)
+  "Create an empty trie, or open ROOT lazily from STORE. SECURE hashes each raw key.
+Keys may be reused after a call. Stored values, roots and proof bytes are shared
+immutable octet vectors; callers must not mutate them."
+  (when root (check-type root (simple-array (unsigned-byte 8) (32))))
+  (let ((nonempty (and root (not (octets= root +empty-trie-root+)))))
+    (when nonempty (check-type store (not null)))
+    (%make-trie (when nonempty (make-stored-node root t)) store secure)))
+
+(defun make-secure-trie (&key store root)
+  (make-trie :secure t :store store :root root))
+
+(defun trie-clone (trie)
+  "Take an O(1) snapshot. Both handles may be edited independently; subsequent
+writes copy only shared paths. Do not edit a handle concurrently."
+  (let ((copy (%make-trie (trie-root-node trie) (trie-store trie) (trie-secure-p trie))))
+    (setf (trie-owner trie) (cons nil nil)
+          (trie-root-hash copy) (trie-root-hash trie))
+    copy))
+
+(defun trie-key (trie key)
+  (if (trie-secure-p trie) (keccak256 key) key))
 
 (defun new-leaf (owner key at end value)
   (declare #.clempo.base:*hot* (type octets key) (type fixnum at end))
@@ -89,44 +139,122 @@
       (progn (setf (node-ref node) nil) node)
       (make-branch owner (copy-seq (branch-node-children node)) (branch-node-value node))))
 
-(defun insert-node (node owner key at end value)
+(defun insert-node (node owner key at end value store)
   (declare #.clempo.base:*hot* (type octets key value) (type fixnum at end))
-  (etypecase node
-    (null (new-leaf owner key at end value))
-    (branch-node
-     (let* ((index (and (< at end) (nibble key at)))
-            (new (if index
-                     (insert-node (svref (branch-node-children node) index)
-                                  owner key (1+ at) end value)
-                     value))
-            (branch (edit-branch node owner)))
-       (if index (setf (svref (branch-node-children branch) index) new)
-           (setf (branch-node-value branch) new))
-       branch))
-    (short-node
-     (let* ((path (short-node-path node))
-            (plen (path-length path))
-            (leaf-p (leaf-path-p path))
-            (matched (common-length path key at end))
-            (split (+ at matched))
-            (item (short-node-item node)))
-       (declare (type fixnum split))
-       (if (and (= matched plen) (or (not leaf-p) (= split end)))
-           (short-with node owner (if leaf-p value (insert-node item owner key split end value)))
-           (let* ((children (make-array 16 :initial-element nil))
-                  (branch (make-branch owner children))
-                  (p (+ (path-start path) matched)))
-             (if (= matched plen)
-                 (setf (branch-node-value branch) item)
-                 (setf (svref children (nibble path p))
-                       (if (and (not leaf-p) (= (1+ matched) plen)) item
-                           (make-short owner (make-path path (1+ p) (- plen matched 1) leaf-p) item))))
-             (if (= split end)
-                 (setf (branch-node-value branch) value)
-                 (setf (svref children (nibble key split))
-                       (new-leaf owner key (1+ split) end value)))
-             (if (zerop matched) branch
-                 (make-short owner (make-path path (path-start path) matched nil) branch))))))))
+  (let ((opened (open-node node store)))
+    (etypecase opened
+      (null (values (new-leaf owner key at end value) t))
+      (branch-node
+       (let ((index (and (< at end) (nibble key at))))
+         (if index
+             (multiple-value-bind (child changed)
+                 (insert-node (svref (branch-node-children opened) index)
+                              owner key (1+ at) end value store)
+               (if changed
+                   (let ((branch (edit-branch opened owner)))
+                     (setf (svref (branch-node-children branch) index) child)
+                     (values branch t))
+                   (values node nil)))
+             (if (and (branch-node-value opened) (octets= (branch-node-value opened) value))
+                 (values node nil)
+                 (let ((branch (edit-branch opened owner)))
+                   (setf (branch-node-value branch) value)
+                   (values branch t))))))
+      (short-node
+       (let* ((path (short-node-path opened))
+              (plen (path-length path))
+              (leaf-p (leaf-path-p path))
+              (matched (common-length path key at end))
+              (split (+ at matched))
+              (item (short-node-item opened)))
+         (declare (type fixnum split))
+         (cond
+           ((and (= matched plen) (not leaf-p))
+            (multiple-value-bind (child changed) (insert-node item owner key split end value store)
+              (if changed (values (short-with opened owner child) t) (values node nil))))
+           ((and (= matched plen) (= split end))
+            (if (octets= item value) (values node nil)
+                (values (short-with opened owner value) t)))
+           (t
+            (let* ((children (make-array 16 :initial-element nil))
+                   (branch (make-branch owner children))
+                   (p (+ (path-start path) matched)))
+              (declare (type fixnum p))
+              (if (= matched plen)
+                  (setf (branch-node-value branch) item)
+                  (setf (svref children (nibble path p))
+                        (if (and (not leaf-p) (= (1+ matched) plen)) item
+                            (make-short owner
+                                        (make-path path (1+ p) (the fixnum (- plen matched 1)) leaf-p)
+                                        item))))
+              (if (= split end)
+                  (setf (branch-node-value branch) value)
+                  (setf (svref children (nibble key split))
+                        (new-leaf owner key (1+ split) end value)))
+              (values (if (zerop matched) branch
+                          (make-short owner (make-path path (path-start path) matched nil) branch))
+                      t)))))))))
+
+(defun prepend-path (owner bytes start count child store)
+  ;; Consecutive short nodes are never canonical.
+  (let ((opened (open-node child store)))
+    (if (short-node-p opened)
+        (let* ((suffix (short-node-path opened))
+               (path (allocate-path (+ count (path-length suffix)) (leaf-path-p suffix)))
+               (at (path-start path)))
+          (copy-nibbles path at bytes start count)
+          (copy-nibbles path (+ at count) suffix (path-start suffix) (path-length suffix))
+          (make-short owner path (short-node-item opened)))
+        (make-short owner (make-path bytes start count nil) child))))
+
+(defun compact-branch (branch owner store)
+  (let ((children (branch-node-children branch))
+        (value (branch-node-value branch))
+        (only nil))
+    (dotimes (i 16)
+      (when (svref children i)
+        (when (or only value) (return-from compact-branch branch))
+        (setf only i)))
+    (cond (only (prepend-path owner (octets-of only) 1 1 (svref children only) store))
+          (value (make-short owner (octets-of #x20) value))
+          (t nil))))
+
+(defun delete-node (node owner key at end store)
+  (declare #.clempo.base:*hot* (type octets key) (type fixnum at end))
+  (let ((opened (open-node node store)))
+    (etypecase opened
+      (null (values nil nil))
+      (branch-node
+       (cond
+         ((< at end)
+          (let ((i (nibble key at)))
+            (multiple-value-bind (child changed)
+                (delete-node (svref (branch-node-children opened) i) owner key (1+ at) end store)
+              (if changed
+                  (let ((branch (edit-branch opened owner)))
+                    (setf (svref (branch-node-children branch) i) child)
+                    (values (compact-branch branch owner store) t))
+                  (values node nil)))))
+         ((branch-node-value opened)
+          (let ((branch (edit-branch opened owner)))
+            (setf (branch-node-value branch) nil)
+            (values (compact-branch branch owner store) t)))
+         (t (values node nil))))
+      (short-node
+       (let* ((path (short-node-path opened))
+              (len (path-length path))
+              (next (+ at len)))
+         (declare (type fixnum next))
+         (cond
+           ((/= len (common-length path key at end)) (values node nil))
+           ((leaf-path-p path) (if (= next end) (values nil t) (values node nil)))
+           (t (multiple-value-bind (child changed)
+                  (delete-node (short-node-item opened) owner key next end store)
+                (cond ((not changed) (values node nil))
+                      ((null child) (values nil t))
+                      ((short-node-p child)
+                       (values (prepend-path owner path (path-start path) len child store) t))
+                      (t (values (short-with opened owner child) t)))))))))))
 
 (declaim (inline ref-length write-ref))
 (defun ref-length (ref)
@@ -154,23 +282,28 @@
               do (setf (aref bytes i) (ldb (byte 8 (ash (- width i) 3)) payload)))
         (values bytes start))))
 
-(defun node-reference (node)
-  (when node
-    (or (node-ref node)
-        (let ((bytes (encode-node node)))
-          (setf (node-ref node) (if (< (length bytes) 32) bytes (keccak256 bytes)))))))
+(defun node-reference (node store)
+  (declare #.clempo.base:*hot*)
+  (typecase node
+    (null nil)
+    (stored-node (stored-node-hash node))
+    (t (or (node-ref node)
+           (let* ((bytes (encode-node node store))
+                  (ref (if (< (length bytes) 32) bytes (keccak256 bytes))))
+             (when (and store (not (eq ref bytes))) (node-store-put store ref bytes))
+             (setf (node-ref node) ref))))))
 
-(defun encode-node (node)
+(defun encode-node (node store)
   (declare #.clempo.base:*hot*)
   (etypecase node
     (short-node
      (let* ((path (short-node-path node))
             (item (short-node-item node))
             (leaf-p (leaf-path-p path))
-            (ref (unless leaf-p (node-reference item))))
+            (ref (unless leaf-p (node-reference item store))))
        (multiple-value-bind (out pos)
-           (rlp-list-buffer (+ (rlp-encoded-length path)
-                               (if leaf-p (rlp-encoded-length item) (ref-length ref))))
+           (rlp-list-buffer (+ (the fixnum (rlp-encoded-length path))
+                               (if leaf-p (the fixnum (rlp-encoded-length item)) (ref-length ref))))
          (let ((p (rlp-encode-into path out pos)))
            (if leaf-p (rlp-encode-into item out p) (write-ref ref out p)))
          out)))
@@ -179,24 +312,201 @@
             (value (or (branch-node-value node) *empty-bytes*))
             (payload (rlp-encoded-length value)))
        (declare (type fixnum payload))
-       (dotimes (i 16) (incf payload (ref-length (node-reference (svref children i)))))
+       (dotimes (i 16) (incf payload (ref-length (node-reference (svref children i) store))))
        (multiple-value-bind (out pos) (rlp-list-buffer payload)
          (declare (type fixnum pos))
-         (dotimes (i 16) (setf pos (write-ref (node-reference (svref children i)) out pos)))
+         (dotimes (i 16)
+           (setf pos (write-ref (node-reference (svref children i) store) out pos)))
          (rlp-encode-into value out pos)
          out)))))
 
+(defun decode-node-at (bytes at limit)
+  (multiple-value-bind (pos end list-p) (rlp-item-bounds bytes at limit)
+    (unless list-p (bad-node "node must be an RLP list"))
+    (let ((start pos))
+      (labels ((item (kind)
+                 (multiple-value-bind (first last nested) (rlp-item-bounds bytes pos end)
+                   (let ((next last) (len (- last first)))
+                     (prog1 (ecase kind
+                              (:string
+                               (when nested (bad-node "expected a string"))
+                               (subseq bytes first last))
+                              (:child
+                               (cond (nested
+                                      (unless (< (- last pos) 32)
+                                        (bad-node "oversized inline child"))
+                                      (decode-node-at bytes pos last))
+                                     ((= len 32) (make-stored-node (subseq bytes first last)))
+                                     ((not (zerop len)) (bad-node "invalid child reference")))))
+                       (setf pos next))))))
+        ;; Count only top-level items; then decode the two permitted shapes.
+        (let* ((count (loop for p = start then next while (< p end)
+                            for next = (nth-value 1 (rlp-item-bounds bytes p end))
+                            count t))
+               (node
+                 (case count
+                   (2 (let ((path (item :string)))
+                        (unless (and (plusp (length path)) (< (aref path 0) #x40)
+                                     (or (= (path-start path) 1) (zerop (nibble path 1))))
+                          (bad-node "malformed compact path"))
+                        (let* ((leaf-p (leaf-path-p path))
+                               (value (item (if leaf-p :string :child))))
+                          (unless (if leaf-p (plusp (length value))
+                                      (and (plusp (path-length path)) value
+                                           (not (short-node-p value))))
+                            (bad-node "empty leaf, empty extension, or consecutive short nodes"))
+                          (make-short nil path value))))
+                   (17 (let ((children (make-array 16))
+                             (populated 0))
+                         (dotimes (i 16)
+                           (let ((child (item :child)))
+                             (when child (incf populated))
+                             (setf (svref children i) child)))
+                         (let* ((value (item :string))
+                                (value (unless (zerop (length value)) value)))
+                           (when (< (+ populated (if value 1 0)) 2)
+                             (bad-node "uncompressed branch"))
+                           (make-branch nil children value))))
+                   (otherwise (bad-node "node has neither 2 nor 17 items")))))
+          ;; An inline child already is its own reference. The caller sets the
+          ;; checked hash for nodes read from a store.
+          (when (< (- end at) 32)
+            (setf (node-ref node) (subseq bytes at end)))
+          (values node end))))))
+
+(defun open-node (node store)
+  (if (not (stored-node-p node))
+      node
+      (or (stored-node-loaded node)
+          (let* ((hash (stored-node-hash node))
+                 (bytes (node-store-get store hash)))
+            (unless (and (typep bytes 'octets) (plusp (length bytes))
+                         (or (stored-node-root-p node) (>= (length bytes) 32))
+                         (octets= hash (keccak256 bytes)))
+              (bad-node "missing, unreadable or mismatched node hash"))
+            (multiple-value-bind (opened end) (decode-node-at bytes 0 (length bytes))
+              (unless (= end (length bytes)) (bad-node "trailing data"))
+              (when (>= end 32) (setf (node-ref opened) hash))
+              (setf (stored-node-loaded node) opened))))))
+
+(defun walk-key (node key store &optional visit)
+  (declare #.clempo.base:*hot* (type octets key))
+  (let ((at 0) (end (* 2 (length key))))
+    (declare (type fixnum at end))
+    (loop
+      (unless node (return nil))
+      (setf node (open-node node store))
+      (when visit (funcall visit node))
+      (etypecase node
+        (branch-node
+         (when (= at end) (return (branch-node-value node)))
+         (setf node (svref (branch-node-children node) (nibble key at)))
+         (incf at))
+        (short-node
+         (let* ((path (short-node-path node))
+                (len (path-length path)))
+           (unless (= len (common-length path key at end)) (return nil))
+           (incf at len)
+           (if (leaf-path-p path)
+               (return (when (= at end) (short-node-item node)))
+               (setf node (short-node-item node)))))))))
+
+(defun trie-get (trie key)
+  "Return the value at KEY or NIL; do not mutate returned bytes."
+  (check-type key octets)
+  (walk-key (trie-root-node trie) (trie-key trie key) (trie-store trie)))
+
+(defun update-trie (trie key value)
+  (let* ((key (trie-key trie key))
+         (root (trie-root-node trie))
+         (owner (trie-owner trie))
+         (store (trie-store trie))
+         (end (* 2 (length key))))
+    (multiple-value-bind (node changed)
+        (if value (insert-node root owner key 0 end value store)
+            (delete-node root owner key 0 end store))
+      (when changed (setf (trie-root-node trie) node (trie-root-hash trie) nil))
+      changed)))
+
 (defun trie-put (trie key value)
-  (declare #.clempo.base:*hot* (type octets key value))
-  (setf (trie-root-node trie)
-        (insert-node (trie-root-node trie) (trie-owner trie) key 0 (* 2 (length key)) value))
+  "Put immutable VALUE at KEY; an empty value deletes KEY. Return VALUE."
+  (check-type key octets)
+  (check-type value octets)
+  (update-trie trie key (unless (zerop (length value)) value))
   value)
 
+(defun trie-delete (trie key)
+  "Delete KEY; return true if it was present."
+  (check-type key octets)
+  (update-trie trie key nil))
+
 (defun trie-root (trie)
-  (let ((ref (node-reference (trie-root-node trie))))
-    (cond ((null ref) +empty-trie-root+)
-          ((= (length ref) 32) ref)
-          (t (keccak256 ref)))))
+  "Return the canonical 32-byte root; with a store, persist dirty hashed nodes."
+  (or (trie-root-hash trie)
+      (let* ((store (trie-store trie))
+             (ref (node-reference (trie-root-node trie) store)))
+        (setf (trie-root-hash trie)
+              (cond ((null ref) +empty-trie-root+)
+                    ((= (length ref) 32) ref)
+                    (t (let ((hash (keccak256 ref)))
+                         (when store (node-store-put store hash ref))
+                         hash)))))))
+
+(defun trie-proof (trie key)
+  "Return the RLP octets in eth_getProof order (encode each as 0x hex for RPC).
+Includes the root even if short; inline children travel inside their parents."
+  (check-type key octets)
+  (trie-root trie)
+  (let ((store (trie-store trie))
+        (first t)
+        (proof nil))
+    (walk-key (trie-root-node trie) (trie-key trie key) store
+              (lambda (node)
+                (let ((ref (node-ref node)))
+                  (when (or first (= (length ref) 32))
+                    (push (if (= (length ref) 32) (encode-node node store) ref) proof))
+                  (setf first nil))))
+    (nreverse proof)))
+
+(defstruct (proof-store (:constructor make-proof-store (nodes)))
+  nodes)
+
+(defmethod node-store-get ((store proof-store) hash)
+  (declare (ignore hash))
+  (pop (proof-store-nodes store)))
+
+(defun verify-proof (root key proof &key secure)
+  "Check ordered RLP node octets against ROOT. Return (values value valid-p).
+With SECURE, hash KEY as for eth_getProof. A valid absence returns NIL, T;
+a malformed, incomplete or trailing proof returns NIL, NIL."
+  (check-type root (simple-array (unsigned-byte 8) (32)))
+  (check-type key octets)
+  (let ((nodes (coerce proof 'list)))
+    (if (octets= root +empty-trie-root+)
+        (values nil (or (null nodes)
+                        (and (null (cdr nodes)) (typep (car nodes) 'octets)
+                             (octets= (car nodes) (octets-of #x80)))))
+        (let ((store (make-proof-store nodes)))
+          (handler-case
+              (let ((value (trie-get (make-trie :secure secure :store store :root root) key)))
+                (if (proof-store-nodes store) (values nil nil) (values value t)))
+            ((or trie-node-error rlp-error) () (values nil nil)))))))
+
+(defun encode-account (nonce balance storage-root code-hash)
+  "Encode the Ethereum state account RLP."
+  (check-type nonce (unsigned-byte 64))
+  (check-type balance (unsigned-byte 256))
+  (check-type storage-root (simple-array (unsigned-byte 8) (32)))
+  (check-type code-hash (simple-array (unsigned-byte 8) (32)))
+  (rlp-encode (list nonce balance storage-root code-hash)))
+
+(defun decode-account (bytes)
+  "Return (values nonce balance storage-root code-hash) from account RLP."
+  (destructuring-bind (nonce balance storage-root code-hash) (rlp-decode bytes)
+    (check-type storage-root (simple-array (unsigned-byte 8) (32)))
+    (check-type code-hash (simple-array (unsigned-byte 8) (32)))
+    (values (rlp-decode-integer nonce :max-bytes 8) (rlp-decode-integer balance)
+            storage-root code-hash)))
 
 (defun ordered-trie-root (encoded-items)
   "Root of an Ethereum indexed list. The keys are RLP(index), starting at zero.
