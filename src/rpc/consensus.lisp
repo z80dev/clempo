@@ -20,8 +20,10 @@ reference answers one its marshal lacks.")
   (format nil "~A/cache/clempo/finalizations/~A/" (io:getenv "HOME") chain))
 
 (defun backend-finalization-dir (&optional (backend chain:*backend*))
-  (let ((id (chain:backend-chain-id backend)))
-    (finalization-dir (if (eql id 4217) "mainnet" id))))
+  "BACKEND's :finalization-dir, else the archive of its chain."
+  (or (and (typep backend 'chain:archive-backend) (chain:archive-backend-finalization-dir backend))
+      (let ((id (chain:backend-chain-id backend)))
+        (finalization-dir (if (eql id 4217) "mainnet" id)))))
 
 (defvar *spans* (make-hash-table :test 'equal :synchronized t)
   "(dir . first) -> vector of certificate hex strings (NIL where a height has none). Files

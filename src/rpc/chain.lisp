@@ -17,7 +17,7 @@ each block's receipts checked against its header's receipts root before they are
            #:backend-tx-location #:backend-receipts-raw #:backend-chain-id
            #:with-backend-read #:with-backend-write #:call-outside-backend-read #:*backend* #:*head*
            #:archive-backend #:make-archive-backend #:archive-backend-head #:backend-state
-           #:history-dir #:backend-history
+           #:history-dir #:backend-history #:archive-backend-finalization-dir #:backend-record-receipts
            #:build-index #:index-dir #:index-covered-height
            #:block-hash-of-raw #:scan-block-hashes #:block-parts
            #:receipts-store-get #:receipts-store-put #:missing-receipts))
@@ -344,6 +344,9 @@ Returns (values header-start header-end tx-bounds) where tx-bounds is a list of 
    (receipts :initarg :receipts :reader archive-backend-receipts)
    (upstream :initarg :upstream :initform nil :reader archive-backend-upstream)
    (history :initarg :history :initform :unopened)                ; clempo.history, NIL or :unopened
+   (history-dir :initarg :history-dir :initform nil)              ; NIL: HISTORY-DIR of the chain
+   (finalization-dir :initarg :finalization-dir :initform nil     ; NIL: the chain's certificate archive
+                     :reader archive-backend-finalization-dir)
    (history-lock :initform (sb-thread:make-mutex :name "history") :reader history-lock)
    (history-checked :initform 0 :accessor history-checked)))     ; last refresh, internal real time
 
@@ -381,7 +384,8 @@ ARCHIVE-BACKEND) is instantiated with the remaining INITARGS as well."
     (let ((h (slot-value b 'history)))
       (if (eq h :unopened)
           (setf (slot-value b 'history)
-                (let ((dir (history-dir (if (eql (backend-chain-id b) 4217) "mainnet" (backend-chain-id b)))))
+                (let ((dir (or (slot-value b 'history-dir)
+                               (history-dir (if (eql (backend-chain-id b) 4217) "mainnet" (backend-chain-id b))))))
                   (when (probe-file dir) (clempo.history:open-history dir))))
           h))))
 
@@ -469,6 +473,13 @@ ARCHIVE-BACKEND) is instantiated with the remaining INITARGS as well."
 (defun fetch-receipts (url n)
   (let ((r (rpc:rpc-call "debug_getRawReceipts" (list (quantity->hex n)) :url url)))
     (map 'list #'hex->octets r)))
+
+(defgeneric backend-record-receipts (backend number receipts)
+  (:documentation "Persist block NUMBER's EIP-2718 receipt envelopes (a list of octets) in
+BACKEND's receipts store, for a backend that executes blocks itself."))
+
+(defmethod backend-record-receipts ((b archive-backend) number receipts)
+  (receipts-store-put (archive-backend-receipts b) number receipts))
 
 (defmethod backend-receipts-raw ((b archive-backend) n)
   (let ((store (archive-backend-receipts b)))

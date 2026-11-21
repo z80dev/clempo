@@ -142,3 +142,22 @@
   (is= "1.5s" (pool:rust-duration 1500))
   (is= "1.25s" (pool:rust-duration 1250))
   (is= "500ms" (pool:rust-duration 500)))
+
+;;; Archive backend initargs a node backend sets: its own history and certificate
+;;; directories, and receipts it executed itself.
+
+(deftest archive-backend-directories-and-receipts ()
+  (unless (archive:chunk-present-p 0 (archive:archive-dir))
+    (skip-test "no mainnet archive under ~/cache/clempo/mainnet"))
+  (let* ((dir (format nil "/tmp/clempo-rpc-test-~D/" (sb-posix:getpid)))
+         (b (chain:make-archive-backend :head 0 :receipts-dir (format nil "~Areceipts/" dir)
+                                        :history-dir (format nil "~Anone/" dir)
+                                        :finalization-dir (format nil "~Afin/" dir)))
+         (receipts (list (octets-of 1 2 3) (octets-of 2 4))))
+    (unwind-protect
+         (progn
+           (is (null (chain:backend-history b)) "a missing :history-dir is no history")
+           (is= (format nil "~Afin/" dir) (clempo.rpc.consensus::backend-finalization-dir b))
+           (chain:backend-record-receipts b 7 receipts)
+           (is-equalp receipts (chain:backend-receipts-raw b 7)))
+      (sb-ext:run-program "/bin/rm" (list "-rf" dir)))))
