@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root="$(cd "$(dirname "$0")/.." && pwd)"
+export CLEMPO_BUILD="${CLEMPO_BUILD:-release}"
+exec sbcl --dynamic-space-size "${CLEMPO_HEAP:-16384}" --noinform --non-interactive \
+  --no-userinit --no-sysinit --load "$root/scripts/build.lisp" \
+  --eval '(asdf:load-system "clempo-node")' \
+  --eval '(clempo.node:main (rest (member "--" sb-ext:*posix-argv* :test (function string=))))' \
+  -- "$@"
