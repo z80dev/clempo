@@ -924,7 +924,7 @@ methods are slow far behind the head, so they use the samples' recent archive bl
   '("web3_clientVersion" "net_peerCount" "admin_nodeInfo" "admin_peers" "admin_validatorKey"
     "txpool_status" "txpool_inspect" "txpool_content" "txpool_contentFrom" "eth_pendingTransactions"
     "eth_syncing" "eth_newBlockFilter" "eth_newPendingTransactionFilter" "eth_newFilter"
-    "eth_getTransactionBySenderAndNonce" "eth_fillTransaction")
+    "eth_fillTransaction")
   "Methods whose answers depend on the reference node itself (its peers, build, pool, filter ids).")
 
 (defparameter *live-tags* '("\"latest\"" "\"pending\"" "\"safe\"" "\"finalized\""))
