@@ -7,7 +7,11 @@ per available CPU by default), each with its own readiness poller (CLEMPO.POLL: 
 epoll), shares the connections out in turn as they are accepted. On an event a worker reads
 what has arrived into the connection's buffer, parses as far as it goes without waiting, and
 answers each request completed there, so a slow client never holds a worker; a socket is
-watched by its edges, so a request costs a read and a send between waits. HTTP answers as
+watched by its edges, so a request costs a read and a send between waits. A slow call never
+holds the other connections of its worker either: once one event has run for *STALL-MS* the
+reaper hands that worker's poller to a spare thread (at most *EXTRA-WORKERS-MAX* of them),
+as a blocking task is moved off an async runtime's worker, and the stalled thread joins the
+spares when its call returns. HTTP answers as
 the reference does (POST with Content-Type application/json, 405 and 415 otherwise); a GET
 with Upgrade: websocket hands the connection to a thread of its own, where requests are
 answered in order and subscriptions push eth_subscription notifications from a writer thread
@@ -45,6 +49,11 @@ first byte, and a response or notification must be taken by the client within
 (defparameter *request-seconds* 30
   "How long a request's head and body (or a websocket frame) may take to arrive once begun.")
 (defparameter *write-seconds* 60 "How long a client may take to accept a response.")
+(defparameter *stall-ms* 20
+  "How long one event may run on a worker before its poller is handed to another thread (the
+reaper looks this often, so a hand-over comes after one to two periods).")
+(defparameter *extra-workers-max* 64
+  "Threads a server may start beyond its workers to take over the pollers of stalled ones.")
 
 (defvar *server* nil "The server serving the current request.")
 
@@ -64,10 +73,16 @@ starts there, so no notification precedes the response that names it)."
   (consensus-slots 0)
   (lock (sb-thread:make-mutex :name "rpc server"))
   (running t) (max-connections 256)
-  ;; a poller per worker; each connection is watched by one, and run only by its worker
+  ;; a poller per worker; each connection is watched by one, and run by one thread at a time
   (pollers #() :type simple-vector) (next-poller 0 :type fixnum)
   (listen-fd -1) (wake-read -1) (wake-write -1)
-  (workers '()) (reaper nil)
+  ;; CREW: the thread serving each poller (a WORKER, by poller index); SPARES: threads whose
+  ;; poller went on while they ran a slow call, waiting for another; THREADS: every one
+  ;; started, for STOP-SERVER. All three under CREW-LOCK.
+  (crew #() :type simple-vector) (spares '()) (threads '()) (extra 0 :type fixnum)
+  (crew-lock (sb-thread:make-mutex :name "rpc crew"))
+  (crew-wait (sb-thread:make-waitqueue))
+  (reaper nil)
   (reaper-lock (sb-thread:make-mutex :name "rpc reaper"))
   (reaper-wait (sb-thread:make-waitqueue))
   (log *error-output*) (log-lock (sb-thread:make-mutex :name "rpc log")))
@@ -113,7 +128,9 @@ PER_BLOCK_FEED_CAPACITY, the depth of its per-block broadcast feeds.")
 (defstruct (connection (:constructor make-connection (&optional (fd -1))))
   (fd -1 :type fixnum)
   (in (make-inbuf)) (request (make-request))
-  poller                                ; its worker's, which alone runs it
+  poller                                ; the poller watching it
+  ;; 0 idle, 1 a thread is running it, 2 running and to be run once more (RUN-CONNECTION)
+  (run 0)
   (must-read t)                         ; input may be waiting that no event will announce
   (hangup nil)                          ; an event said the peer ended its side
   (phase :idle)                         ; :IDLE, :REQUEST, :BUSY, :WRITING or :THREAD
@@ -734,7 +751,7 @@ in C until the socket can take more) or :FAILED."
                  (setf (connection-phase c) :request (connection-deadline c) (ms-after *request-seconds*)))
                :read)))))
 
-;;; Connections: each is run by its poller's worker alone, from its events
+;;; Connections: each is run from its events by one thread at a time
 
 (defun finish (server c)
   "End C: forget it and close its socket (which also leaves its poller)."
@@ -826,11 +843,56 @@ to wait for the next event (input, room to write, or the reaper's shutdown), or 
           (unless fd (return))
           (add-connection server fd))))
 
-(defun worker-loop (server poller)
+(defun run-connection (server c)
+  "Run C on an event, unless another thread is running it: that one then runs it once more
+when it is done, so no event is lost and no connection is run by two threads at once."
+  (loop (case (sb-ext:compare-and-swap (connection-run c) 0 1)
+          (0 (return))
+          (1 (when (eql 1 (sb-ext:compare-and-swap (connection-run c) 1 2))
+               (return-from run-connection)))
+          (t (return-from run-connection))))
+  (loop (drive server c)
+        (when (eql 1 (sb-ext:compare-and-swap (connection-run c) 1 0)) (return))
+        ;; an event came meanwhile
+        (setf (connection-run c) 1)))
+
+;;; Workers. A WORKER is a thread serving one poller. Its STATE counts the events it has
+;;; run, odd while one runs. The reaper looks every *STALL-MS*: a state still odd and
+;;; unchanged since its last look is a stalled event. Then, while a spare thread is at hand or
+;;; another may be started, the reaper swaps the state for :RETIRED (one compare-and-swap, so
+;;; it and the worker finishing that event agree on who won) and gives the poller to the other
+;;; thread, which first runs every connection of the poller once: the events the stalled
+;;; thread had taken but not run (a connection with nothing to do just reads nothing). The
+;;; stalled thread finishes its call and becomes a spare; it never touches the poller again.
+
+(defstruct (worker (:constructor make-worker (shard &optional poller)))
+  shard
+  poller                                ; the poller it serves; NIL while it is a spare
+  (state 0)                             ; events run (odd while one runs), or :RETIRED
+  (seen nil)                            ; its STATE when the reaper last looked
+  (sweep nil))                          ; run every connection of the poller before waiting
+
+(defun run-event (server w c)
+  "Run C for one event as W's work. NIL when the reaper gave W's poller on meanwhile."
+  (let ((v (worker-state w)))
+    (declare (type fixnum v))
+    (setf (worker-state w) (1+ v))
+    (run-connection server c)
+    (eql (1+ v) (sb-ext:compare-and-swap (worker-state w) (1+ v) (+ v 2)))))
+
+(defun runnable (c poller)
+  (and c (eq (connection-poller c) poller) (not (eq (connection-phase c) :thread))))
+
+(defun serve-poller (server w poller)
   "Wait for events on POLLER and run each one's connection (the first worker's poller also
-watches the listening socket)."
+watches the listening socket), until the server stops or the reaper gives POLLER on."
   (let ((wake (server-wake-read server))
         (listen (server-listen-fd server)))
+    (when (worker-sweep w)
+      (setf (worker-sweep w) nil)
+      (dolist (c (sb-thread:with-mutex ((server-lock server)) (copy-list (server-connections server))))
+        (when (and (runnable c poller) (not (run-event server w c)))
+          (return-from serve-poller))))
     (loop while (server-running server)
           do (dotimes (i (poll:poller-wait poller nil))
                (let ((fd (poll:poller-event poller i)))
@@ -838,11 +900,23 @@ watches the listening socket)."
                        ((= fd listen) (accept-all server))
                        (t (let* ((table (server-table server))
                                  (c (and (< fd (length table)) (svref table fd))))
-                            (when (and c (eq (connection-poller c) poller)
-                                       (not (eq (connection-phase c) :thread)))
+                            (when (runnable c poller)
                               (when (poll:poller-event-hangup-p poller i)
                                 (setf (connection-hangup c) t))
-                              (drive server c))))))))))
+                              ;; given on: the poller's events are another thread's now
+                              (unless (run-event server w c) (return-from serve-poller)))))))))))
+
+(defun worker-loop (server w)
+  "Serve W's poller; when it is given on, wait as a spare for another, until the server stops."
+  (loop
+    (let ((poller (worker-poller w)))
+      (when poller (serve-poller server w poller)))
+    (sb-thread:with-mutex ((server-crew-lock server))
+      (setf (worker-poller w) nil)
+      (push w (server-spares server))
+      (loop while (and (server-running server) (null (worker-poller w)))
+            do (sb-thread:condition-wait (server-crew-wait server) (server-crew-lock server)))
+      (unless (and (server-running server) (worker-poller w)) (return)))))
 
 (defun call-with-rpc-thread (server function)
   "Call FUNCTION on a thread that runs requests: calls and traces run the EVM there, so it gets
@@ -856,21 +930,66 @@ same on every zone verification replayed)."
         (clempo.p384:*p384-scratch* (clempo.p384:make-p384-scratch :memoize t)))
     (clempo.evm:with-evm-thread (funcall function))))
 
+(defun start-worker (server w)
+  "Start W's thread (under the crew lock)."
+  (push (sb-thread:make-thread
+         (lambda ()
+           (call-with-rpc-thread
+            server
+            (lambda ()
+              ;; each thread counts into a metrics shard of its own (shared past 15 threads)
+              (let ((clempo.metrics:*shard* (worker-shard w))
+                    (*text* (make-string 4096 :element-type 'base-char)))
+                (worker-loop server w)))))
+         :name "rpc worker")
+        (server-threads server)))
+
+(defun hand-on (server index w state)
+  "W, serving the poller at INDEX, has run one event since its STATE: give the poller to a
+spare thread, or a new one while fewer than *EXTRA-WORKERS-MAX* were started."
+  (sb-thread:with-mutex ((server-crew-lock server))
+    (let ((spare (pop (server-spares server))))
+      (when (or spare (< (server-extra server) *extra-workers-max*))
+        (cond ((eql state (sb-ext:compare-and-swap (worker-state w) state :retired))
+               (let ((next (or spare
+                               (make-worker (1+ (mod (+ (length (server-crew server)) (server-extra server)) 15))))))
+                 (setf (worker-state next) 0 (worker-seen next) nil (worker-sweep next) t
+                       (worker-poller next) (worker-poller w)
+                       (svref (server-crew server) index) next)
+                 (if spare
+                     (sb-thread:condition-broadcast (server-crew-wait server))
+                     (progn (incf (server-extra server)) (start-worker server next)))))
+              ;; the event ended meanwhile
+              (spare (push spare (server-spares server))))))))
+
+(defun relieve-stalls (server)
+  (let ((crew (server-crew server)))
+    (dotimes (i (length crew))
+      (let* ((w (svref crew i)) (state (worker-state w)))
+        (if (and (typep state 'fixnum) (oddp state) (eql state (worker-seen w)))
+            (hand-on server i w state)
+            (setf (worker-seen w) state))))))
+
 (defun reap-loop (server)
-  "End connections past their deadline: mark them and shut their sockets down, which wakes
-the poller for them, and the worker taking that event closes them."
-  (loop while (server-running server)
-        do (sb-thread:with-mutex ((server-reaper-lock server))
-             (when (server-running server)
-               (sb-thread:condition-wait (server-reaper-wait server) (server-reaper-lock server)
-                                         :timeout 0.2)))
-           (let ((now (now-ms)))
-             (sb-thread:with-mutex ((server-lock server))
-               (dolist (c (server-connections server))
-                 (when (and (> now (connection-deadline c)) (not (connection-expired c))
-                            (>= (connection-fd c) 0))
-                   (setf (connection-expired c) t)
-                   (poll:fd-shutdown (connection-fd c))))))))
+  "Every *STALL-MS*, give the poller of a worker stalled in one event to another thread; about
+every 200 ms, end connections past their deadline: mark them and shut their sockets down,
+which wakes the poller for them, and the thread taking that event closes them."
+  (let ((next-reap 0))
+    (loop while (server-running server)
+          do (sb-thread:with-mutex ((server-reaper-lock server))
+               (when (server-running server)
+                 (sb-thread:condition-wait (server-reaper-wait server) (server-reaper-lock server)
+                                           :timeout (/ *stall-ms* 1000.0))))
+             (when (server-running server) (relieve-stalls server))
+             (let ((now (now-ms)))
+               (when (>= now next-reap)
+                 (setf next-reap (+ now 200))
+                 (sb-thread:with-mutex ((server-lock server))
+                   (dolist (c (server-connections server))
+                     (when (and (> now (connection-deadline c)) (not (connection-expired c))
+                                (>= (connection-fd c) 0))
+                       (setf (connection-expired c) t)
+                       (poll:fd-shutdown (connection-fd c))))))))))
 
 ;;; WebSocket
 
@@ -925,9 +1044,13 @@ upgrade request first, then the socket's stream."))
          (handler-case (serve-websocket c (req-key (connection-request c)) stream)
            (serious-condition () nil))
       (close-connection server c)
+      ;; the writer is joined before the descriptor closes, or it could write to one reused
+      ;; meanwhile; the socket is shut down, so its writes fail at once
       (let ((writer (connection-writer c)))
-        (when writer (sb-thread:join-thread writer :default nil :timeout 10)))
-      (ignore-errors (close stream :abort t))
+        (when writer (sb-thread:join-thread writer :default nil)))
+      ;; FINISH alone closes the descriptor: closing the stream would close it too (an fd-stream
+      ;; closes its descriptor even with :AUTO-CLOSE NIL), and the second close could hit a
+      ;; descriptor another thread opened in between. The stream has no finalizer.
       (finish server c))))
 
 (defun serve-websocket (connection key stream)
@@ -1052,22 +1175,13 @@ started."
                                    :wake-read wake-read :wake-write wake-write)))
         (loop for p across pollers do (poll:watch-level p wake-read))
         (poll:watch-level (svref pollers 0) listen-fd)
+        (setf (server-crew server)
+              (coerce (loop for p across pollers for i from 0 collect (make-worker (1+ (mod i 15)) p))
+                      'simple-vector))
+        (sb-thread:with-mutex ((server-crew-lock server))
+          (loop for w across (server-crew server) do (start-worker server w)))
         (setf (server-reaper server)
-              (sb-thread:make-thread (lambda () (reap-loop server)) :name "rpc reaper")
-              (server-workers server)
-              (loop for p across pollers
-                    for i from 0
-                    collect (let ((p p) (shard (1+ (mod i 15))))
-                              (sb-thread:make-thread
-                               (lambda ()
-                                 (call-with-rpc-thread
-                                  server
-                                  (lambda ()
-                                    ;; each worker counts into its own metrics shard
-                                    (let ((clempo.metrics:*shard* shard)
-                                          (*text* (make-string 4096 :element-type 'base-char)))
-                                      (worker-loop server p)))))
-                               :name "rpc worker"))))
+              (sb-thread:make-thread (lambda () (reap-loop server)) :name "rpc reaper"))
         server))))
 
 (defun stop-server (server)
@@ -1077,8 +1191,12 @@ reaper and the websocket threads (each joins its notification writer)."
   (poll:wakeup (server-wake-write server))
   (sb-thread:with-mutex ((server-reaper-lock server))
     (sb-thread:condition-broadcast (server-reaper-wait server)))
-  (dolist (w (server-workers server)) (sb-thread:join-thread w :default nil :timeout 10))
   (sb-thread:join-thread (server-reaper server) :default nil :timeout 10)
+  ;; the reaper starts no more threads now
+  (sb-thread:with-mutex ((server-crew-lock server))
+    (sb-thread:condition-broadcast (server-crew-wait server)))
+  (dolist (thread (sb-thread:with-mutex ((server-crew-lock server)) (copy-list (server-threads server))))
+    (sb-thread:join-thread thread :default nil :timeout 10))
   (ignore-errors (sb-bsd-sockets:socket-close (server-socket server)))
   (let ((connections (sb-thread:with-mutex ((server-lock server)) (copy-list (server-connections server)))))
     (dolist (c connections)

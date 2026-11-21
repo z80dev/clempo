@@ -497,3 +497,77 @@
                                            (sb-thread:with-mutex (lock) (incf reading))
                                            (sb-thread:with-mutex (lock) (decf reading)))))))))))
         (is= 0 overlaps)))))
+
+;;; A slow call holds no other connection: its worker's poller goes on to another thread
+
+(defmacro with-test-methods ((&rest specs) &body body)
+  "Serve each (name function) as a method without params for BODY."
+  `(unwind-protect
+        (progn ,@(loop for (name fn) in specs
+                       collect `(setf (gethash ,name rpc:*methods*)
+                                      (rpc::make-rpc-method :name ,name :doc "test" :params nil
+                                                            :function (lambda (src) (declare (ignore src))
+                                                                        (funcall ,fn)))))
+               ,@body)
+     ,@(loop for (name) in specs collect `(remhash ,name rpc:*methods*))))
+
+(deftest a-slow-call-delays-no-other-connection ()
+  (let* ((lock (sb-thread:make-mutex :name "test cursor"))
+         (started nil) (release nil)
+         (call (lambda (method) (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":~S}" method))))
+    (flet ((await (p seconds)
+             (loop repeat (* 100 seconds) until (funcall p) do (sleep 0.01))
+             (funcall p)))
+      (with-test-methods (("test_slow" (lambda ()
+                                         ;; holds a lock others wait on, as the trie cursor is
+                                         (sb-thread:with-mutex (lock)
+                                           (setf started t)
+                                           (await (lambda () release) 30))
+                                         "slow"))
+                          ("test_waiting" (lambda () (sb-thread:with-mutex (lock) "waited"))))
+        ;; one worker: every connection shares the poller the slow call stalls
+        (with-server (port :workers 1)
+          (multiple-value-bind (slow slow-socket) (open-client port)
+            (multiple-value-bind (waiting waiting-socket) (open-client port)
+              (unwind-protect
+                   (progn
+                     ;; a slow call with a fast one pipelined behind it, and a call waiting
+                     ;; for the slow one's lock on another connection
+                     (send slow (concatenate 'string (post (funcall call "test_slow"))
+                                             (post +client-version-request+)))
+                     (is (await (lambda () started) 10) "the slow call started")
+                     (send waiting (post (funcall call "test_waiting")))
+                     (sleep 0.1)
+                     (let* ((times (make-array 32 :initial-element nil))
+                            (threads
+                              (loop for k below 32
+                                    collect (let ((k k))
+                                              (sb-thread:make-thread
+                                               (lambda ()
+                                                 (let* ((t0 (get-internal-real-time))
+                                                        (answer (exchange port (post +client-version-request+))))
+                                                   (setf (svref times k)
+                                                         (and (eql 200 (status-of answer))
+                                                              (/ (- (get-internal-real-time) t0)
+                                                                 internal-time-units-per-second))))))))))
+                       (mapc (lambda (th) (sb-thread:join-thread th :default nil :timeout 30)) threads)
+                       (is (every #'numberp times) "every fast call answered: ~S" times)
+                       (is (every (lambda (s) (and (numberp s) (< s 2))) times)
+                           "fast calls answered within 2 s while one call is slow: slowest ~,3F s"
+                           (reduce #'max (remove-if-not #'numberp times) :initial-value 0)))
+                     (is (not (listen waiting)) "the waiting call still waits for the lock")
+                     (setf release t)
+                     (sb-bsd-sockets:socket-shutdown slow-socket :direction :output)
+                     (sb-bsd-sockets:socket-shutdown waiting-socket :direction :output)
+                     (let ((answers (read-all slow)))
+                       (is (search "\"result\":\"slow\"" answers) "~A" answers)
+                       ;; the pipelined call answered after it, on the same connection
+                       (is (< (or (search "\"result\":\"slow\"" answers) most-positive-fixnum)
+                              (or (search (format nil "\"result\":~S" clempo.rpc.eth:*client-version*) answers) -1))
+                           "~A" answers))
+                     (is (search "\"result\":\"waited\"" (read-all waiting)))
+                     ;; still served, the stalled thread now a spare
+                     (is (answers-p port)))
+                (setf release t)
+                (ignore-errors (close slow))
+                (ignore-errors (close waiting))))))))))
