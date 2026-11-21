@@ -204,3 +204,21 @@ results are treated as clempo results.
 
 Baseline and probe reports establish reference behavior and wire interoperability,
 not mixed-validator acceptance. Use independent quorum reports for the latter.
+
+## Moderato readiness (read-only)
+
+```sh
+CLEMPO_BUILD=release bin/clempo-dev moderato-readiness -last 3000 -timeout 8
+```
+
+The command verifies recent Moderato certificates under the published testnet
+network identity, reads the live ValidatorConfigV2 owner and simulates
+`addValidator` with owner as the `eth_call` sender. It uses an ephemeral
+Ed25519 key and documentation-only registration endpoints, and does not
+submit a transaction or retain a signing key. The reported validator index
+is the simulation result, not a registration.
+
+It also opens one short Commonware transport attempt to a public consensus
+ingress advertised by the live Moderato registry, using only the unregistered
+ephemeral identity. A reset or timeout does not prove why admission failed.
+The report does not claim committee membership, signing, or execution sync.

@@ -71,6 +71,17 @@ commitments. The separate zero-vote probe authenticated three Rust peers and
 received 156 votes, 156 certificates, 23 broadcast blocks and 69 DKG messages
 in 15 seconds.
 
+R6f Moderato readiness (read-only): `CLEMPO_BUILD=release bin/clempo-dev
+moderato-readiness -last 3000 -timeout 8` verified 3,000 finalized blocks
+(45,212,047–45,215,046) under the published testnet identity (from epoch
+1747). The live ValidatorConfigV2 owner-origin `eth_call` accepted the
+disposable Ed25519 registration payload and returned simulated index 46.
+TCP reached the public ingress `34.148.31.115:8000`, but the connection was
+reset during SAKE authentication; an unregistered identity did not join and
+no transaction was sent. `score -rung R2 -json` also matched the Moderato
+genesis state root and block hash against live RPC. The JSON report is in
+`~/scratch/clempo/public-p2p/moderato-3000.log`; see `docs/DEVNET.md`.
+
 R4 certificates (bba3dfe): `CLEMPO_RPC=http://127.0.0.1:8545 CLEMPO_BUILD=release bin/clempo-dev certify -from 49995000 -to 50015000 -threads 16`
 verified all 20,001 consecutive mainnet finalization certificates across the epoch 2314/2315
 boundary in 38 s (16 threads; one random linear combination per batch of 250, two pairings
