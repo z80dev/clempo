@@ -75,3 +75,37 @@ transactions touched."
   "CREATE2 pays the T1 create cost (TIP-1000), not 32,000.")
 (defblock-test t1b-key-authorization-uses-sstore-without-load 6305645
   "T1B key-authorization intrinsic gas uses SstoreSetWithoutLoadCost (+100 per slot otherwise).")
+
+;;; Overlay blocks: the same block replayed and requested without touching the database.
+
+(deftest overlay-replay-matches-and-writes-nothing ()
+  (let* ((n 4711932)
+         (block (fixture-block n))
+         (db (prestate-db n block))
+         (root (clempo.store:db-root-hash db))
+         (env (header-block-env (blocks:block-header block) :chain :mainnet))
+         (ctx (begin-call-block db env))
+         (txs (blocks:block-transactions block))
+         (outcomes (loop for tx in txs
+                         collect (apply-transaction ctx tx (clempo.transactions:transaction-sender tx)))))
+    (is (= (reduce #'+ outcomes :key #'tx-outcome-block-gas)
+           (headers:ethereum-header-gas-used (headers:header-inner (blocks:block-header block)))))
+    (is (not (store:db-block-open-p db)))
+    (is (equalp root (clempo.store:db-root-hash db)))
+    ;; The block's first transaction again, as an unsigned request on a fresh overlay.
+    (let* ((tx (first txs))
+           (request (list :from (clempo.transactions:transaction-sender tx)
+                          :to (clempo.transactions:transaction-to tx)
+                          :gas (clempo.transactions:transaction-gas-limit tx)
+                          :max-fee (clempo.transactions:transaction-max-fee-per-gas tx)
+                          :max-priority (clempo.transactions:transaction-max-priority-fee-per-gas tx)
+                          :value (clempo.transactions:transaction-value tx)
+                          :nonce (clempo.transactions:transaction-nonce tx)
+                          :chain-id (clempo.transactions:transaction-chain-id tx)
+                          :type 2
+                          :input (clempo.transactions:transaction-input tx)
+                          :access-list (clempo.executor::parse-access-list
+                                        (clempo.transactions:transaction-access-list tx))))
+           (outcome (execute-request (begin-call-block db env) request)))
+      (is (= (tx-outcome-gas-used outcome) (tx-outcome-gas-used (first outcomes))))
+      (is (equalp root (clempo.store:db-root-hash db))))))
