@@ -24,4 +24,5 @@
   :components ((:file "executor-tests")
                (:file "authorizations-tests")
                (:file "lanes-tests")
-               (:file "system-calls-tests")))
+               (:file "system-calls-tests")
+               (:file "mainnet-blocks-tests")))

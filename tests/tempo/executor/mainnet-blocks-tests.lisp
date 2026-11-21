@@ -1,0 +1,77 @@
+(defpackage #:clempo.executor.mainnet-tests
+  (:use #:cl #:clempo.base #:clempo.executor)
+  (:local-nicknames (#:store #:clempo.store) (#:blocks #:clempo.blocks)
+                    (#:headers #:clempo.headers) (#:json #:clempo.json)))
+
+(in-package #:clempo.executor.mainnet-tests)
+
+;;; Regression blocks from the R3 climb. Each is a mainnet block executed on a state database
+;;; holding only what the block reads: the merged per-transaction prestate (prestateTracer,
+;;; non-diff) recorded from the reference node (data/README.md). The state root cannot match a
+;;; partial state, so the checks are the block's gas used, receipts root and logs bloom.
+
+(defparameter *data*
+  (asdf:system-relative-pathname "clempo-tempo-executor" "../../../tests/tempo/executor/data/"))
+
+(defun data-file (fmt &rest args)
+  (merge-pathnames (apply #'format nil fmt args) *data*))
+
+(defun fixture-block (n)
+  (blocks:decode-block
+   (hex->octets (string-trim '(#\Newline #\Space) (clempo.io:read-file-string (data-file "block-~D.hex" n))))))
+
+(defun quantity (x) (etypecase x (integer x) (string (hex->integer x)) (null 0)))
+
+(defun prestate-db (n block)
+  "A state database at block N-1 holding the first-seen state of every account the block's
+transactions touched."
+  (let* ((traces (json:parse-json (clempo.io:read-file-string (data-file "prestate-~D.json" n))))
+         (accounts (make-hash-table :test 'equal))
+         (db (store:make-statedb)))
+    (loop for trace across traces
+          for result = (json:jget trace "result")
+          do (loop for (address . state) in (cdr result)
+                   do (let ((seen (gethash address accounts)))
+                        (if seen
+                            ;; a slot first read by a later transaction still has its block-start value
+                            (loop for (slot . value) in (cdr (json:jget state "storage"))
+                                  unless (assoc slot (getf seen :storage) :test #'string=)
+                                    do (push (cons slot value) (getf seen :storage)))
+                            (setf (gethash address accounts)
+                                  (list :state state :storage (copy-list (cdr (json:jget state "storage")))))))))
+    (store:db-begin-block db)
+    (maphash (lambda (address entry)
+               (let* ((state (getf entry :state))
+                      (a (hex->integer address))
+                      (code (hex->octets (or (json:jget state "code") "0x"))))
+                 (store:db-set-account db a (quantity (json:jget state "nonce")) (quantity (json:jget state "balance"))
+                                       (if (zerop (length code)) clempo.trie:+empty-code-hash+ (store:db-put-code db code)))
+                 (loop for (slot . value) in (getf entry :storage)
+                       do (store:db-set-storage db a (hex->integer slot) (hex->integer value)))))
+             accounts)
+    (store:db-commit-block db (1- n) (headers:ethereum-header-parent-hash
+                                      (headers:header-inner (blocks:block-header block))))
+    db))
+
+(defun check-block (n)
+  (let* ((block (fixture-block n))
+         (db (prestate-db n block))
+         (result (execute-block db block :chain :mainnet))
+         (fields (remove :state-root (block-mismatches result (blocks:block-header block)) :key #'first)))
+    (is (null fields) "block ~D: ~S" n fields)))
+
+(defmacro defblock-test (name n doc)
+  `(deftest ,name () ,doc (check-block ,n)))
+
+(defblock-test fee-token-from-set-user-token 3850
+  "setUserToken on the fee manager picks the fee token (selector computed from its signature).")
+(defblock-test key-authorization-pays-full-signature-gas 3865
+  "A key authorization pays the secp256k1 verification the base 21,000 already covers for the tx.")
+(defblock-test t1-sstore-set-includes-the-warm-read 4516256
+  "T1 SSTORE zero-to-nonzero costs 250,100 (evm2 splits off the 100-gas warm read).")
+(defblock-test t1-metered-key-authorization 4699557
+  "T1/T1A key authorizations are metered with only the SSTORE-set and warm-read costs.")
+(defblock-test t1-create2-costs-500000 4711932
+  "CREATE2 pays the T1 create cost (TIP-1000), not 32,000.")
+(defblock-test t1b-key-authorization-uses-sstore-without-load 6305645
+  "T1B key-authorization intrinsic gas uses SstoreSetWithoutLoadCost (+100 per slot otherwise).")
