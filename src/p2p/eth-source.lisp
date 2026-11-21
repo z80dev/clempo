@@ -65,7 +65,7 @@
     raw))
 
 (defun call-with-public-block-source (fn &key (chain :mainnet) (bootnodes (tempo-bootnodes chain))
-                                             (discovery-timeout 8) (dial-timeout 2) on-peer)
+                                             (discovery-timeout 16) (dial-timeout 2) on-peer)
   "Call FN with a synchronous (FROM COUNT) -> vector of consecutive raw blocks.
 A source authenticates public peers, owns one live connection, and rotates on
 transport, availability, or validation failure. The caller must compare the
@@ -87,7 +87,8 @@ without UDP discovery. ON-PEER, if supplied, receives a peer and the ETH version
              (find-peers ()
                (delete-duplicates
                 (append (when (plusp discovery-timeout)
-                          (discovery:discover-peers seeds :timeout discovery-timeout :key key))
+                          (discovery:discover-peers seeds :timeout discovery-timeout
+                                                         :protocols '(:v5 :v4)))
                         (copy-list seeds))
                 :key #'discovery:peer-public-key :test #'octets= :from-end t))
              (fetch (from count)

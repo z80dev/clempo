@@ -192,6 +192,17 @@ Tempo Commonware lookup vectors. This demonstrates download, not live replay
 or finalization; R4 remains unscored. Public validator interoperability was not
 attempted because Tempo admits registered validator identities and addresses.
 
+R4 public devp2p source: `bin/clempo-dev p2p-discover -protocol v4 -seconds 25`
+and `-protocol v5 -seconds 24` proved 12 and 15 public UDP endpoints,
+respectively, starting from Tempo's published mainnet bootnodes. Discovery
+authenticates endpoints, not chain membership; RLPx and ETH Status separately
+check peer identity, network, fork ID and genesis. With automatic v5-first
+discovery, `CLEMPO_BUILD=release bin/clempo-dev p2p-follow-proof -upstream
+http://127.0.0.1:8545 -seconds 90` authenticated eth/69 on `40.160.67.13:30303`
+and matched all 167 finalized blocks (50,069,660–50,069,826) byte for byte.
+The public peer supplied headers and bodies; RPC supplied only the finalized
+heights and comparison bytes. Logs are in `~/scratch/clempo/public-p2p/`.
+
 Hash/25519 crypto (SBCL 2.6.8 release, Apple Silicon, single thread): on
 64 MiB, SHA-256 **2,684 MB/s** (25 ms, no consing), BLAKE3 **317 MB/s**
 (212 ms, no consing), ChaCha20 **257 MB/s** (261 ms, one result buffer).
