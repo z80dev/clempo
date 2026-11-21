@@ -1,0 +1,49 @@
+(in-package #:clempo.dev)
+
+(defun probe-devnet (manifest slot seconds)
+  (let ((seen (make-hash-table :test #'equalp))
+        (counts (make-array 6 :initial-element 0))
+        (by-peer (make-hash-table :test #'equalp)))
+    (clempo.validator:call-with-validator-network
+     manifest slot
+     (lambda (network)
+       (let ((deadline (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
+         (loop for remaining = (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)
+               while (plusp remaining)
+               for event = (clempo.validator:network-receive network :timeout (min remaining 1))
+               when event do
+                 (let ((key (clempo.validator:network-event-peer event)))
+                   (setf (gethash key seen) t)
+                   (when (eq (clempo.validator:network-event-kind event) :data)
+                     (let ((channel (clempo.validator:network-event-channel event)))
+                       (incf (aref counts channel))
+                       (incf (aref (or (gethash key by-peer)
+                                       (setf (gethash key by-peer) (make-array 6 :initial-element 0)))
+                                   channel)))))))))
+    (let ((all-peers (loop for peer across (clempo.validator:manifest-slots manifest)
+                           unless (eq peer slot) collect peer)))
+      (values
+       (clempo.json:jobject "slot" (clempo.validator:slot-number slot) "seconds" seconds
+                            "authenticated_peers" (hash-table-count seen)
+                            "votes" (aref counts 0) "certificates" (aref counts 1)
+                            "broadcast_blocks" (aref counts 3) "dkg" (aref counts 5)
+                            "peers"
+                            (coerce (loop for peer in all-peers
+                                          for key = (clempo.validator:slot-public-key peer)
+                                          collect (clempo.json:jobject "slot" (clempo.validator:slot-number peer)
+                                                                       "authenticated" (clempo.json:jbool (gethash key seen))
+                                                                       "channels" (gethash key by-peer #(0 0 0 0 0 0))))
+                                    'vector))
+       (and (= (length all-peers) (hash-table-count seen)) (plusp (aref counts 0)) (plusp (aref counts 3)))))))
+
+(defcommand "devnet-probe" (args)
+  "observe authenticated local consensus traffic: -manifest PATH -slot N [-seconds 20]"
+  (let ((path (arg args :manifest)) (number (arg-int args :slot)) (seconds (arg-int args :seconds 20)))
+    (unless (and (stringp path) (typep number '(integer 0 *)) (typep seconds '(integer 1 3600)))
+      (log-line "devnet-probe: specify -manifest PATH -slot N and a positive duration")
+      (return-from command 2))
+    (let ((manifest (clempo.validator:read-devnet-manifest path)))
+      (multiple-value-bind (report ok)
+          (probe-devnet manifest (clempo.validator:manifest-slot manifest number) seconds)
+        (write-line (clempo.json:to-json-string report))
+        (if ok 0 1)))))

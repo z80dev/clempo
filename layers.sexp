@@ -22,5 +22,6 @@
  (:dir "sync" :io t)
  (:dir "rpc" :io t)
  (:dir "sim")
+ (:dir "validator" :io t)                    ; validator process and devnet peer supervision
  (:dir "node" :io t)
  (:dir "dev" :io t))
