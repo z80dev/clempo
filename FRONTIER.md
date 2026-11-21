@@ -9,7 +9,7 @@
 | R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `750c66b` | 2026-11-21 |
 | R3p Precompiles | 4,986/4,992 (goempo's frontier; every Tempo precompile T0..T14; the 6 differences are T14 keychain grants where clempo follows tempo c8b89f9, newer than the corpus: +2,600 gas root-retirement probe) | `fd2d4cf` | 2026-11-21 |
 | R4 Follow | - | | |
-| R5 RPC | 111/134 methods, 8,046/11,203 cases; 143/156 reference methods served (blocks 5,126/5,126, logs 508/508, txs 1,027/1,027 incl. archive-found rare shapes, envelope 50/50, static 118/119; success 0/25, consensus 0/9 not served yet; state, calls and traces wait on the executor) | `6a4c188` | 2026-11-21 |
+| R5 RPC | 111/154 methods, 10,524/14,231 cases (`bin/clempo-dev score -rung R5`). state 1,888/3,542 and calls ~440/797, every other failure there "state not available" (history coverage still growing); eth_simulateV1 77/131, tempo_simulateV1 1/1; tempo-params 101/101; blocks, logs, txs, envelope as before. Trace replay matches the reference on sampled non-AA txs and blocks (all geth tracers, trace_*); traces suite still being recorded; Tempo AA (0x76) traces lack evm2's wrapper frame | `fb316a4` | 2026-11-21 |
 | R6 Validator | Sims: 4, 5 and 7 validators, three epochs each, every reshare concluded through per-node DKG managers. Live Rust devnet: one Clempo signer necessary through two reshares, two Clempo signers necessary through three | `b680aaf`, `dbe14d1` | 2026-11-21 |
 | R7 Speed | - | | |
 
