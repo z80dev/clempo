@@ -463,6 +463,25 @@ return the BLOCK-RESULT (the db block stays open for the caller to commit or rev
                        :state-root (store:db-state-root (ctx-db ctx))
                        :tx-count (length receipts))))
 
+(defmacro with-state-storage ((db env) &body body)
+  "Run BODY with clempo.contract:*STORAGE* bound to a static, unmetered precompile storage
+over a fresh world on DB under ENV's fork, so exported precompile readers (2D nonces, fee
+tokens, TIP-20 balances, keychain keys) can be called. Writes signal; nothing reaches DB."
+  (let ((e (gensym "ENV")))
+    `(let* ((,e ,env)
+            (forks:*spec* (block-env-spec ,e))
+            (evm:*spec* (tempo-evm-spec forks:*spec*))
+            (evm:*world* (state:make-world ,db))
+            (evm:*block* (evm-block-env ,db ,e))
+            (*host* (make-instance 'world-host
+                                   :block-info (contract:make-block-info
+                                                :number (block-env-number ,e)
+                                                :timestamp (block-env-timestamp ,e)
+                                                :beneficiary (block-env-beneficiary ,e)
+                                                :chain-id (block-env-chain-id ,e))))
+            (contract:*storage* (contract:make-metered-storage *host* :static t :tip1060 nil)))
+       ,@body)))
+
 (defun check-transaction (db env tx sender &key skip-nonce-check skip-valid-after-check
                                                skip-base-fee-check skip-liquidity-check)
   "Validate and execute TX on DB as the first transaction after ENV's pre-execution changes,

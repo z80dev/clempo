@@ -31,6 +31,7 @@ with RETRY-BLOCK, HEAL-FROM-REFERENCE, SKIP-BLOCK and ABORT-REPLAY restarts.")
    #:invalid-transaction #:unsupported-transaction
    ;; incremental execution (builder, pool, validators)
    #:begin-block #:apply-transaction #:finish-block #:check-transaction #:block-context
+   #:with-state-storage
    #:tx-outcome #:tx-outcome-status #:tx-outcome-gas-used #:tx-outcome-block-gas
    #:tx-outcome-logs #:tx-outcome-fee-token #:tx-outcome-fee-payer #:tx-outcome-key-expiry
    #:tx-outcome-validator-fee #:tx-outcome-fallback-fee-token-p #:tempo-evm-spec
