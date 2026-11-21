@@ -3,7 +3,7 @@
   (:import-from #:clempo.keccak #:keccak256)
   (:import-from #:clempo.rlp #:rlp-encode)
   (:import-from #:clempo.trie #:make-secure-trie #:trie-clone #:trie-put #:trie-delete
-                #:trie-root #:encode-account #:+empty-trie-root+ #:+empty-code-hash+)
+                #:trie-root #:trie-proof #:encode-account #:+empty-trie-root+ #:+empty-code-hash+)
   (:documentation "The committed state database: every account, storage slot and code blob
 of the chain in RAM, keyed by integers, with the account and storage tries kept beside them so
 a block's state root costs only its dirty paths. A block's writes are applied between
@@ -20,7 +20,7 @@ committed blocks into a log and periodic checkpoints.")
    #:db-block-hash #:db-note-block-hash #:map-recent-hashes
    ;; writes
    #:db-set-account #:db-delete-account #:db-set-storage #:db-wipe-storage
-   #:db-put-code #:db-state-root
+   #:db-put-code #:db-state-root #:db-account-proof #:db-storage-proof
    #:db-begin-block #:db-commit-block #:db-revert-block #:db-block-open-p
    #:with-speculative-blocks
    ;; block diffs
@@ -184,6 +184,24 @@ committed blocks into a log and periodic checkpoints.")
         ;; DB-ROOT-HASH stays the last committed root; an open block's root is only returned.
         (clrhash dirty)))
     (trie-root (db-trie db))))
+
+;;; Merkle proofs (eth_getProof) of the db as it is now: node RLP octets, root first.
+
+(defun db-account-proof (db address)
+  "The account trie proof for ADDRESS (an absence proof when it has no account)."
+  (db-state-root db)
+  (trie-proof (db-trie db) (address-octets address)))
+
+(defun db-storage-proof (db address slot)
+  "The proof for SLOT in ADDRESS's storage trie; NIL when ADDRESS has no account (its storage
+root is the empty root, which has no nodes)."
+  (let ((a (db-account db address)))
+    (when a
+      (db-state-root db)
+      (let ((trie (ensure-storage-trie a)))
+        (if (octets= (trie-root trie) +empty-trie-root+)
+            '()
+            (trie-proof trie (slot-octets slot)))))))
 
 ;;; Writes. Every write happens inside an open block so it can be undone and logged.
 
