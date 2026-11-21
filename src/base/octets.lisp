@@ -87,25 +87,60 @@
 
 ;;; Integers <-> big-endian octets
 
+;;; Both directions move whole 64-bit bignum digits: shifting a growing bignum one byte at
+;;; a time is quadratic and allocates a bignum per byte.
+
+(defun integer-into-octets (n o start end)
+  "Write N big-endian into O[START, END), zero-padded on the left. N must fit."
+  (declare #.*hot* (type unsigned-byte n) (type octets o) (type fixnum start end))
+  (invariant (and (<= 0 start end (length o)) (<= (integer-length n) (* 8 (- end start))))
+             "~D does not fit in ~D bytes" n (- end start))
+  (if (typep n 'fixnum)
+      (let ((v n))
+        (declare (type (and fixnum unsigned-byte) v))
+        (loop for i fixnum from (1- end) downto start
+              do (setf (aref o i) (logand v 255) v (ash v -8))))
+      (let ((digits (sb-bignum:%bignum-length n)))
+        (declare (type fixnum digits))
+        (loop for k fixnum from 0
+              for hi fixnum = (- end (* 8 k))
+              while (> hi start)
+              do (let ((w (if (< k digits) (sb-bignum:%bignum-ref n k) 0)))
+                   (declare (type (unsigned-byte 64) w))
+                   (loop for i fixnum from (1- hi) downto (max start (- hi 8))
+                         do (setf (aref o i) (logand w 255) w (ash w -8)))))))
+  o)
+
 (defun integer->octets (n len)
   (declare (type unsigned-byte n) (type fixnum len))
-  (invariant (<= (integer-length n) (* 8 len)) "~D does not fit in ~D bytes" n len)
-  (let ((o (make-octets len)))
-    (loop for i from (1- len) downto 0
-          for shift from 0 by 8
-          do (setf (aref o i) (ldb (byte 8 shift) n)))
-    o))
+  (integer-into-octets n (make-octets len) 0 len))
 
 (defun integer->octets-minimal (n)
   "Big-endian with no leading zeros; 0 is the empty vector."
   (integer->octets n (ceiling (integer-length n) 8)))
 
 (defun octets->integer (o &key (start 0) (end (length o)))
-  (declare (type octets o) (type fixnum start end))
-  (let ((n 0))
-    (loop for i from start below end
-          do (setf n (logior (ash n 8) (aref o i))))
-    n))
+  (declare #.*hot* (type octets o) (type fixnum start end))
+  (invariant (<= 0 start end (length o)) "bad octet range ~D..~D of ~D" start end (length o))
+  (let ((n (- end start)))
+    (declare (type fixnum n))
+    (if (<= n 7)
+        (let ((v 0))
+          (declare (type (unsigned-byte 56) v))
+          (loop for i fixnum from start below end do (setf v (logior (ash v 8) (aref o i))))
+          v)
+        ;; One extra digit keeps the top bit clear: bignums are two's complement.
+        (let* ((digits (1+ (ceiling n 8)))
+               (b (sb-bignum:%allocate-bignum digits)))
+          (declare (type fixnum digits))
+          (dotimes (k digits)
+            (let* ((hi (- end (* 8 k)))
+                   (w 0))
+              (declare (type fixnum hi) (type (unsigned-byte 64) w))
+              (loop for i fixnum from (max start (- hi 8)) below hi
+                    do (setf w (logior (ldb (byte 64 0) (ash w 8)) (aref o i))))
+              (sb-bignum:%bignum-set b k w)))
+          (sb-bignum::%normalize-bignum b digits)))))
 
 ;;; Strings
 
