@@ -1,66 +1,72 @@
 (in-package #:clempo.secp256k1)
 
-
-(clempo.ec:define-prime-curve secp
-  :p #xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f
-  :a 0 :b 7
-  :n #xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
-  :gx #x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
-  :gy #x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8
-  :reduction reduce-field :multiply field-multiply
-  :addition field-add :subtraction field-subtract :scaling field-scale)
-
-(defun encode-public (x y)
-  (when x (octets-concat (integer->octets x 32) (integer->octets y 32))))
-
 (defun private->public (private-key)
-  "Uncompressed public key x||y (64 octets), or NIL for an invalid private scalar."
-  (when (typep private-key `(integer 1 ,(1- +secp256k1-n+)))
-    (multiple-value-bind (x y) (secp-fast-mul private-key) (encode-public x y))))
+  "Uncompressed public key x||y, or NIL for an invalid private scalar."
+  (when (and (integerp private-key) (< 0 private-key +secp256k1-n+))
+    (let* ((context (or *recovery-scratch* (make-recovery-scratch)))
+           (arena (recovery-scratch-words context)))
+      (sf-from-integer! arena 0 +sn-generator-x+)
+      (sf-from-integer! arena 4 +sn-generator-y+)
+      (sf-from-integer! arena 24 private-key) (sf-zero! arena 28)
+      (when (native-joint-affine! arena (recovery-scratch-digits context))
+        (write-native-public! (clempo.base:make-octets 64) arena)))))
 
 (defun pubkey->address (public-key)
   "Low 160 bits of Keccak256(x||y), as an integer."
   (check-type public-key octets)
   (assert (= (length public-key) 64))
-  (ldb (byte 160 0) (octets->integer (clempo.keccak:keccak256 public-key))))
+  (let ((digest (if *recovery-scratch* (recovery-scratch-digest *recovery-scratch*)
+                    (clempo.base:make-octets 32))))
+    (clempo.keccak:keccak256-into public-key 0 64 digest 0)
+    (digest-address digest)))
 
-(defun ecrecover (hash32 r s recid)
-  "Recover x||y or NIL. Accepts high s, as Ethereum's 0x01 precompile does.
-RECID is 0..3 (0/1 for Ethereum), NOT the precompile v byte 27/28."
-  (unless (and (typep hash32 'octets) (= (length hash32) 32)
-               (typep r `(integer 1 ,(1- +secp256k1-n+)))
-               (typep s `(integer 1 ,(1- +secp256k1-n+)))
-               (typep recid '(integer 0 3)))
-    (return-from ecrecover nil))
-  (let ((rx (+ r (* (ash recid -1) +secp256k1-n+))))
-    (when (>= rx +secp256k1-p+) (return-from ecrecover nil))
-    (let* ((yy (secp-f (+ (* rx rx rx) 7)))
-           (ry (field-square-root yy)))
-      (unless (= (secp-f* ry ry) yy) (return-from ecrecover nil))
-      (unless (= (logand ry 1) (logand recid 1)) (setf ry (secp-f- 0 ry)))
-      ;; The curve has prime order n (cofactor 1), so every non-infinity R is in G.
-      (let* ((ri (clempo.ec:invert r +secp256k1-n+))
-             (u (mod (* (- (octets->integer hash32)) ri) +secp256k1-n+))
-             (v (mod (* s ri) +secp256k1-n+)))
-        (multiple-value-bind (x y) (secp-fast-joint u v rx ry)
-          (encode-public x y))))))
+(defun ecrecover (hash32 r s recid &optional output (scratch *recovery-scratch*))
+  "Recover x||y or NIL; high s is accepted. RECID is 0..3, not v=27/28.
+OUTPUT, if non-NIL, must be a caller-owned 64-octet vector. With caller SCRATCH
+and OUTPUT the complete call allocates nothing. Defaults return fresh results."
+  (unless (valid-recovery-input-p hash32 r s recid) (return-from ecrecover nil))
+  (check-type output (or null octets))
+  (when output (assert (= (length output) 64)))
+  (check-type scratch (or null recovery-scratch))
+  (let* ((context (or scratch (make-recovery-scratch)))
+         (arena (recovery-scratch-words context)))
+    (when (recover-native! hash32 r s recid arena (recovery-scratch-digits context))
+      (write-native-public! (or output (clempo.base:make-octets 64)) arena))))
+
+(defun ecrecover-address (hash32 r s recid &optional (scratch *recovery-scratch*))
+  "Recover the integer address, or NIL. With SCRATCH only the result allocates.
+SCRATCH is private mutable workspace and must not be used concurrently."
+  (unless (valid-recovery-input-p hash32 r s recid) (return-from ecrecover-address nil))
+  (check-type scratch (or null recovery-scratch))
+  (let* ((context (or scratch (make-recovery-scratch)))
+         (arena (recovery-scratch-words context))
+         (public (recovery-scratch-public context)) (digest (recovery-scratch-digest context)))
+    (when (recover-native! hash32 r s recid arena (recovery-scratch-digits context))
+      (write-native-public! public arena)
+      (clempo.keccak:keccak256-into public 0 64 digest 0)
+      (digest-address digest))))
 
 (defun ecdh (private-key peer-public-key)
-  "ECDH raw shared x (32 octets), NOT the libsecp hashed ECDH convention.
-Returns NIL for an invalid private scalar or non-curve peer x||y."
-  (unless (and (typep private-key `(integer 1 ,(1- +secp256k1-n+)))
+  "Raw shared x (32 octets), or NIL for invalid private scalar or peer point."
+  (unless (and (integerp private-key) (< 0 private-key +secp256k1-n+)
                (typep peer-public-key 'octets) (= (length peer-public-key) 64))
     (return-from ecdh nil))
-  (let ((x (octets->integer peer-public-key :end 32))
-        (y (octets->integer peer-public-key :start 32)))
-    (when (secp-point-p x y)
-      (let ((shared (secp-fast-mul private-key (secp-table x y) 5)))
-        (when shared (integer->octets shared 32))))))
+  (let* ((context (or *recovery-scratch* (make-recovery-scratch)))
+         (arena (recovery-scratch-words context)))
+    (sw-read32! arena 0 peer-public-key 0) (sw-read32! arena 4 peer-public-key 32)
+    (when (or (sw-ge-p arena 0 *sf-prime* 0) (sw-ge-p arena 4 *sf-prime* 0))
+      (return-from ecdh nil))
+    (sf-square! arena 32 arena 0) (sf-mul! arena 32 arena 32 arena 0)
+    (sf-add! arena 32 arena 32 *sf-seven* 0) (sf-square! arena 36 arena 4)
+    (unless (sf-equal-p arena 32 arena 36) (return-from ecdh nil))
+    (sf-zero! arena 24) (sf-from-integer! arena 28 private-key)
+    (when (native-joint-affine! arena (recovery-scratch-digits context))
+      (let ((out (clempo.base:make-octets 32))) (sw-write32! out 0 arena 0) out))))
 
 (defun sign (hash32 private-key)
   "RFC6979/HMAC-SHA256 deterministic ECDSA. Returns r,s,recid, low-s.
-This bignum implementation is variable-time; do not expose it to a hostile
-co-resident timing observer when using a long-lived secret key."
+This implementation is variable-time; do not expose a long-lived secret key
+to a hostile co-resident timing observer."
   (check-type hash32 octets)
   (assert (= (length hash32) 32))
   (assert (typep private-key `(integer 1 ,(1- +secp256k1-n+))))
@@ -78,7 +84,7 @@ co-resident timing observer when using a long-lived secret key."
         (setf v (mac k v))
         (let ((nonce (octets->integer v)))
           (when (< 0 nonce +secp256k1-n+)
-            (multiple-value-bind (x y) (secp-fast-mul nonce)
+            (multiple-value-bind (x y) (native-generator-mul nonce)
               (let* ((r (mod x +secp256k1-n+))
                      (s (mod (* (clempo.ec:invert nonce +secp256k1-n+)
                                 (+ h (* r private-key))) +secp256k1-n+))

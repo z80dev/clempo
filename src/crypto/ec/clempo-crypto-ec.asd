@@ -5,10 +5,13 @@
   :serial t
   :components ((:file "modexp")
                (:file "prime-curve")
-               (:file "secp256k1-field")
+               (:file "secp256k1-native-field")
+               (:file "secp256k1-native-scalar")
+               (:file "secp256k1-native-group")
+               (:file "secp256k1-native-recovery")
                (:file "secp256k1")
-               (:file "secp256k1-glv")
                (:file "p256-field")
+               (:file "p256-native")
                (:file "p256")
                (:file "p384")
                (:file "bn254")
@@ -25,8 +28,11 @@
   :depends-on ("clempo-crypto-ec" "clempo-codec")
   :serial t
   :pathname "../../../tests/crypto/ec/"
-  :components ((:file "prime-curves")
+  :components ((:file "secp256k1/native-group-tests")
+               (:file "prime-curves")
+               (:file "secp256k1/native-tests")
                (:file "p256-field")
+               (:file "p256/native-tests")
                (:file "p384/p384-tests")
                (:file "bn254/bn254-tests")
                (:file "bls12-381/field-tests")
