@@ -11,7 +11,7 @@ clempo.history view of an older block, both read through the clempo.state backen
 A state it does not keep is answered with an internal error naming the block, never a guess.")
   (:export #:*eth-proof-window* #:block-id-number #:block-id-text #:header-not-found
            #:state-at #:state-block #:state-unavailable #:ensure-within-proof-window
-           #:storage-key #:storage-key-value #:landed-function))
+           #:replay-coverage #:storage-key #:storage-key-value #:landed-function))
 
 (in-package #:clempo.rpc.state)
 
@@ -82,6 +82,12 @@ above the head are returned as they are."
     (when (eql (chain:backend-chain-id chain:*backend*)
                (clempo.chainspec:chain-id (clempo.chainspec:load-chainspec chain)))
       chain)))
+
+(defun replay-coverage ()
+  "The last block whose state the current backend can rebuild from genesis (STATE-AT's
+fallback for 0 up to it), or NIL when it cannot rebuild any."
+  (when (and (replay-chain) (chain:backend-block-raw chain:*backend* 0))
+    (min *replay-history-limit* chain:*head*)))
 
 (defun rebuild-state (n chain)
   "A fresh state database after block N of CHAIN: genesis, then blocks 1..N from the backend."

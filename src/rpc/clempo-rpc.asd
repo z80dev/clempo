@@ -29,7 +29,8 @@
                (:file "bal")
                (:file "filter")
                (:file "fill")
-               (:file "pool")))
+               (:file "pool")
+               (:file "capabilities")))
 
 (defsystem "clempo-rpc/tests"
   :depends-on ("clempo-rpc")

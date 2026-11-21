@@ -35,3 +35,48 @@ first one's write.")
                                         a g a g g a g context a *switch-code*))
                         "result"))
             "context ~A" context)))))
+
+;;; eth_capabilities over backends that keep different things
+
+(defclass head-state-backend (chain:archive-backend) ((db :initarg :db))
+  (:documentation "A node's shape: the head's state database and no history."))
+
+(defmethod chain:backend-state ((b head-state-backend) number)
+  (when (= number (chain:backend-head b)) (slot-value b 'db)))
+
+(defun capabilities (backend)
+  (json:jget (answer backend "eth_capabilities" "[]") "result"))
+
+(defun head-json (backend n)
+  (json:jobject "number" (quantity->hex n)
+                "hash" (octets->hex (chain:block-hash-of-raw (chain:backend-block-raw backend n)))))
+
+(defun from (n) (json:jobject "disabled" :false "oldestBlock" (quantity->hex n)))
+(defun window (n w)
+  (json:jobject "disabled" :false "oldestBlock" (quantity->hex n)
+                "deleteStrategy" (json:jobject "type" "window" "retentionBlocks" (quantity->hex w))))
+(defun off () (json:jobject "disabled" :true))
+
+(defun capabilities-json (head state receipts blocks proofs)
+  (json:jobject "head" head "state" state "tx" blocks "logs" receipts "receipts" receipts
+                "blocks" blocks "stateproofs" proofs))
+
+(deftest capabilities-follow-retention ()
+  (archive-backend 0)
+  ;; blocks from genesis; states rebuilt from genesis near it; no tries, no upstream receipts
+  (let ((b (chain:make-archive-backend :head 20 :history nil)))
+    (is (json:json-equal (capabilities-json (head-json b 20) (from 0) (off) (from 0) (off))
+                         (capabilities b))))
+  ;; an upstream fills receipts for every block
+  (let ((b (chain:make-archive-backend :head 20 :history nil :upstream "http://127.0.0.1:1/")))
+    (is (json:json-equal (capabilities-json (head-json b 20) (from 0) (from 0) (from 0) (off))
+                         (capabilities b))))
+  ;; beyond the rebuildable blocks, no history: no state at all
+  (let ((b (chain:make-archive-backend :head 2000 :history nil)))
+    (is (json:json-equal (capabilities-json (head-json b 2000) (off) (off) (from 0) (off))
+                         (capabilities b))))
+  ;; the head's state database only: a window of 0 blocks, provable at the head
+  (let ((b (chain:make-archive-backend :class 'head-state-backend :head 2000 :history nil
+                                       :db (clempo.executor:genesis-db))))
+    (is (json:json-equal (capabilities-json (head-json b 2000) (window 2000 0) (off) (from 0) (window 2000 0))
+                         (capabilities b)))))
