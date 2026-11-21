@@ -142,6 +142,31 @@ reported **49.37 s wall**, **20.08 s CPU**, **1.65 GB peak RSS**,
 651.01 Mgas/s). The full staged Busy import requires a roughly 40M-block
 unwind of the detached archive to provision its exact parent.
 
+EVM bytecode compiled to native code (R7 evidence; SBCL 2.6.8 release, Apple
+Silicon). `src/evm/compile.lisp` turns a contract into Lisp (blocks as TAGBODY
+tags, a symbolic stack in lexical variables, the DEFOP bodies themselves, static
+gas charged once per segment, interpreter resume on short gas or broken stack
+bounds) and `compile`s it; `compile-cache.lisp` shares the functions by (code
+hash, fork). Differential: `bin/clempo-dev statetest -jit` (every code compiled at
+its first call) passes **61,903/61,903** (50,909 compilations, 0 failures,
+602 s); `jit-latency` compiles all 9,480 distinct fixture codes without a
+warning. `evm-bench -n 10000000`, median of three, interpreter (`-interp`) ->
+compiled (`-jit`), Mgas/s:
+
+| Workload | Interpreter | Compiled | |
+|---|---:|---:|---:|
+| arith (small-word MUL/ADD/DIV) | 1,511 | 11,573 | 7.7x |
+| bignum (256-bit MUL/MULMOD) | 454 | 1,639 | 3.6x |
+| memory (MSTORE/MLOAD/KECCAK256) | 250 | 276 | 1.1x |
+| storage (SSTORE/SLOAD) | 1,321 | 1,450 | 1.1x |
+
+Compile latency (Osaka, all fixture codes): 2.9 ms mean under 64 bytes, 5 ms
+to 256, 13 ms to 1 KiB, 102 ms to 4 KiB, 1.2 s to 16 KiB, 8.8 s above
+(75-190 us/byte). The default policy compiles a code once it has spent 100,000
+gas per byte interpreted; with it the state tests take 12.9 s against 12.8 s
+interpreted (23 codes compiled) and evm-bench is unchanged (its loops are one
+frame, which does not turn hot while it runs).
+
 Keccak-256 (SBCL 2.6.8 release, Apple Silicon): the ARM SHA3 permutation and
 copy-free 32/64-byte paths reduced 64-byte hashes from **626 ns to 178 ns**
 (1 million calls, about 3.5× faster) and 480 to 272 bytes consed per hash.
