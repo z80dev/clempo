@@ -78,13 +78,19 @@ from T4."
                  (eql (tx:transaction-chain-id tx) (block-env-chain-id env)))
       (fail-tx 'invalid-transaction index "system transaction fields must be zero"))))
 
+(define-constant +system-call-gas-limit+ 250000000 "SYSTEM_CALL_GAS_LIMIT")
+
 (defun execute-system-transaction (env tx index)
   "config.rs execute_legacy, System: a system call from the zero address to the zero address
 with SYSTEM_CALL_GAS_LIMIT; its receipt reports success and no gas. The zero address carries
-no code on Tempo chains, so the call runs no instruction and changes no state."
+no code on Tempo chains, so the call runs no instruction and changes no state; a tracer sees
+one empty CALL frame."
   (validate-system-transaction env tx index)
   (when (plusp (state:code-size evm:*world* 0))
     (fail-tx 'unsupported-transaction index "system call into code at the zero address"))
+  (when evm:*tracer*
+    (evm::trace-unstarted :call 0 0 0 0 (tx:transaction-input tx) state:+empty-code+
+                          +system-call-gas-limit+ 0 :stop +system-call-gas-limit+))
   (make-tx-outcome t 0 0 '()))
 
 ;;; Pre- and post-execution system changes

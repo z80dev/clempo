@@ -13,7 +13,6 @@
 (define-constant +storage-credits-address+ #x1060000000000000000000000000000000000000)
 (define-constant +fee-manager-address+ #xfeec000000000000000000000000000000000000)
 (define-constant +stablecoin-dex-address+ #xdec0000000000000000000000000000000000000)
-(define-constant +system-call-gas-limit+ 250000000)
 (define-constant +max-u64+ (1- (ash 1 64)))
 
 (defstruct (block-context (:conc-name ctx-))
