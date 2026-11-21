@@ -1,44 +1,73 @@
 # Following Tempo mainnet
 
-Use a **verified** `clempo-dev replay -datadir DIR` checkpoint. Stop the replay
-process before opening its datadir in the node. The node rechecks the loaded
-checkpoint and log, rejects recorded heals or skips, and compares the stored
-head hash and state root against the configured upstream before serving.
+An empty `--datadir` starts at genesis (`--chain mainnet` by default; use
+`--chain moderato` for testnet). To start near the tip instead, pass a stopped,
+unhealed `clempo-dev replay -datadir DIR` checkpoint. The node checks the
+loaded checkpoint and log, rejects recorded heals or skips, and compares the
+head hash and state root with the configured upstream before serving.
 
 ```sh
-CLEMPO_RPC=http://127.0.0.1:8545 bin/clempo \
-  --datadir "$HOME/cache/clempo/state" --rpc-port 18545 --certify
+bin/clempo --upstream http://127.0.0.1:8545 \
+  --datadir "$STATE" --rpc-port 18545
 ```
 
-The node reads the local raw chunk archive before fetching missing blocks by
-RPC. It checks each batch against the canonical upstream, verifies finalization
-when `--certify` is enabled, and publishes a block to JSON-RPC only after its
-execution outputs match and the state is committed. The RPC listener binds to
-loopback by default. `--cert-rpc` can select a different certificate-enabled
-endpoint (default: `https://rpc.tempo.xyz`); the private raw-block RPC might not
-serve the `consensus` namespace. For certified startup, use a checkpoint within
-the certificate provider's retention window. A missing newest certificate
-pauses progress; a bad certificate or state root stops the node.
+The follower uses the local raw-block archive and fetches missing blocks.
+It checks canonical header commitments and compares gas, receipts root, bloom
+and state root before publishing a block to JSON-RPC. RPC binds to loopback by
+default. Certification is enabled unless `--no-certify` is passed; `--cert-rpc`
+selects a certificate endpoint independently of `--upstream` (default: the
+public Tempo endpoint for the selected chain).
+
+The starting epoch is authenticated using locally executed boundary blocks or
+a boundary certificate verified against the published network identity. Below
+`--certify-from`, blocks are checked by parent linkage and execution only.
+Defaults are mainnet 41,166,893 and Moderato 36,627,280, the earliest heights
+probed with certificates on the public endpoints. An anchor above the
+threshold that predates the published identity fails closed. An invalid or
+missing certificate cannot advance the head. Transport and certificate
+failures are retried with capped backoff (bounded attempts for `--once` or
+`--seconds`); execution failures stop the follower.
 
 Use `--source devp2p` to fetch missing raw blocks over authenticated public
 ETH connections instead of raw-block RPC. `--peers FILE` tries explicit
 enodes (one per line, blank/comment lines ignored) before the official
 bootnodes, without UDP discovery. Without the file, the source uses public
 discovery. `--upstream` still supplies the canonical header commitments, and
-`--certify` still checks finalization; peer status alone proves neither.
+certification still verifies finalization; peer status alone proves neither.
 For a header/body-only probe, run
 `bin/clempo-dev follow -source devp2p -peers FILE -last 10 -once -no-archive`.
 
 `--once` exits at the initial target, and `--seconds N` exits after N seconds
 of live following, starting when the initial target is reached. Both print a
-JSON run summary. Without either, the node runs until interrupted. Build a
-standalone SBCL executable with `scripts/build-node.sh` (default output:
-`build/clempo`). `CLEMPO_HEAP` sets the heap size in MiB for the build or source
-launcher.
+JSON run summary. Without either, the node runs until SIGINT or SIGTERM,
+stops its services in order, then flushes history and closes the store.
+Build a standalone executable with `scripts/build-node.sh` (default output
+`build/clempo`). `CLEMPO_HEAP` sets the heap size in MiB.
 
 Large dirty trie roots hash independent subtrees on four workers by default.
 Use `--root-workers 1` to select serial hashing. Small updates use the serial
 path with cached hashes, regardless of worker count.
+
+## Caches and services
+
+The hash index, receipts, historical state and finalizations default to
+subdirectories of the datadir. Override them with `--index-dir`,
+`--receipts-dir`, `--history-dir` and `--finalization-dir`. The raw-block
+archive remains separate (`--archive`). Receipts are persisted as blocks
+execute. Block- or transaction-hash queries outside the most recent 256
+blocks use the hash index built by `clempo-dev index`.
+
+`eth_sendRawTransaction` validates a transaction against an overlay of the
+committed head, queues valid transactions and forwards them asynchronously
+to the upstream. A refusal drops it locally; new heads revalidate the pool.
+`--no-forward` keeps valid submissions local. `txpool_*`,
+`eth_pendingTransactions` and `admin_clearTxpool` operate on this pool.
+
+`clempo_status` reports follower progress and pool state. Set
+`--metrics-address HOST:PORT` for Prometheus-format metrics and
+`--p2p-listen HOST:PORT` to serve local blocks and receipts to devp2p peers.
+The P2P identity is stored in `<datadir>/p2p.key`. Validator key operations
+are listed by `clempo keys --help`.
 
 ## Local Lisp REPL
 
@@ -47,13 +76,14 @@ when launching the node:
 
 ```sh
 (umask 077; openssl rand -hex 32 > "$HOME/.clempo-repl-token")
-bin/clempo --datadir "$HOME/cache/clempo/state" --rpc-port 18545 --certify \
+bin/clempo --datadir "$STATE" --rpc-port 18545 \
   --repl-port 4005 --repl-token-file "$HOME/.clempo-repl-token"
 ```
 
 Connect with `nc 127.0.0.1 4005`, send the token on its own line, then enter
-Common Lisp forms. For example, `(+ 20 22)` prints `42`. A single developer
-connection is served at a time; EOF closes it. To inspect the committed head:
+Common Lisp forms. For example, `(+ 20 22)` prints `42`. The loopback REPL
+allows up to eight concurrent sessions, with a 5 s authentication timeout
+and a 60 s idle timeout. EOF closes a session. To inspect the committed head:
 
 ```lisp
 (let ((b clempo.node:*node-backend*))

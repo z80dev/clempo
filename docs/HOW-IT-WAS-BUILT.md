@@ -1,6 +1,6 @@
 # How clempo was built
 
-clempo is a Tempo node written in Common Lisp on SBCL. A lead agent and a swarm of agents wrote it on 2026-11-20/21, the way goempo (Go) and zempo (Zig) were built before it: one ladder of measured rungs ([GOAL.md](../GOAL.md)), one loop ([LOOP.md](../LOOP.md)), one gate (`scripts/verify.sh`), and every claim checked against the Rust reference node. Times below are US Eastern (-0500), from the commit log.
+clempo is a Tempo node written in Common Lisp on SBCL. Agents built the initial implementation on 2026-11-20/21 with one ladder ([GOAL.md](../GOAL.md)), one development loop ([LOOP.md](../LOOP.md)) and one gate (`scripts/verify.sh`). Measurements and their scope are recorded in [FRONTIER.md](../FRONTIER.md). Times below are US Eastern (-0500), from the commit log.
 
 ## Timeline
 
@@ -29,28 +29,22 @@ clempo is a Tempo node written in Common Lisp on SBCL. A lead agent and a swarm 
 
 One agent per directory, each in its own clone of a local bare origin, pushing small verified slices; the lead owned the scaffold, `layers.sexp`, the integration fixes and `FRONTIER.md`'s table.
 
-| Agent | Built |
+| Workstream | Built |
 |---|---|
-| HashAgent | SHA-2 (arm64 SHA-256 `define-vop`), RIPEMD-160, BLAKE2f, BLAKE3, AES, ChaCha20-Poly1305, X25519, Ed25519; Keccak-f on arm64 SHA3 instructions; R7 harness and Rust baselines |
-| CurvesAgent | secp256k1, P-256, P-384, BN254, BLS12-381 (EIP-2537, RFC 9380, commonware BLS), KZG, modexp; then zero-allocation limb arithmetic |
-| TypesAgent | `defrlp`, every Tempo transaction and signature kind, receipts, blocks, R1; transaction pool and payload builder |
-| TrieAgent | Merkle Patricia trie, chainspec and genesis (R2), the follower, certified node binary, socket REPL, parallel hashing, R3 heal survey, the R4 hour |
-| EvmAgent | journaled state, the `defop` interpreter (Istanbul..Osaka), Ethereum precompiles, tracers (R3e) |
-| PrecompilesAgent | `defcontract`/`defcall`/`fork-if`, ABI, every Tempo precompile through eight family subagents, `spec/` generation (R3p) |
-| ExecutorAgent | the Tempo block executor, the in-RAM state store with checkpoints, replay with restarts (R3) |
-| ConsensusAgent | commonware codec, finalization certificates, DKG, Simplex, the seeded simulator (R4 certificates, R6 sim) |
-| P2PAgent | Snappy, RLPx, eth/68–69, discv4/v5, commonware stream and p2p, the validator and the Rust devnet (R6), moderato dry run |
-| RpcAgent, RpcExecAgent, RpcClimber, RpcFinisher, RpcLast | the JSON-RPC server, the corpus, `rpcdiff`, calls, traces, block access lists (R5) |
-| HistoryAgent | historical state (per-key versions) and the side-effect-free call API |
-| JitAgent | the EVM-bytecode-to-Lisp compiler |
-| ExecSpeedAgent, BenchAgent | R7 profiling and paired benchmarks |
+| Hash functions and symmetric crypto | SHA-2, RIPEMD-160, BLAKE2f, BLAKE3, AES, ChaCha20-Poly1305, X25519 and Ed25519; ARM64 SHA-256 and Keccak instructions |
+| Curves | secp256k1, P-256, P-384, BN254, BLS12-381, KZG and modexp; typed limb kernels |
+| Types | `defrlp`, transaction envelopes and signatures, receipts, blocks, pool and payload builder |
+| State and replay | Merkle Patricia trie, genesis, persistence, historical state and replay with restarts |
+| Execution | journaled state, EVM interpreter and compiler, traces, and Tempo precompiles |
+| Consensus and networking | commonware codec and transport, finalization, DKG, Simplex, simulation, devp2p, following and validation |
+| RPC and tools | JSON-RPC and WebSocket, corpus comparison, spec generation, benchmarks and profiling |
 
 ## Where Lisp changed the work
 
-- **One form, many outputs.** `defop`, `defrlp`, `defcodec`, `defcontract`/`defcall`, `defrpc`, `defprecompile` and `defscenario` each generate code, tests' expectations and documentation from one declaration. `spec/` (slot layouts, ABIs, every fork-gated site per fork) is generated from the forms and the gate fails when it drifts.
+- **One form, many outputs.** `defop`, `defrlp`, `defcodec`, `defcontract`/`defcall`, `defrpc`, `defprecompile` and `defscenario` generate code or metadata from declarations. `spec/` contains generated storage layouts, ABIs and indexed fork sites; the gate detects drift.
 - **Restartable replay.** A mismatching block signals `block-mismatch` with `retry-block`, `heal-from-reference`, `skip-block` and `abort-replay`; the heal survey used `heal-from-reference` to run ahead of the clean replay and classify every divergence class before the replay reached it.
 - **Native code from forms.** Keccak and SHA-256 use arm64 crypto instructions through `define-vop`; BLS12-381 and secp256k1 run on typed limb arithmetic with zero allocation; hot EVM contracts are translated to Lisp and compiled at run time.
-- **Special variables as context.** RPC threads, the simulator, tests and the executor rebind `*world*`, `*spec*`, `*storage*`, `*tracer*`, `*clock*` and `*entropy*`. The two thread-safety bugs found (a global `SETF` of a special, lazily filled shared tables) came from breaking that discipline.
+- **Special variables as context.** RPC threads, the simulator, tests and the executor rebind `*world*`, `*spec*`, `*storage*`, `*tracer*`, `*clock*` and `*entropy*`. Thread bindings keep concurrent execution contexts separate.
 
 ## What mainnet caught
 

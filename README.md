@@ -104,6 +104,7 @@ base io crypto net codec trie types store state evm tempo consensus p2p sync rpc
 
 | Layer | Contents |
 |---|---|
+| `io`, `net` | deterministic clock/entropy interfaces, native I/O, TLS 1.3 and HTTP |
 | `crypto` | Keccak, SHA-2, RIPEMD-160, BLAKE2f/BLAKE3, AES, ChaCha20-Poly1305, X25519, Ed25519, secp256k1, P-256, P-384, BN254, BLS12-381, KZG, modexp |
 | `codec`, `types` | RLP, JSON, ABI, commonware codec; headers, every Tempo transaction and signature kind, receipts |
 | `trie`, `store`, `state` | Merkle Patricia trie and proofs, persistent checkpoints and history with in-memory working state, journaled world state |
@@ -115,9 +116,9 @@ base io crypto net codec trie types store state evm tempo consensus p2p sync rpc
 ## Limitations
 
 - **RPC coverage is not protocol equivalence.** The recorded corpus distinguishes values, errors, and live or node-local responses. The [frontier](FRONTIER.md#evidence) records the scope; behavior differences are listed in [docs/DEVIATIONS.md](docs/DEVIATIONS.md).
-- **Execution and validator scope.** Replay and live-hour evidence are for the recorded mainnet ranges; mixed-validator evidence is for local devnets, not mainnet signing. See [docs/DEVNET.md](docs/DEVNET.md).
+- **Execution and validator scope.** Replay and live-hour evidence are for the recorded mainnet ranges; mixed-validator evidence is for devnets, not mainnet signing. See [the T14/T15 coverage notes](docs/DEVIATIONS.md) and [docs/DEVNET.md](docs/DEVNET.md).
 - **Constant time.** Secret-key operations (signing, ECDH) are not hardened against timing or cache side channels.
-- **Not for production use.** Treat clempo as an independent implementation for testing and research. It has not been audited, and it has never run as a mainnet validator.
+- **Not for production use.** Treat clempo as an independent implementation for testing and research. It has not run as a mainnet validator.
 - **Linux coverage is limited.** The full mainnet replay, live following, mixed-validator devnet, and Rust speed comparisons were run on Apple Silicon, not on Linux.
 
 ## How it was built
