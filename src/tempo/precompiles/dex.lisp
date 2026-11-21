@@ -308,19 +308,17 @@ its index unless BOOK-KEY is known."
               :tick tick :amount amount :remaining remaining :prev prev :next next
               :is-flip (logbitp 1 metadata) :flip-tick flip-tick))
 
-(defun write-order (order &optional (book-id nil book-id-p))
-  "OrderHandler::write / write_in_book: before T8 the legacy record; from T8 a V2 record when
-the book has an index (BOOK-ID, 1-based, when known; else looked up) and V1 otherwise,
-clearing slots the old record used beyond the new one."
-  (let* ((id (order-order-id order))
-         (base (record-base id)))
+(defun write-order (id order book-id)
+  "OrderHandler::write_in_book for the record of ID: before T8 the legacy record; from T8 a
+V2 record when the book has an index (BOOK-ID is 1-based, zero when unset) and V1 otherwise,
+clearing slots the old record used beyond the new one. The handler's ID, not ORDER's, places
+the record (they differ for a legacy record read where none was stored)."
+  (let ((base (record-base id)))
     (fork-if (:before :t8)
         (write (place +dex+ base 'order) order)
         (multiple-value-bind (old-version slot0) (record-version-and-slot0 id)
           (let* ((old-slots (order-slots old-version))
-                 (index (if book-id-p
-                            (and (plusp book-id) (1- book-id))
-                            (book-key-index (order-book-key order))))
+                 (index (and (plusp book-id) (1- book-id)))
                  (new-slots
                    (if index
                        (progn
@@ -510,7 +508,7 @@ one of the DEX's own credits from the slots just granted."
 (defun rewrite-order (order book-id)
   "Rewrite ORDER's record; returns the DEX credits minted."
   (nth-value 1 (funcall 'clempo.storage-credits:track-minted-credits
-                +dex+ (lambda () (write-order order book-id)))))
+                +dex+ (lambda () (write-order (order-order-id order) order book-id)))))
 
 (defun unlink-neighbor-and-credit-maker (order-id update)
   (let ((credits (nth-value 1 (funcall 'clempo.storage-credits:track-minted-credits +dex+ update))))
@@ -523,11 +521,13 @@ one of the DEX's own credits from the slots just granted."
          (p (dex-storage-credits +dex+ user))
          (credits (read p)))
     (if (zerop credits)
-        (write-order order book-id)
+        (write-order (order-order-id order) order book-id)
         (progn
           (delete p)
           (let* ((delta (nth-value 1 (funcall 'clempo.storage-credits:with-budget
-                                         +dex+ credits (lambda () (write-order order book-id)))))
+                                         +dex+ credits
+                                         (lambda ()
+                                           (write-order (order-order-id order) order book-id)))))
                  (spent (if (minusp delta) (- delta) 0)))
             (credit-dex-storage-slots user (max 0 (- credits spent))))))))
 
@@ -647,7 +647,7 @@ record (spending maker credits for placements from T7; crediting rewrites from T
               (write (record-field prev-tail :next) (order-order-id order))
               (let ((prev-order (read-order prev-tail book-key)))
                 (setf (order-next prev-order) (order-order-id order))
-                (write-order prev-order book-id)))
+                (write-order prev-tail prev-order book-id)))
           (setf (order-prev order) prev-tail
                 (tick-level-tail level) (order-order-id order))))
     (fork-if (:before :t12)
@@ -658,7 +658,7 @@ record (spending maker credits for placements from T7; crediting rewrites from T
            (write-order-spending-credits order book-id))
           ((and (not charge-credits) (fork-if (:since :t8 :doc "flip rewrites credit freed slots") t nil))
            (credit-dex-storage-slots (order-maker order) (rewrite-order order book-id)))
-          (t (write-order order book-id)))))
+          (t (write-order (order-order-id order) order book-id)))))
 
 (defun place-order (sender token amount bid-p tick)
   (funcall 'clempo.tip20:from-address token)

@@ -89,10 +89,10 @@
       (let ((order (clempo.dex::make-order :order-id 9 :maker #xabc :book-key #x1234 :is-bid t
                                            :tick -30 :amount 200000000 :remaining 150000000
                                            :prev 3 :next 0 :is-flip t :flip-tick 10)))
-        (clempo.dex::write-order order 0)
+        (clempo.dex::write-order 9 order 0)
         (is= 1 (clempo.dex::record-version 9))
         (is= (clempo.dex::order-tuple order) (clempo.dex::order-tuple (clempo.dex::read-order 9)))
-        (clempo.dex::write-order order 5)
+        (clempo.dex::write-order 9 order 5)
         (is= 2 (clempo.dex::record-version 9))
         (is= 0 (sload +stablecoin-dex-address+ (+ 3 (clempo.dex::record-base 9)))
              "the V1 book-key slot is cleared")
