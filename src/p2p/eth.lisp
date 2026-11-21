@@ -1,9 +1,11 @@
 (defpackage #:clempo.eth
   (:use #:cl #:clempo.base)
-  (:local-nicknames (#:rlp #:clempo.rlp) (#:rlpx #:clempo.rlpx) (#:spec #:clempo.chainspec))
+  (:local-nicknames (#:rlp #:clempo.rlp) (#:rlpx #:clempo.rlpx) (#:spec #:clempo.chainspec)
+                    (#:sock #:sb-bsd-sockets) (#:thr #:sb-thread))
   (:import-from #:clempo.p2p-wire #:protocol-error #:connect-tcp)
   (:export #:make-eth-chain #:tempo-eth-chain #:fork-id
            #:eth-dial #:eth-handshake #:eth-close #:eth-version #:eth-peer-status
+           #:call-with-eth-listener
            #:get-block-headers #:get-block-bodies #:get-receipts #:download-blocks
            #:encode-message #:decode-message
            #:rlp-view #:rlp-view-data #:rlp-view-start #:rlp-view-end #:rlp-view-octets
@@ -11,6 +13,11 @@
            #:block-matches-p))
 
 (in-package #:clempo.eth)
+
+(defconstant +serve-items-max+ 1024)
+(defconstant +serve-bytes-soft-max+ (* 2 1024 1024))
+;; Leave room for framing and Snappy overhead below RLPx's 24-bit frame limit.
+(defconstant +serve-bytes-hard-max+ (* 13 1024 1024))
 
 (defstruct (rlp-view (:constructor make-view (data start end)))
   "Read-only reference to an encoded item in a retained packet."
@@ -79,7 +86,10 @@
              ((eq (first schema) :bytes) (bytes (second schema)))
              ((eq (first schema) :vector)
               (unless list-p (protocol-error "expected RLP vector"))
-              (loop while (< start stop) collect (item (second schema))))
+              (let ((limit (third schema)))
+                (loop for i from 0 while (< start stop)
+                      when (and limit (>= i limit)) do (protocol-error "too many RLP vector items")
+                      collect (item (second schema)))))
              (t (invariant (eq (first schema) :tuple))
                 (unless list-p (protocol-error "expected RLP message list"))
                 (prog1 (mapcar #'item (rest schema))
@@ -100,9 +110,9 @@
 (defmessage :status69 #x10 :u8 :u64 (:bytes 32) (:tuple (:bytes 4) :u64) :u64 :u64 (:bytes 32))
 (defmessage :get-block-headers #x13 :u64 (:tuple :origin :u64 :u32 :bool))
 (defmessage :block-headers #x14 :u64 (:vector :raw-list))
-(defmessage :get-block-bodies #x15 :u64 (:vector (:bytes 32)))
+(defmessage :get-block-bodies #x15 :u64 (:vector (:bytes 32) #.+serve-items-max+))
 (defmessage :block-bodies #x16 :u64 (:vector :raw-list))
-(defmessage :get-receipts #x1f :u64 (:vector (:bytes 32)))
+(defmessage :get-receipts #x1f :u64 (:vector (:bytes 32) #.+serve-items-max+))
 ;; Receipt envelopes are opaque, retaining the wire encoding (69 omits the bloom).
 (defmessage :receipts #x20 :u64 (:vector (:vector :raw)))
 (defmessage :block-range-update #x21 :u64 :u64 (:bytes 32))
@@ -178,8 +188,8 @@
           (loop for (time known next-known) in (eth-chain-schedule chain)
                 when (octets= known digest) return (if (< time local-time) (= next next-known) t))))))
 
-(defstruct (eth (:constructor %make-eth (rlpx version handler)))
-  rlpx version handler peer-status
+(defstruct (eth (:constructor %make-eth (rlpx version source)))
+  rlpx version source peer-status
   (counter 0 :type u64))
 
 (defun send (link name fields &key (compress-p t))
@@ -222,24 +232,107 @@
     (#x15 (values :get-block-bodies :block-bodies))
     (#x1f (values :get-receipts :receipts))))
 
-(defun next-message (peer)
+(defun block-body-bytes (raw header)
+  (let* ((start (rlp-view-end header))
+         (size (- (length raw) start))
+         (out (make-octets (+ size (rlp:header-length size)))))
+    (replace out raw :start1 (rlp:write-header out 0 size #xc0) :start2 start)))
+
+(defun receipt-on-wire (raw version)
+  ;; EIP-2718 typed envelopes are strings in eth/68. EIP-7642 uses a flat
+  ;; RLP list for every receipt in eth/69, regardless of transaction type.
+  (when (zerop (length raw)) (protocol-error "empty stored receipt"))
+  (let* ((typed (< (aref raw 0) #x80)) (start (if typed 1 0)))
+    (if (= version 68)
+        (if typed (rlp:rlp-encode raw) raw)
+        (multiple-value-bind (first end list-p) (rlp:rlp-item-bounds raw start (length raw))
+          (unless (and list-p (= end (length raw))) (protocol-error "invalid stored receipt"))
+          (let* ((status-end (nth-value 1 (rlp:rlp-item-bounds raw first end)))
+                 (gas-end (nth-value 1 (rlp:rlp-item-bounds raw status-end end)))
+                 (logs-start (nth-value 1 (rlp:rlp-item-bounds raw gas-end end)))
+                 (size (+ 1 (- gas-end first) (- end logs-start)))
+                 (out (make-octets (+ size (rlp:header-length size))))
+                 (pos (rlp:write-header out 0 size #xc0)))
+            (setf (aref out pos) (if typed (aref raw 0) #x80))
+            (replace out raw :start1 (1+ pos) :start2 first :end2 gas-end)
+            (replace out raw :start1 (+ 1 pos (- gas-end first)) :start2 logs-start))))))
+
+(defun block-receipts-on-wire (source height version)
+  (multiple-value-bind (raw known) (funcall source :receipts height)
+    (when known
+      (loop with size = 0 with items = nil
+            for receipt in raw
+            for wire = (receipt-on-wire receipt version)
+            do (incf size (length wire))
+               (when (> size +serve-bytes-hard-max+)
+                 (return-from block-receipts-on-wire (values nil nil)))
+               (push wire items)
+            finally (return (values (nreverse items) (+ size (rlp:header-length size))))))))
+
+(defun serve-query (source version request query)
+  (let ((items nil) (size 0))
+    (labels ((append-item (item bytes)
+               (when (> (+ size bytes) +serve-bytes-hard-max+)
+                 (return-from serve-query (nreverse items)))
+               (push item items)
+               (incf size bytes))
+             (hash-header (raw hash)
+               (let ((header (block-header-view raw)))
+                 (when (octets= hash (clempo.keccak:keccak256 raw :start (rlp-view-start header)
+                                                                  :end (rlp-view-end header)))
+                   header))))
+      (ecase request
+        (:get-block-headers
+         (destructuring-bind (origin count skip reverse) query
+           (loop repeat (min count +serve-items-max+)
+                 with hash = (when (typep origin 'octets) origin)
+                 for height = (if hash (funcall source :number hash) origin)
+                   then (+ height (if reverse (- (1+ skip)) (1+ skip)))
+                 while (and (typep height 'u64) (<= size +serve-bytes-soft-max+))
+                 do (let* ((raw (funcall source :block height))
+                           (header (when raw (if hash (hash-header raw hash) (block-header-view raw)))))
+                      (unless header (return))
+                      (append-item (rlp-view-octets header) (- (rlp-view-end header) (rlp-view-start header)))
+                      (setf hash nil)))))
+        ((:get-block-bodies :get-receipts)
+         (loop for hash in query repeat +serve-items-max+
+               while (<= size +serve-bytes-soft-max+)
+               do (let* ((height (funcall source :number hash))
+                         (raw (when height (funcall source :block height)))
+                         (header (when raw (hash-header raw hash))))
+                    (unless header (return))
+                    (if (eq request :get-block-bodies)
+                        (let* ((payload (- (length raw) (rlp-view-end header)))
+                               (bytes (+ payload (rlp:header-length payload))))
+                          (when (> (+ size bytes) +serve-bytes-hard-max+) (return))
+                          (append-item (block-body-bytes raw header) bytes))
+                        (multiple-value-bind (receipts bytes) (block-receipts-on-wire source height version)
+                          (unless bytes (return))
+                          (append-item receipts bytes))))))))
+    (nreverse items)))
+
+(defun service-message (peer code payload)
   (let ((link (eth-rlpx peer)))
-    (loop repeat 1024 do
-      (multiple-value-bind (code payload) (receive link)
-        (case code
-          (#x02 (decode-message :ping payload) (send link :pong nil))
-          (#x03 (decode-message :pong payload))
-          ((#x13 #x15 #x1f)
-           (multiple-value-bind (request response) (request-kind code)
-             (destructuring-bind (id value) (decode-message request payload)
-               (send link response
-                     (list id (when (eth-handler peer) (funcall (eth-handler peer) request value)))))))
-          (otherwise (return-from next-message (values code payload)))))))
+    (case code
+      (#x02 (decode-message :ping payload) (send link :pong nil) t)
+      (#x03 (decode-message :pong payload) t)
+      ((#x13 #x15 #x1f)
+       (multiple-value-bind (request response) (request-kind code)
+         (destructuring-bind (id query) (decode-message request payload)
+           (let ((source (eth-source peer)))
+             (send link response (list id (when source (serve-query source (eth-version peer) request query)))))))
+       t))))
+
+(defun next-message (peer)
+  (loop repeat 1024 do
+    (multiple-value-bind (code payload) (receive (eth-rlpx peer))
+      (unless (service-message peer code payload)
+        (return-from next-message (values code payload)))))
   (protocol-error "too many devp2p control messages before response"))
 
-(defun exchange-hello (link versions)
+(defun exchange-hello (link versions listen-port)
   (send link :hello (list 5 "clempo/0.1" (mapcar (lambda (v) (list "eth" v)) versions)
-                          0 (rlpx:rlpx-public-key link)) :compress-p nil)
+                          listen-port (rlpx:rlpx-public-key link)) :compress-p nil)
   (multiple-value-bind (code data start) (receive link :compressed-p nil)
     (unless (= code 0) (protocol-error "expected devp2p Hello, got #x~X" code))
     (destructuring-bind (p2p-version name caps port peer-id) (decode-message :hello data :start start)
@@ -255,31 +348,36 @@
 
 (defun eth-handshake (link &key (chain (tempo-eth-chain)) (versions '(69 68))
                                 (timestamp 0) (earliest 0) (latest 0)
-                                (head (eth-chain-genesis chain)) handler)
-  "Exchange Hello and Status on authenticated RLPx LINK. HANDLER receives a request
-keyword and query and returns its list of matching wire items; NIL serves no data."
+                                (head (eth-chain-genesis chain)) (listen-port 0) source)
+  "Exchange Hello and Status on authenticated RLPx LINK."
   (check-type versions cons)
   (unless (and (every (lambda (v) (member v '(68 69))) versions) (<= 0 earliest latest))
     (error "Invalid ETH capabilities or advertised range"))
-  (let* ((version (exchange-hello link versions))
+  (let* ((version (exchange-hello link versions listen-port))
          (status (if (= version 68) :status68 :status69))
          (genesis (eth-chain-genesis chain)) (network (eth-chain-network chain))
-         (fork (fork-id chain timestamp)) (peer (%make-eth link version handler)))
+         (fork (fork-id chain timestamp)) (peer (%make-eth link version source)))
     (send link status (if (= version 68) (list version network 0 head genesis fork)
                           (list version network genesis fork earliest latest head)))
-    (multiple-value-bind (code payload) (next-message peer)
-      (unless (= code (message-code status)) (protocol-error "expected eth status, got #x~X" code))
-      (let* ((fields (decode-message status payload))
-             (peer-genesis (nth (if (= version 68) 4 2) fields))
-             (peer-fork (nth (if (= version 68) 5 3) fields)))
-        (unless (and (= (first fields) version) (= (second fields) network) (octets= genesis peer-genesis))
-          (protocol-error "wrong eth version, network or genesis"))
-        (unless (compatible-fork-p chain timestamp latest peer-fork)
-          (protocol-error "incompatible Tempo fork ID ~A/~D" (octets->hex (first peer-fork)) (second peer-fork)))
-        (when (and (= version 69) (> (fifth fields) (sixth fields)))
-          (protocol-error "peer advertised invalid block range"))
-        (setf (eth-peer-status peer) fields)))
-    peer))
+    (loop repeat 8 do
+      (multiple-value-bind (code payload) (receive link)
+        ;; Base protocol control messages may race the initial ETH Status.
+        (case code
+          ((#x02 #x03) (service-message peer code payload))
+          (#x10
+           (let* ((fields (decode-message status payload))
+                  (peer-genesis (nth (if (= version 68) 4 2) fields))
+                  (peer-fork (nth (if (= version 68) 5 3) fields)))
+             (unless (and (= (first fields) version) (= (second fields) network) (octets= genesis peer-genesis))
+               (protocol-error "wrong eth version, network or genesis"))
+             (unless (compatible-fork-p chain timestamp latest peer-fork)
+               (protocol-error "incompatible Tempo fork ID ~A/~D" (octets->hex (first peer-fork)) (second peer-fork)))
+             (when (and (= version 69) (> (fifth fields) (sixth fields)))
+               (protocol-error "peer advertised invalid block range"))
+             (setf (eth-peer-status peer) fields)
+             (return-from eth-handshake peer)))
+          (otherwise (protocol-error "expected eth status, got #x~X" code)))))
+    (protocol-error "too many base messages before eth status")))
 
 (defun eth-dial (host port public-key &rest options &key (timeout 10) key &allow-other-keys)
   "Open an owned TCP/RLPx/ETH connection. TIMEOUT bounds TCP socket waits; KEY
@@ -294,7 +392,8 @@ is the optional local secp256k1 private key. Other options go to ETH-HANDSHAKE."
 
 (defun eth-close (peer)
   (unwind-protect
-       (ignore-errors (send (eth-rlpx peer) :disconnect '(8))) ; client quitting
+       (handler-case (send (eth-rlpx peer) :disconnect '(8))
+         ((or error sb-ext:timeout) () nil)) ; client quitting
     (rlpx:rlpx-close (eth-rlpx peer))))
 
 (defun query-peer (peer request response argument)
@@ -395,3 +494,125 @@ Only a bounded batch is retained; capped responses are continued from their last
               (pop hashes)
               (incf number)))))))
   (max 0 (1+ (- to from))))
+
+;;; The acceptor owns the bounded set of worker threads. It shuts down their
+;;; sockets, then joins them before its caller can release the backing store.
+(defstruct inbound socket thread)
+
+(defun run-inbound-eth (socket stream peer status earliest latest head)
+  (let* ((link (eth-rlpx peer))
+         (fd (sock:socket-file-descriptor socket))
+         (advertise (= (eth-version peer) 69))
+         (last-input (clempo.io:monotonic-ticks))
+         (ping-at (+ last-input (* 10 internal-time-units-per-second)))
+         (update-at ping-at))
+    (loop
+      (when (or (listen stream) (sb-sys:wait-until-fd-usable fd :input 0.25))
+        (multiple-value-bind (code payload) (receive link)
+          (setf last-input (clempo.io:monotonic-ticks))
+          (unless (service-message peer code payload)
+            (cond
+              ((and advertise (= code #x21)) (decode-message :block-range-update payload))
+              ;; This peer does not advertise headers, bodies, or transactions unsolicited.
+              ((member code '(#x11 #x12 #x17 #x18)) nil)
+              (t (protocol-error "unexpected inbound eth message #x~X" code))))))
+      (let ((now (clempo.io:monotonic-ticks)))
+        (when (> now (+ last-input (* 45 internal-time-units-per-second))) (return))
+        (when (>= now ping-at)
+          (send link :ping nil)
+          (setf ping-at (+ now (* 10 internal-time-units-per-second))))
+        (when (and advertise (>= now update-at))
+          (setf update-at (+ now (* 10 internal-time-units-per-second)))
+          (multiple-value-bind (first last hash) (funcall status)
+            (when (or (/= first earliest) (>= last (+ latest 32))
+                      (and (= last latest) (not (octets= hash head))))
+              (send link :block-range-update (list first last hash))
+              (setf earliest first latest last head hash))))))))
+
+(defun call-with-eth-listener (host port key source status thunk
+                               &key (chain (tempo-eth-chain)) (versions '(69 68))
+                                 (max-peers 16) on-peer on-error)
+  "Listen on numeric HOST and PORT (zero selects a free port), and call THUNK
+with the bound port. KEY is a private secp256k1 scalar. STATUS returns
+(values earliest latest head-hash timestamp) for the current local chain.
+SOURCE (:number hash) returns a canonical height or NIL; (:block height)
+returns raw block octets or NIL; (:receipts height) returns (values list known-p)
+of canonical EIP-2718 envelopes, including NIL/T for a known empty block.
+Callbacks run concurrently across connections. ON-PEER receives the validated
+peer key and negotiated version. ON-ERROR receives a connection failure.
+Every connection and worker is closed and joined before this function returns."
+  (check-type port (unsigned-byte 16))
+  (check-type max-peers (integer 1 128))
+  (unless (clempo.secp256k1:private->public key) (error "Invalid ETH listener key"))
+  (let* ((v6 (find #\: host))
+         (address (if v6 (sock:make-inet6-address host) (sock:make-inet-address host)))
+         (listener (make-instance (if v6 'sock:inet6-socket 'sock:inet-socket) :type :stream :protocol :tcp))
+         (lock (thr:make-mutex :name "eth inbound sockets"))
+         (stopping nil) (acceptor nil) (workers nil))
+    (labels ((stopping-p () (thr:with-mutex (lock) stopping))
+             (worker (entry bound-port)
+               (let ((socket (inbound-socket entry)) (stream nil))
+                 (unwind-protect
+                      (handler-case
+                          (progn
+                            (setf (sock:non-blocking-mode socket) nil
+                                  (sock:sockopt-tcp-nodelay socket) t
+                                  stream (sock:socket-make-stream socket :input t :output t :element-type 'octet
+                                                                         :buffering :full :timeout 5 :auto-close t))
+                            (let ((link (sb-ext:with-timeout 5 (rlpx:rlpx-accept stream key))))
+                              (multiple-value-bind (first last hash time) (funcall status)
+                                (let ((peer (sb-ext:with-timeout 5
+                                              (eth-handshake link :chain chain :versions versions
+                                                             :listen-port bound-port :source source
+                                                             :earliest first :latest last :head hash :timestamp time))))
+                                  (when on-peer (funcall on-peer (rlpx:rlpx-peer link) (eth-version peer)))
+                                  (run-inbound-eth socket stream peer status first last hash)))))
+                        ((or error sb-ext:timeout) (c)
+                          (when (and on-error (not (stopping-p))) (funcall on-error c))))
+                   (thr:with-mutex (lock)
+                     (setf (inbound-socket entry) nil)
+                     (if stream (ignore-errors (close stream :abort t))
+                         (ignore-errors (sock:socket-close socket)))))))
+             (accept-loop (bound-port)
+               (let ((fd (sock:socket-file-descriptor listener)))
+                 (loop until (stopping-p) do
+                   (setf workers
+                         (delete-if (lambda (entry)
+                                      (let ((thread (inbound-thread entry)))
+                                        (unless (thr:thread-alive-p thread)
+                                          (thr:join-thread thread :default nil)
+                                          t)))
+                                    workers))
+                   (when (sb-sys:wait-until-fd-usable fd :input 0.1)
+                     (let ((socket (handler-case (sock:socket-accept listener)
+                                     (sock:socket-error (c) (when on-error (funcall on-error c)) nil))))
+                       (when socket
+                         (if (>= (length workers) max-peers)
+                             (sock:socket-close socket)
+                             (let ((entry (make-inbound :socket socket)))
+                               (handler-case
+                                   (progn
+                                     (setf (inbound-thread entry)
+                                           (thr:make-thread (lambda () (worker entry bound-port))
+                                                            :name "eth inbound peer"))
+                                     (push entry workers))
+                                 (error (c)
+                                   (sock:socket-close socket)
+                                   (when on-error (funcall on-error c)))))))))))))
+      (unwind-protect
+           (progn
+             (setf (sock:sockopt-reuse-address listener) t
+                   (sock:non-blocking-mode listener) t)
+             (sock:socket-bind listener address port)
+             (sock:socket-listen listener max-peers)
+             (let ((bound-port (nth-value 1 (sock:socket-name listener))))
+               (setf acceptor (thr:make-thread (lambda () (accept-loop bound-port)) :name "eth acceptor"))
+               (funcall thunk bound-port)))
+        (thr:with-mutex (lock) (setf stopping t))
+        (when acceptor (thr:join-thread acceptor :default nil))
+        (sock:socket-close listener)
+        (thr:with-mutex (lock)
+          (dolist (entry workers)
+            (when (inbound-socket entry)
+              (ignore-errors (sock:socket-shutdown (inbound-socket entry) :direction :io)))))
+        (dolist (entry workers) (thr:join-thread (inbound-thread entry) :default nil))))))

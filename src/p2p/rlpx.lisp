@@ -174,7 +174,7 @@
     (values (if with-padding wire (subseq wire 0 n)) n)))
 
 (defstruct (rlpx (:constructor %make-rlpx (stream peer public-key ingress egress)))
-  stream peer public-key ingress egress)
+  stream peer public-key ingress egress broken-p)
 
 (defun establish (stream key remote ephemeral remote-ephemeral nonce-a nonce-b auth ack initiator-p)
   (multiple-value-bind (aes mac) (derive-secrets ephemeral remote-ephemeral nonce-a nonce-b)
@@ -206,6 +206,7 @@
         (establish stream key remote ephemeral remote-ephemeral nonce-a nonce-b auth ack nil)))))
 
 (defun rlpx-send (connection payload)
+  (when (rlpx-broken-p connection) (protocol-error "RLPx session failed"))
   (let ((stream (rlpx-stream connection)))
     (write-octets stream (encode-frame (rlpx-egress connection) payload))
     (force-output stream)))
@@ -215,12 +216,15 @@
 
 (defun rlpx-receive (connection &key with-padding)
   "Read the next authenticated payload and return it and its length. WITH-PADDING
-returns the backing octets without copying; only the indicated prefix is payload."
-  (handler-case
-      (let* ((stream (rlpx-stream connection))
-             (state (rlpx-ingress connection))
-             (size (decode-header state (read-octets stream 32))))
-        (decode-body state size (read-octets stream (+ (padded-size size) 16)) with-padding))
-    (error (condition)
-      (ignore-errors (rlpx-close connection))
-      (error condition))))
+returns the backing octets without copying; only the indicated prefix is payload.
+A failed read invalidates the session; its owner still closes the stream."
+  (when (rlpx-broken-p connection) (protocol-error "RLPx session failed"))
+  (let ((complete nil))
+    (unwind-protect
+         (let* ((stream (rlpx-stream connection))
+                (state (rlpx-ingress connection))
+                (size (decode-header state (read-octets stream 32))))
+           (multiple-value-prog1
+               (decode-body state size (read-octets stream (+ (padded-size size) 16)) with-padding)
+             (setf complete t)))
+      (unless complete (setf (rlpx-broken-p connection) t)))))

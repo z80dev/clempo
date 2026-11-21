@@ -371,6 +371,14 @@ for byte in 1,800 seconds over one public eth/69 session to
 `109.94.98.205:30056` (1.86 blocks/s). All 60 progress samples were caught
 up to the RPC finalized head. Log: `logs/public-p2p/configured-soak.log`.
 
+Inbound devp2p: the archive-backed listener advertised `0..50,049,999`
+and accepted the local Rust node's `admin_addPeer` connection as eth/69.
+`tempo p2p header 3211` and `tempo p2p body <hash>` with only Clempo as a
+trusted peer downloaded the expected header and its two-transaction body.
+A separate client requested block 3211 over both eth/68 and eth/69. Header
+and body matched the archive, and the two receipt envelopes matched the
+Rust node's devp2p replies byte for byte for each version.
+
 Hash/25519 crypto (SBCL 2.6.8 release, Apple Silicon, single thread): on
 64 MiB, SHA-256 **2,684 MB/s** (25 ms, no consing), BLAKE3 **317 MB/s**
 (212 ms, no consing), ChaCha20 **257 MB/s** (261 ms, one result buffer).
