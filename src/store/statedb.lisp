@@ -35,7 +35,7 @@ committed blocks into a log and periodic checkpoints.")
    #:store #:store-db #:store-dir #:store-interval #:open-store #:close-store
    #:store-commit-block #:store-checkpoint #:store-sync
    #:store-root-mismatch #:store-root-mismatch-number #:store-root-mismatch-expected
-   #:store-root-mismatch-actual #:store-format-error
+   #:store-root-mismatch-actual #:store-format-error #:store-locked #:store-locked-dir
    #:write-checkpoint #:read-checkpoint #:encode-block-diff #:decode-block-diff
    #:code-hash-key #:address-octets #:slot-octets))
 
@@ -355,8 +355,13 @@ root is the empty root, which has no nodes)."
         (db-new-codes db) '()))
 
 (defstruct (speculative-block (:constructor make-speculative-block
-                                  (touched saved-trie number hash root recent)))
-  touched saved-trie number hash root recent)
+                                  (touched saved-trie new-codes number hash root recent)))
+  touched saved-trie new-codes number hash root recent)
+
+(defun forget-codes (db keys)
+  "Remove the codes first stored by an undone block (KEYS, code table keys)."
+  (let ((codes (db-codes db)))
+    (dolist (k keys) (remhash k codes))))
 
 (defun copy-table (table)
   (let ((copy (make-hash-table :size (max 16 (hash-table-count table)))))
@@ -371,7 +376,8 @@ undo record is kept so the speculation can be unwound."
   (let* ((root (db-state-root db))
          (diff (block-diff-from-touches db number hash root)))
     (when (plusp (db-speculation-depth db))
-      (push (make-speculative-block (db-touched db) (db-saved-trie db) (db-number db) (db-hash db)
+      (push (make-speculative-block (db-touched db) (db-saved-trie db) (db-new-codes db)
+                                    (db-number db) (db-hash db)
                                     (db-root-hash db) (copy-table (db-recent db)))
             (db-speculative db)))
     (close-block db)
@@ -410,6 +416,7 @@ undo record is kept so the speculation can be unwound."
   "Undo every write of the open block and close it."
   (invariant (db-open-p db) "no open block")
   (undo-touches db (db-touched db) (db-saved-trie db))
+  (forget-codes db (db-new-codes db))
   (close-block db)
   db)
 
@@ -419,6 +426,7 @@ undo record is kept so the speculation can be unwound."
   (loop while (> (length (db-speculative db)) depth)
         do (let ((s (pop (db-speculative db))))
              (undo-touches db (speculative-block-touched s) (speculative-block-saved-trie s))
+             (forget-codes db (speculative-block-new-codes s))
              (setf (db-number db) (speculative-block-number s)
                    (db-hash db) (speculative-block-hash s)
                    (db-root-hash db) (speculative-block-root s)

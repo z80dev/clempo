@@ -206,3 +206,40 @@
       ;; absences
       (is (nth-value 1 (clempo.trie:verify-proof root (integer->octets 99 20) (db-account-proof db 99) :secure t)))
       (is (null (db-storage-proof db 99 0))))))
+
+(defun code-present-p (db code)
+  (let ((key (octets->integer (clempo.keccak:keccak256 code))) (found nil))
+    (map-codes (lambda (k v) (declare (ignore v)) (when (= k key) (setf found t))) db)
+    found))
+
+(deftest undone-blocks-leave-no-code-behind ()
+  ;; Code stored by a reverted block or a speculative block (eth_simulateV1, a validator's
+  ;; branch check) is gone once the block is undone; committed code stays.
+  (let ((db (make-statedb))
+        (kept (octets-of 1 1 1)) (reverted (octets-of 2 2 2)) (speculative (octets-of 3 3 3)))
+    (db-begin-block db)
+    (db-set-account db 1 0 0 (db-put-code db kept))
+    (db-commit-block db 1 (block-hash 1))
+    (db-begin-block db)
+    (db-set-account db 2 0 0 (db-put-code db reverted))
+    (db-put-code db kept)                 ; already stored: the revert must keep it
+    (db-revert-block db)
+    (with-speculative-blocks (db)
+      (db-begin-block db)
+      (db-set-account db 3 0 0 (db-put-code db speculative))
+      (db-commit-block db 2 (block-hash 2))
+      (is (code-present-p db speculative)))
+    (is (code-present-p db kept))
+    (is (not (code-present-p db reverted)))
+    (is (not (code-present-p db speculative)))
+    (signals error (db-code db (clempo.keccak:keccak256 speculative)))))
+
+(deftest a-datadir-opens-once-at-a-time ()
+  (let ((dir (temp-dir)))
+    (unwind-protect
+         (let ((store (open-store dir :genesis #'genesis)))
+           (signals store-locked (open-store dir))
+           (close-store store)
+           ;; the lock goes with CLOSE-STORE
+           (close-store (open-store dir)))
+      (sb-ext:delete-directory dir :recursive t))))

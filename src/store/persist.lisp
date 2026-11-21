@@ -218,7 +218,8 @@ the last intact record and whether a torn or corrupt tail followed it."
   (interval 0 :type integer)          ; blocks between checkpoints; 0 = only on request/close
   (checkpoint-number 0 :type integer)
   log-stream log-sink
-  (unsynced 0 :type fixnum))
+  (unsynced 0 :type fixnum)
+  (lock-fd nil))                       ; descriptor holding DIR/LOCK
 
 (defun open-log (store)
   (let ((stream (open (log-path (store-dir store) (store-checkpoint-number store))
@@ -230,18 +231,57 @@ the last intact record and whether a torn or corrupt tail followed it."
 (defun truncate-file (path length)
   (sb-posix:truncate (namestring path) length))
 
+;;; The datadir lock: an exclusive flock(2) on DIR/LOCK for as long as the store is open, so
+;;; two processes (or two opens in one process) never write one datadir. The kernel drops
+;;; the lock when the process dies, so a crash leaves nothing to clean up.
+
+(define-condition store-locked (error)
+  ((dir :initarg :dir :reader store-locked-dir))
+  (:report (lambda (c s) (format s "store: datadir ~A is in use by another store (LOCK is held)"
+                                 (store-locked-dir c)))))
+
+(defconstant +lock-ex+ 2)
+(defconstant +lock-nb+ 4)
+
+(defun lock-datadir (dir)
+  "Take DIR's lock; returns the descriptor that holds it. Signals STORE-LOCKED when held."
+  (let ((fd (sb-posix:open (namestring (dir-file dir "LOCK"))
+                           (logior sb-posix:o-rdwr sb-posix:o-creat) #o644)))
+    (if (zerop (sb-alien:alien-funcall
+                (sb-alien:extern-alien "flock" (function sb-alien:int sb-alien:int sb-alien:int))
+                fd (logior +lock-ex+ +lock-nb+)))
+        fd
+        (let ((errno (sb-alien:get-errno)))
+          (sb-posix:close fd)
+          (if (= errno sb-posix:ewouldblock)
+              (error 'store-locked :dir dir)
+              (error "store: flock on ~A failed: errno ~D" dir errno))))))
+
+(defun unlock-datadir (fd)
+  (when fd (sb-posix:close fd)))
+
 (defun open-store (dir &key genesis (interval 0) (log (constantly nil)))
-  "Open the datadir DIR (created if absent). An empty one is initialized by calling GENESIS
-with a fresh state database, which must commit block 0 in it; the result is checkpoint 0.
-Otherwise the live checkpoint is loaded, its root checked, and the log replayed with every
-block's root checked. LOG is called with a format string and arguments for progress notes."
+  "Open the datadir DIR (created if absent) and hold its lock until CLOSE-STORE."
   (let* ((dir (let ((p (pathname dir)))
                 (if (or (pathname-name p) (pathname-type p))
                     (make-pathname :directory (append (or (pathname-directory p) (list :relative))
                                                       (list (file-namestring p)))
                                    :name nil :type nil :defaults p)
                     p)))
-         (n (progn (ensure-directories-exist dir) (read-manifest dir))))
+         (fd (progn (ensure-directories-exist dir) (lock-datadir dir)))
+         (store nil))
+    (unwind-protect
+         (progn (setf store (open-locked-store dir genesis interval log))
+                (setf (store-lock-fd store) fd))
+      (unless store (unlock-datadir fd)))
+    store))
+
+(defun open-locked-store (dir genesis interval log)
+  "Open the datadir DIR (created if absent). An empty one is initialized by calling GENESIS
+with a fresh state database, which must commit block 0 in it; the result is checkpoint 0.
+Otherwise the live checkpoint is loaded, its root checked, and the log replayed with every
+block's root checked. LOG is called with a format string and arguments for progress notes."
+  (let ((n (read-manifest dir)))
     (if (null n)
         (let ((db (make-statedb)))
           (invariant genesis "empty datadir ~A and no genesis" dir)
@@ -317,9 +357,12 @@ block's root checked. LOG is called with a format string and arguments for progr
     n))
 
 (defun close-store (store &key checkpoint)
-  (if checkpoint
-      (store-checkpoint store)
-      (store-sync store))
-  (close (store-log-stream store))
-  (setf (store-log-stream store) nil)
+  (unwind-protect
+       (progn
+         (if checkpoint
+             (store-checkpoint store)
+             (store-sync store))
+         (close (store-log-stream store))
+         (setf (store-log-stream store) nil))
+    (unlock-datadir (shiftf (store-lock-fd store) nil)))
   store)
