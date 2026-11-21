@@ -3,7 +3,8 @@
   (:import-from #:clempo.keccak #:keccak256)
   (:import-from #:clempo.rlp #:rlp-encode)
   (:import-from #:clempo.trie #:make-secure-trie #:trie-clone #:trie-put #:trie-delete
-                #:trie-root #:trie-proof #:encode-account #:+empty-trie-root+ #:+empty-code-hash+)
+                #:trie-root #:trie-proof #:encode-account #:+empty-trie-root+ #:+empty-code-hash+
+                #:trie-from-items)
   (:documentation "The committed state database: every account, storage slot and code blob
 of the chain in RAM, keyed by integers, with the account and storage tries kept beside them so
 a block's state root costs only its dirty paths. A block's writes are applied between
@@ -142,10 +143,13 @@ committed blocks into a log and periodic checkpoints.")
 ;;; Storage tries
 
 (defun build-storage-trie (account)
-  (let ((trie (make-secure-trie)))
-    (map-account-storage (lambda (slot value) (trie-put trie (slot-octets slot) (rlp-encode value)))
+  "ACCOUNT's storage trie built in bulk from its slots (in parallel for a large account when
+the caller bound a trie-hashing parallel map)."
+  (let ((items (make-array (account-slot-count account))) (i 0))
+    (map-account-storage (lambda (slot value) (setf (svref items i) (cons slot value)) (incf i))
                          account)
-    trie))
+    (trie-from-items items (lambda (e) (values (slot-octets (car e)) (rlp-encode (cdr e))))
+                     :secure t)))
 
 (defun ensure-storage-trie (account)
   (or (account-trie account)

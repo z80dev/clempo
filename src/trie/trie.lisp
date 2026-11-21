@@ -6,7 +6,7 @@
   (:export #:trie #:make-trie #:make-secure-trie #:trie-clone
            #:trie-get #:trie-put #:trie-delete #:trie-root #:ordered-trie-root
            #:trie-proof #:verify-proof #:node-store-get #:node-store-put
-           #:call-with-trie-hashing
+           #:call-with-trie-hashing #:trie-from-items
            #:trie-node-error #:encode-account #:decode-account
            #:+empty-trie-root+ #:+empty-code-hash+))
 
@@ -494,6 +494,84 @@ Short inline nodes and persisted or proof nodes need their own exact arrays."
   "Delete KEY; return true if it was present."
   (check-type key octets)
   (update-trie trie key nil))
+
+;;; Bulk construction: the canonical trie of a whole key set built top down by splitting
+;;; on nibbles, with no per-key insertion (no path splitting, copying or re-walking). With a
+;;; parallel map bound by CALL-WITH-TRIE-HASHING and enough keys, keys are hashed and the
+;;; root's sixteen subtrees built and hashed in parallel.
+
+(defvar *bulk-parallel-threshold* 4096 "Keys from which TRIE-FROM-ITEMS works in parallel.")
+
+(defun build-subtrie (items depth owner)
+  "The node holding ITEMS, a nonempty list of (key . value) with distinct keys of one
+length, below the first DEPTH nibbles they share."
+  (declare #.clempo.base:*hot* (type fixnum depth) (type list items))
+  (let* ((first-key (car (first items)))
+         (end (* 2 (length (the octets first-key)))))
+    (declare (type octets first-key) (type fixnum end))
+    (if (null (rest items))
+        (make-short owner (make-path first-key depth (- end depth) t) (cdr (first items)))
+        (let ((split depth))
+          (declare (type fixnum split))
+          ;; nibbles every key shares become an extension over the branch that splits them
+          (loop while (let ((n (nibble first-key split)))
+                        (every (lambda (item) (= n (nibble (car item) split))) (rest items)))
+                do (incf split))
+          (let ((children (make-array 16 :initial-element nil))
+                (buckets (make-array 16 :initial-element nil)))
+            (declare (dynamic-extent buckets))
+            (dolist (item items) (push item (svref buckets (nibble (car item) split))))
+            (dotimes (i 16)
+              (when (svref buckets i)
+                (setf (svref children i) (build-subtrie (svref buckets i) (1+ split) owner))))
+            (let ((branch (make-branch owner children)))
+              (if (= split depth)
+                  branch
+                  (make-short owner (make-path first-key depth (- split depth) nil) branch))))))))
+
+(defun trie-from-items (items item-fn &key secure)
+  "A fresh trie holding, for each element of the simple-vector ITEMS, the key and value
+ITEM-FN returns as two values (octets; empty values are skipped). Keys must be distinct
+and, in a plain trie, of one length. ITEM-FN may be called from several threads."
+  (check-type items simple-vector)
+  (let* ((trie (%make-trie nil nil secure))
+         (owner (trie-owner trie))
+         (n (length items)))
+    (flet ((pair (item)
+             (multiple-value-bind (key value) (funcall item-fn item)
+               (unless (zerop (length value))
+                 (cons (if secure (keccak256 key) key) value)))))
+      (if (and *parallel-map* (>= n *bulk-parallel-threshold*))
+          (let* ((jobs 16)
+                 (chunks (make-array jobs))       ; chunk -> 16 buckets by first nibble
+                 (children (make-array 16 :initial-element nil)))
+            (funcall *parallel-map*
+                     (lambda (j)
+                       (let ((buckets (make-array 16 :initial-element nil)))
+                         (loop for i from (floor (* j n) jobs) below (floor (* (1+ j) n) jobs)
+                               for p = (pair (svref items i))
+                               when p do (push p (svref buckets (nibble (car p) 0))))
+                         (setf (svref chunks j) buckets)))
+                     (loop for j below jobs collect j))
+            (funcall *parallel-map*
+                     (lambda (nib)
+                       (let ((bucket (loop for j below jobs append (svref (svref chunks j) nib))))
+                         (when bucket
+                           (let ((child (build-subtrie bucket 1 owner)))
+                             (call-with-trie-hashing (lambda () (node-reference child nil))
+                                                     :parallel-map nil)
+                             (setf (svref children nib) child)))))
+                     (loop for nib below 16 collect nib))
+            (setf (trie-root-node trie)
+                  (if (> (count-if #'identity children) 1)
+                      (make-branch owner children)
+                      ;; one occupied nibble: rebuild serially for the extension above it
+                      (let ((all (loop for c across chunks
+                                       append (loop for b across c append b))))
+                        (when all (build-subtrie all 0 owner))))))
+          (let ((all (loop for item across items for p = (pair item) when p collect p)))
+            (when all (setf (trie-root-node trie) (build-subtrie all 0 owner))))))
+    trie))
 
 (defun prehash-root-children (node)
   ;; An extension may lead to the first branch. Every child of that branch

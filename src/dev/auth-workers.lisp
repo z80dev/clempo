@@ -5,7 +5,10 @@
 ;;; thread executes the block before; transaction execution stays serial and ordered.
 
 (defconstant +default-sender-threads+ 8)
-(defconstant +pipeline-depth+ 4 "Blocks the producer may read and recover ahead.")
+(defconstant +pipeline-depth+ 64 "Blocks the producer may read and recover ahead.")
+(defconstant +pipeline-refill+ 32
+  "A full producer sleeps until the queue drains to this many blocks: one wakeup per
+(depth - refill) blocks rather than per block.")
 
 (defun recover-sender (tx)
   "TX's sender. A Tempo transaction's unique identifier (its expiring-nonce and channel key)
@@ -42,13 +45,19 @@ is derived here too and memoized on TX, off the replay thread."
 (defstruct (prefetched (:constructor make-prefetched (number block senders failure)))
   number block senders failure)
 
+;;; The handoff signals only a side that is actually waiting (a condition notify is a
+;;; system call on Darwin even with no waiter), and a full producer is woken once the queue
+;;; has drained to +PIPELINE-REFILL+, so threads wake once per batch of blocks, not per block.
 (defstruct (block-pipeline (:conc-name pipeline-))
   (lock (sb-thread:make-mutex :name "block pipeline"))
   (ready (sb-thread:make-waitqueue))    ; an entry was queued or the producer stopped
-  (room (sb-thread:make-waitqueue))     ; an entry was taken or the pipeline is closing
+  (room (sb-thread:make-waitqueue))     ; the queue drained or the pipeline is closing
   (queue '() :type list)                ; PREFETCHED entries, oldest first
+  (tail '() :type list)                 ; the queue's last cons
   (count 0 :type fixnum)
   next                                  ; next number to produce; NIL until the first request
+  (producer-waiting nil)
+  (consumer-waiting nil)
   (done nil)                            ; the producer has exited
   (stopped nil)                         ; the consumer is finished
   (last nil))                           ; the entry handed out most recently
@@ -59,19 +68,35 @@ is derived here too and memoized on TX, off the replay thread."
                (loop until (or (pipeline-stopped pipeline)
                                (and (pipeline-next pipeline)
                                     (< (pipeline-count pipeline) +pipeline-depth+)))
-                     do (sb-thread:condition-wait (pipeline-room pipeline) (pipeline-lock pipeline)))
+                     do (setf (pipeline-producer-waiting pipeline) t)
+                        (sb-thread:condition-wait (pipeline-room pipeline) (pipeline-lock pipeline))
+                        (setf (pipeline-producer-waiting pipeline) nil))
                (unless (pipeline-stopped pipeline)
                  (prog1 (pipeline-next pipeline) (incf (pipeline-next pipeline)))))))
       (unless n (return))
       (let ((entry (handler-case (let ((block (funcall source n)))
                                    (make-prefetched n block (funcall recover block) nil))
-                     (error (c) (make-prefetched n nil nil c)))))
+                     (error (c) (make-prefetched n nil nil c))))
+            (cell nil))
+        (setf cell (list entry))
         (sb-thread:with-mutex ((pipeline-lock pipeline))
-          (setf (pipeline-queue pipeline) (nconc (pipeline-queue pipeline) (list entry)))
+          (if (pipeline-queue pipeline)
+              (setf (cdr (pipeline-tail pipeline)) cell)
+              (setf (pipeline-queue pipeline) cell))
+          (setf (pipeline-tail pipeline) cell)
           (incf (pipeline-count pipeline))
-          (sb-thread:condition-broadcast (pipeline-ready pipeline)))
+          (when (pipeline-consumer-waiting pipeline)
+            (sb-thread:condition-broadcast (pipeline-ready pipeline))))
         ;; A failed read ends the run of numbers the producer can serve (the archive's end).
         (when (prefetched-failure entry) (return))))))
+
+(defun pipeline-pop (pipeline)
+  "Drop the queue's head (with the lock held), waking a full producer once it has drained."
+  (pop (pipeline-queue pipeline))
+  (decf (pipeline-count pipeline))
+  (when (and (pipeline-producer-waiting pipeline)
+             (<= (pipeline-count pipeline) +pipeline-refill+))
+    (sb-thread:condition-broadcast (pipeline-room pipeline))))
 
 (defun pipeline-take (pipeline n)
   "The prefetched entry for block N, or NIL when the producer cannot serve N in order."
@@ -82,17 +107,15 @@ is derived here too and memoized on TX, off the replay thread."
     (loop
       (let ((head (first (pipeline-queue pipeline))))
         (cond ((and head (= (prefetched-number head) n))
-               (pop (pipeline-queue pipeline))
-               (decf (pipeline-count pipeline))
-               (sb-thread:condition-broadcast (pipeline-room pipeline))
+               (pipeline-pop pipeline)
                (return head))
               ((and head (< (prefetched-number head) n))
                ;; the consumer skipped ahead: drop what it will never ask for
-               (pop (pipeline-queue pipeline))
-               (decf (pipeline-count pipeline))
-               (sb-thread:condition-broadcast (pipeline-room pipeline)))
+               (pipeline-pop pipeline))
               ((or head (pipeline-done pipeline)) (return nil))
-              (t (sb-thread:condition-wait (pipeline-ready pipeline) (pipeline-lock pipeline))))))))
+              (t (setf (pipeline-consumer-waiting pipeline) t)
+                 (sb-thread:condition-wait (pipeline-ready pipeline) (pipeline-lock pipeline))
+                 (setf (pipeline-consumer-waiting pipeline) nil)))))))
 
 (defun call-with-replay-nursery (function)
   "Call FUNCTION with the allocation between collections raised to an eighth of the heap,
@@ -104,9 +127,21 @@ nursery collections cost less in total (Busy: 1.2 s of GC instead of 1.8 s, peak
     (unwind-protect (funcall function)
       (setf (sb-ext:bytes-consed-between-gcs) old))))
 
+(defconstant +state-root-threads+ 4
+  "Participants (the replay thread included) building a large storage trie in bulk.")
+
 (defun call-with-block-pipeline (function source threads)
-  "As %CALL-WITH-BLOCK-PIPELINE, with the replay's nursery size."
-  (call-with-replay-nursery (lambda () (%call-with-block-pipeline function source threads))))
+  "As %CALL-WITH-BLOCK-PIPELINE, with the replay's nursery size and a trie-hashing pool:
+a storage trie a checkpoint load left unbuilt is built on its first write, in parallel
+when large (CLEMPO.TRIE:TRIE-FROM-ITEMS)."
+  (call-with-replay-nursery
+   (lambda ()
+     (clempo.node.workers:call-with-workers
+      (lambda (mapper)
+        (clempo.trie:call-with-trie-hashing
+         (lambda () (%call-with-block-pipeline function source threads))
+         :parallel-map mapper))
+      :threads +state-root-threads+ :name "state root"))))
 
 (defun %call-with-block-pipeline (function source threads)
   "Call FUNCTION with (block-fn senders-fn) for CLEMPO.EXECUTOR:REPLAY-BLOCKS. SOURCE maps a

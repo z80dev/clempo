@@ -202,3 +202,40 @@
        (is-equalp (list a t)
                   (multiple-value-list
                    (verify-proof (trie-root secure) a (trie-proof secure a) :secure t)))))))
+
+(deftest bulk-built-tries-match-insertion ()
+  ;; TRIE-FROM-ITEMS, serial and parallel, against key-by-key insertion: secure tries of
+  ;; 0..5000 random 32-byte keys, and a plain trie whose keys share long prefixes.
+  (let ((rs (sb-ext:seed-random-state 7)))
+    (flet ((random-octets (n) (let ((o (make-octets n))) (dotimes (i n o) (setf (aref o i) (random 256 rs)))))
+           (check (items secure label)
+             (let ((inserted (make-trie :secure secure)))
+               (loop for (k . v) across items do (trie-put inserted k v))
+               (let ((expected (trie-root inserted))
+                     (fn (lambda (e) (values (car e) (cdr e)))))
+                 (is-equalp expected (trie-root (trie-from-items items fn :secure secure))
+                            "serial ~A" label)
+                 (is-equalp expected
+                            (call-with-trie-hashing
+                             (lambda () (trie-root (trie-from-items items fn :secure secure)))
+                             :parallel-map (lambda (f jobs) (mapc f jobs)))
+                            "parallel ~A" label)
+                 ;; a bulk-built trie stays editable like an inserted one
+                 (let ((bulk (trie-from-items items fn :secure secure)))
+                   (when (plusp (length items))
+                     (trie-delete bulk (car (aref items 0)))
+                     (trie-delete inserted (car (aref items 0))))
+                   (trie-put bulk (octets-of 1 2 3) (octets-of 4))
+                   (trie-put inserted (octets-of 1 2 3) (octets-of 4))
+                   (is-equalp (trie-root inserted) (trie-root bulk) "edited ~A" label))))))
+      (dolist (n '(0 1 2 17 300 5000))
+        (check (coerce (loop repeat n collect (cons (random-octets 32) (random-octets (1+ (random 40 rs)))))
+                       'simple-vector)
+               t n))
+      (check (coerce (loop for i below 200
+                           collect (cons (let ((k (make-octets 8)))
+                                           (setf (aref k 6) (floor i 16) (aref k 7) (mod i 16))
+                                           k)
+                                         (octets-of (1+ i))))
+                     'simple-vector)
+             nil "shared prefixes"))))
