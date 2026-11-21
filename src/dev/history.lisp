@@ -48,7 +48,9 @@
                (clempo.history:history-record-block history db diff)
                (when (>= (clempo.history:history-tail-blocks history) interval)
                  (clempo.history:history-flush history :db db)
-                 ;; a job seeded since this one started ends this one there
+                 ;; a job seeded since this one started ends this one there; its seed segment
+                 ;; is on disk, not in this job's view until refreshed
+                 (clempo.history:history-refresh history)
                  (let ((next (next-seed-after history job)))
                    (when next (setf stop (min stop (1- next)))))))
              (block-at (n)
