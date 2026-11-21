@@ -45,7 +45,8 @@
 
 (defstruct collecting-executor (heights nil))
 
-(defmethod apply-follow-block ((executor collecting-executor) block)
+(defmethod apply-follow-block ((executor collecting-executor) block &key certificate)
+  (declare (ignore certificate))
   (push (hdr:ethereum-header-number (hdr:header-inner (blocks:block-header block)))
         (collecting-executor-heights executor)))
 

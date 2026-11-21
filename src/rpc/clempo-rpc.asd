@@ -18,6 +18,7 @@
                (:file "config")
                (:file "stubs")
                (:file "sender")
+               (:file "consensus")
                (:file "subscribe")
                (:file "state")
                (:file "revert")
@@ -25,7 +26,6 @@
                (:file "tempo-request")
                (:file "simulate")
                (:file "bal")
-               (:file "consensus")
                (:file "filter")
                (:file "fill")))
 

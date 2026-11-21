@@ -1,7 +1,8 @@
 (defpackage #:clempo.rpc.subscribe
   (:use #:cl #:clempo.base #:clempo.rpc #:clempo.rpc.render)
   (:local-nicknames (#:json #:clempo.json) (#:serde #:clempo.serde) (#:chain #:clempo.rpc.chain)
-                    (#:server #:clempo.rpcserver) (#:logs #:clempo.rpc.logs))
+                    (#:server #:clempo.rpcserver) (#:logs #:clempo.rpc.logs)
+                    (#:consensus #:clempo.rpc.consensus))
   (:documentation "eth_subscribe and eth_unsubscribe as reth's pubsub answers them through
 jsonrpsee. Over HTTP both are Internal error whatever their params. Over a websocket
 eth_subscribe reads the kind (serde_json's externally tagged unit enum) and the optional
@@ -24,16 +25,19 @@ says false once, at its start, and never changes.")
 
 ;;; Methods jsonrpsee registers as subscriptions
 
-(defmacro defpubsub (name (params) doc &body body)
-  "Declare NAME as a subscription method: over HTTP it answers Internal error before reading
-its params; over a websocket BODY runs with PARAMS bound to the raw params src (NIL when
-absent), the envelope's array check left to BODY."
+(defmacro defpubsub (name (params &key websocket-only) doc &body body)
+  "Declare NAME as a subscription method. Without a websocket, answer Internal error or
+Method not found for a WEBSOCKET-ONLY method. BODY reads raw params (NIL when absent)."
   `(progn
      (setf (gethash ,name *methods*)
            (clempo.rpc::make-rpc-method
             :name ,name :doc ,doc :params :raw
             :function (lambda (,params)
-                        (unless *connection* (internal-error))
+                        (declare (ignorable ,params))
+                        (unless *connection*
+                          ,(if websocket-only
+                               '(rpc-fail +method-not-found+ "Method not found")
+                               '(internal-error)))
                         ,@body)))
      ,name))
 
@@ -180,13 +184,19 @@ accepting (the id is answered and nothing follows)."
            (server:send-notification connection "eth_subscription" id :false)))))
     id))
 
-(defun unsubscribe (connection id)
-  (let ((sub (find id (server:connection-subscriptions connection)
-                   :key #'subscription-id :test #'equal)))
+(defun remove-subscription (connection id consensus-p)
+  (let ((sub (find-if (lambda (s)
+                       (and (eql consensus-p (eq (subscription-kind s) :finalization))
+                            (equal id (subscription-id s))))
+                     (server:connection-subscriptions connection))))
     (when sub
       (setf (server:connection-subscriptions connection)
-            (remove sub (server:connection-subscriptions connection))))
-    (and sub t)))
+            (remove sub (server:connection-subscriptions connection)))
+      (when consensus-p (server:release-consensus-slot connection))
+      t)))
+
+(defun unsubscribe (connection id)
+  (remove-subscription connection id nil))
 
 (defpubsub "eth_subscribe" (params)
   "start a newHeads, logs, newPendingTransactions, syncing or transactionReceipts subscription"
@@ -195,15 +205,30 @@ accepting (the id is answered and nothing follows)."
          (more (clempo.rpc::next-param seq 'subscription-params t (lambda () :none))))
     (subscribe *connection* kind more)))
 
+(defun unsubscribe-id (params)
+  ;; jsonrpsee reads exactly one string id and answers false for anything else.
+  (handler-case
+      (when (and params (eq (serde:peek-kind params) :array))
+        (let ((items (serde:read-value params)))
+          (and (= (length items) 1) (stringp (svref items 0)) (svref items 0))))
+    (serde:serde-error () nil)))
+
 (defpubsub "eth_unsubscribe" (params)
-  "end a subscription of this connection: true when it was running"
-  ;; jsonrpsee reads exactly one string id and answers false for anything else
-  (let ((id (handler-case
-                (when (and params (eq (serde:peek-kind params) :array))
-                  (let ((items (serde:read-value params)))
-                    (and (= (length items) 1) (stringp (svref items 0)) (svref items 0))))
-              (serde:serde-error () nil))))
-    (if (and id (unsubscribe *connection* id)) :true :false)))
+  "end an Ethereum subscription of this connection"
+  (if (unsubscribe *connection* (unsubscribe-id params)) :true :false))
+
+(defpubsub "consensus_subscribe" (params :websocket-only t)
+  "start a feed of finalized blocks and their certificates"
+  (let* ((connection *connection*)
+         (id (server:new-subscription-id))
+         (sub (make-subscription id :finalization)))
+    (server:claim-consensus-slot connection)
+    (server:after-response (lambda () (push sub (server:connection-subscriptions connection))))
+    id))
+
+(defpubsub "consensus_unsubscribe" (params :websocket-only t)
+  "end a consensus subscription of this connection"
+  (if (remove-subscription *connection* (unsubscribe-id params) t) :true :false))
 
 ;;; Notifications for a new head
 
@@ -249,24 +274,34 @@ accepting (the id is answered and nothing follows)."
                            collect rc)))
     (when receipts (list (coerce receipts 'simple-vector)))))
 
-(defun render-head (backend number subscriptions)
+(defun render-head (backend number subscriptions certificate seen)
   "((subscription . results) ...) for new head NUMBER, rendered under BACKEND's read lock. A
 subscription whose results fail (missing receipts, ...) is logged and skipped, as reth logs
 a conversion error and goes on."
   (chain:with-backend-read (backend)
-    (let ((b (chain-block number)))
+    (let ((b (chain-block number))
+          (finalization :unrendered))
       (if (null b)
           (progn (server:log-event "block ~D is not available for subscriptions" number) '())
           (loop for sub in subscriptions
-                for results = (handler-case (notifications (subscription-kind sub) sub b)
+                for results = (handler-case
+                                  (if (eq (subscription-kind sub) :finalization)
+                                      (progn
+                                        (when (eq finalization :unrendered)
+                                          (setf finalization nil)
+                                          (let ((event (consensus:finalization-event b certificate seen)))
+                                            (when event (setf finalization (list event)))))
+                                        finalization)
+                                      (notifications (subscription-kind sub) sub b))
                                 (error (e)
                                   (server:log-event "~(~A~) subscription ~A, block ~D: ~A"
                                                     (subscription-kind sub) (subscription-id sub) number e)
                                   '()))
                 when results collect (cons sub results))))))
 
-(defmethod server:notify-head ((backend chain:backend) connection number subscriptions)
+(defmethod server:notify-head ((backend chain:backend) connection number subscriptions certificate seen)
   ;; Sent after the read lock is released: a stalled client must not hold back a writer.
-  (loop for (sub . results) in (render-head backend number subscriptions)
+  (loop for (sub . results) in (render-head backend number subscriptions certificate seen)
+        for method = (if (eq (subscription-kind sub) :finalization) "consensus_event" "eth_subscription")
         do (dolist (result results)
-             (server:send-notification connection "eth_subscription" (subscription-id sub) result))))
+             (server:send-notification connection method (subscription-id sub) result))))

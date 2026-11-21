@@ -15,7 +15,8 @@
   "Methods whose answer follows the head; their cases are compared by shape.")
 
 (defun corpus-cases (&key suite method)
-  (loop for path in (sort (directory (corpus-path "corpus-*.jsonl")) #'string< :key #'namestring)
+  (loop for path in (append (sort (directory (corpus-path "corpus-*.jsonl")) #'string< :key #'namestring)
+                            (list (asdf:system-relative-pathname "clempo-dev" "../../tests/dev/rpc-extra.jsonl")))
         append (loop for c in (read-corpus-file path)
                      when (and (or (null suite) (string= suite (clempo.json:jget c "suite")))
                                (or (null method) (string= method (clempo.json:jget c "method"))))
@@ -67,37 +68,127 @@ compare with."
   (and (eql status (clempo.json:jget c "status"))
        (let ((class (case-compare-class c)))
          (cond ((string= class "stable") (clempo.json:json-equal (clempo.json:jget c "response") response))
+               ((integerp (clempo.json:jget c "eventHeight"))
+                (and (equal "consensus_event" (clempo.json:jget response "method"))
+                     (equal "finalized" (clempo.json:jget* response "params" "result" "type"))
+                     (json-shape-equal (clempo.json:jget c "response") response)))
                ((string= class "reference-timeout")
                 (and (clempo.json:jobject-p response) (assoc "result" (cdr response) :test #'string=) t))
                (t (json-shape-equal (clempo.json:jget c "response") response))))))
 
-(defmacro with-clempo-server ((url-var &key url upstream) &body body)
-  "Bind URL-VAR to URL, or start an in-process server over the archive for BODY."
-  (let ((server (gensym "SERVER")) (backend (gensym "BACKEND")))
-    `(if ,url
-         (let ((,url-var ,url)) ,@body)
-         (let* ((,backend (clempo.rpc.chain:make-archive-backend :upstream ,upstream))
-                (,server (clempo.rpcserver:start-server :port 0 :backend ,backend)))
-           (unwind-protect
-                (let ((,url-var (format nil "http://127.0.0.1:~D/" (clempo.rpcserver:server-port ,server))))
-                  ,@body)
-             (clempo.rpcserver:stop-server ,server))))))
+(defmacro with-clempo-server ((url-var server &key url upstream) &body body)
+  "Bind URL-VAR to URL, or start an in-process SERVER over the archive for BODY."
+  `(let* ((,server (unless ,url
+                     (clempo.rpcserver:start-server
+                      :port 0 :backend (clempo.rpc.chain:make-archive-backend :upstream ,upstream))))
+          (,url-var (or ,url (format nil "http://127.0.0.1:~D/" (clempo.rpcserver:server-port ,server)))))
+     (unwind-protect (progn ,@body)
+       (when ,server (clempo.rpcserver:stop-server ,server)))))
 
-(defun run-rpcdiff (url cases &key (threads 16))
-  "Replay CASES against URL. Returns a list of (case status response matched) in order."
-  (parallel-map (lambda (c)
-                  (multiple-value-bind (status response)
-                      (post-raw url (clempo.json:jget c "request") :retries 0)
-                    (list c status response (case-matches c status response))))
-                cases threads))
+(defun call-with-rpc-websocket (url function)
+  (multiple-value-bind (scheme host port path) (clempo.http:parse-url url)
+    (unless (member scheme '("http" "ws") :test #'string=)
+      (error "rpcdiff WebSocket replay requires a plain HTTP or WS target"))
+    (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+      (unwind-protect
+           (progn
+             (sb-bsd-sockets:socket-connect socket (clempo.http::resolve host) port)
+             (with-open-stream (stream (sb-bsd-sockets:socket-make-stream
+                                        socket :input t :output t :timeout 10 :buffering :full
+                                        :element-type '(unsigned-byte 8)))
+               (let ((key (clempo.websocket:base64-encode (clempo.io:random-octets 16)))
+                     (crlf (coerce '(#\Return #\Newline) 'string)))
+                 (write-sequence
+                  (string->octets
+                   (format nil "GET ~A HTTP/1.1~AHost: ~A:~D~AUpgrade: websocket~AConnection: Upgrade~ASec-WebSocket-Key: ~A~ASec-WebSocket-Version: 13~A~A"
+                           path crlf host port crlf crlf crlf key crlf crlf crlf))
+                  stream)
+                 (force-output stream)
+                 (multiple-value-bind (version status headers) (clempo.rpcserver::read-request-head stream)
+                   (declare (ignore version))
+                   (unless (and (equal status "101")
+                                (equal (clempo.rpcserver::header headers "sec-websocket-accept")
+                                       (clempo.websocket:accept-key key)))
+                     (error "WebSocket handshake refused: ~A" status)))
+                 (funcall function stream))))
+        (ignore-errors (sb-bsd-sockets:socket-close socket))))))
 
-(defun served-reference-methods (url)
-  "(values served missing) among the reference's method names."
+(defun ws-receive-json (stream)
+  (multiple-value-bind (opcode payload)
+      (clempo.websocket:read-message
+       stream (lambda (op bytes)
+                (when (= op clempo.websocket:+op-ping+)
+                  (clempo.websocket:write-frame stream clempo.websocket:+op-pong+ bytes :masked t))))
+    (unless (eql opcode clempo.websocket:+op-text+) (error "Expected a WebSocket text message"))
+    (clempo.json:parse-json (octets->string payload))))
+
+(defun ws-rpc (stream request)
+  (let ((id (clempo.json:jget (clempo.json:parse-json request) "id")))
+    (clempo.websocket:write-frame stream clempo.websocket:+op-text+ (string->octets request) :masked t)
+    (loop for reply = (ws-receive-json stream)
+          when (equal id (clempo.json:jget reply "id")) return reply)))
+
+(defun replay-ws-case (url server c)
+  (call-with-rpc-websocket
+   url
+   (lambda (stream)
+     (let* ((request (clempo.json:jget c "request"))
+            (setup (clempo.json:jget c "setup" 0))
+            (height (clempo.json:jget c "eventHeight" nil))
+            (id (loop repeat setup
+                      for response = (ws-rpc stream (rpc-request-string "consensus_subscribe" '()))
+                      for sub = (clempo.json:jget response "result")
+                      unless (stringp sub) do (error "WebSocket setup failed: ~S" response)
+                      collect sub into ids
+                      finally (return (first ids)))))
+       (values
+        101
+        (cond (height
+               (when server
+                 ;; Ensure the ack's after-response handler ran before publishing.
+                 (ws-rpc stream (rpc-request-string "web3_clientVersion" '()))
+                 (clempo.rpcserver:publish-head server height))
+               (loop for event = (ws-receive-json stream)
+                     when (equal id (clempo.json:jget* event "params" "subscription"))
+                       return event))
+              ((eq :true (clempo.json:jget c "bindSubscription"))
+               (let ((req (clempo.json:parse-json request)))
+                 (setf (cdr (assoc "params" (cdr req) :test #'string=)) (vector id))
+                 (ws-rpc stream (clempo.json:to-json-string req))))
+              (t (ws-rpc stream request))))))))
+
+(defun unsafe-probe-p (method)
+  (member method *probe-unsafe* :test #'string=))
+
+(defun run-rpcdiff (url server cases &key (threads 16))
+  "Replay CASES. Mutating requests are only sent to the server rpcdiff owns."
+  (parallel-map
+   (lambda (c)
+     (multiple-value-bind (status response)
+         (cond ((and (not server) (unsafe-probe-p (clempo.json:jget c "method")))
+                (values nil "mutation not sent to external URL"))
+               ((equal "ws" (clempo.json:jget c "transport"))
+                (handler-case (replay-ws-case url server c)
+                  (error (e) (values nil (princ-to-string e)))))
+               (t (post-raw url (clempo.json:jget c "request") :retries 0)))
+       (list c status response (case-matches c status response))))
+   cases threads))
+
+(defun served-reference-methods (url server)
+  "(values served missing) among the reference's method names, on their native transport."
   (let ((served '()) (missing '()))
     (dolist (m (reference-methods))
-      (multiple-value-bind (status response) (post-raw url (rpc-request-string m '()) :retries 0)
-        (declare (ignore status))
-        (if (method-not-found-p response) (push m missing) (push m served))))
+      (let ((request (rpc-request-string m '())))
+        (if (cond ((and (not server) (unsafe-probe-p m)) nil)
+                  ((member m '("consensus_subscribe" "consensus_unsubscribe") :test #'string=)
+                   (handler-case
+                       (let ((result (clempo.json:jget
+                                      (call-with-rpc-websocket url (lambda (stream) (ws-rpc stream request)))
+                                      "result")))
+                         (if (string= m "consensus_subscribe") (stringp result) (eq result :false)))
+                     (error () nil)))
+                  (t (not (method-not-found-p (nth-value 1 (post-raw url request :retries 0))))))
+            (push m served) (push m missing))))
     (values (nreverse served) (nreverse missing))))
 
 (defun rpcdiff-summary (results)
@@ -152,10 +243,10 @@ compare with."
 (defun rpcdiff (&key url suite method verbose (upstream (clempo.jsonrpc:local-rpc-url)) (limit 3))
   "Run the R5 comparison; returns a clempo.json object with the score."
   (let ((cases (corpus-cases :suite suite :method method)))
-    (with-clempo-server (server-url :url url :upstream upstream)
-      (let ((results (run-rpcdiff server-url cases)))
+    (with-clempo-server (server-url server :url url :upstream upstream)
+      (let ((results (run-rpcdiff server-url server cases)))
         (multiple-value-bind (rows methods-ok cases-ok total) (rpcdiff-summary results)
-          (multiple-value-bind (served missing) (served-reference-methods server-url)
+          (multiple-value-bind (served missing) (served-reference-methods server-url server)
             (when verbose
               (dolist (row rows)
                 (format t "~:[  ~;ok~] ~40A ~D/~D~%" (= (second row) (third row)) (first row) (third row) (second row)))

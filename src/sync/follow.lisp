@@ -41,13 +41,13 @@
         (reject-block height :upstream-header "invalid number or hash length"))
       (make-head :number height :hash hash :state-root root))))
 
-(defgeneric apply-follow-block (executor block)
-  (:documentation "Execute and commit a verified BLOCK or signal before advancing the follower."))
+(defgeneric apply-follow-block (executor block &key certificate)
+  (:documentation "Execute and commit a verified BLOCK, with its verified certificate if available."))
 
 (defgeneric certify-follow-batch (certifier blocks previous-hash)
-  (:documentation "Verify a consecutive prefix of BLOCKS (decoded block vector) and return its length.
-PREVIOUS-HASH is the last accepted block hash. Only a not-yet-finalized suffix
-may be omitted. Invalid certificates or transport failures must signal."))
+  (:documentation "Verify a consecutive prefix of BLOCKS and return its length and optionally
+a vector of its verified certificate hex strings. PREVIOUS-HASH is the last accepted block hash.
+Only a not-yet-finalized suffix may be omitted; invalid certificates and transport failures signal."))
 
 (defstruct (follower (:constructor %make-follower
                          (head rpc-url block-source executor certifier archive-dir
@@ -175,14 +175,15 @@ upstream reorg or mismatching block fails closed; this function never rolls back
           for raw = (fetch-follow-batch follower from (- end last))
           do (multiple-value-bind (blocks heads)
                  (verify-follow-batch from (head-hash (follower-head follower)) expected raw)
-               (let ((accepted (if certifier
-                                   (certify-follow-batch certifier blocks
-                                                         (head-hash (follower-head follower)))
-                                   (length blocks))))
+               (multiple-value-bind (accepted certificates)
+                   (if certifier
+                       (certify-follow-batch certifier blocks (head-hash (follower-head follower)))
+                       (length blocks))
                  (invariant (<= 0 accepted (length blocks)) "bad certified prefix length ~S" accepted)
                  (dotimes (i accepted)
                    (let ((block (svref blocks i)) (head (svref heads i)))
-                     (when executor (apply-follow-block executor block))
+                     (when executor
+                       (apply-follow-block executor block :certificate (and certificates (svref certificates i))))
                      (setf (follower-head follower) head last (head-number head))
                      (incf (follower-blocks follower))
                      (incf (follower-transactions follower) (length (blocks:block-transactions block)))

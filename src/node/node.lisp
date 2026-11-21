@@ -74,7 +74,7 @@
   (let ((db (node-db node)))
     (if (= number (store:db-number db)) db (call-next-method))))
 
-(defmethod follow:apply-follow-block ((node node-backend) block)
+(defmethod follow:apply-follow-block ((node node-backend) block &key certificate)
   (let* ((datastore (node-store node))
          (db (store:store-db datastore))
          (header (blocks:block-header block))
@@ -98,7 +98,8 @@
                (note-recent node entry)
                (setf (backend:archive-backend-head node) number)))
         (when (store:db-block-open-p db) (store:db-revert-block db))))
-    (when (node-server node) (server:publish-head (node-server node) number))))
+    (when (node-server node)
+      (server:publish-head (node-server node) number :certificate certificate))))
 
 (defun reject-healed-datadir (datadir)
   (let ((path (merge-pathnames "replay.sexp" datadir)))

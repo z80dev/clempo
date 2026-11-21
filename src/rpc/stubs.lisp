@@ -128,6 +128,10 @@ error paths of methods whose success needs a transaction pool.")
       (rpc-fail +invalid-params+ "bundle missing txs")
       (internal-error "bundle simulation unavailable")))
 
+(defrpc "admin_clearTxpool" ()
+  "Number of local transactions removed; archive and follower backends have no transaction pool."
+  0)
+
 (defrpc "eth_pendingTransactions" () "the pool is empty" #())
 (defrpc "txpool_status" () "the pool is empty" (json:jobject "pending" "0x0" "queued" "0x0"))
 (defrpc "txpool_content" () "the pool is empty" (json:jobject "pending" (json:jobject) "queued" (json:jobject)))

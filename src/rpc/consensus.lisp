@@ -8,7 +8,7 @@ from the certificate archive under ~/cache/clempo/finalizations/<chain>/ that `c
 certify` fills and verifies (one fin-<first>.txt file of \"height hex\" lines per 1000
 heights) and the backend's blocks. A height without an archived certificate is answered as the
 reference answers one its marshal lacks.")
-  (:export #:finalization-dir #:archived-certificate #:read-consensus-query))
+  (:export #:finalization-dir #:archived-certificate #:read-consensus-query #:finalization-event))
 
 (in-package #:clempo.rpc.consensus)
 
@@ -74,6 +74,14 @@ are written whole and never change, so a loaded span stays; a missing one is loo
                   "digest" (hex32 digest)
                   "certificate" certificate
                   "block" (primitive-block-json b))))
+
+(defun finalization-event (block certificate seen)
+  "The flattened consensus_event result. On archive heads, use their cached certificate."
+  (let ((certificate (or certificate (archived-certificate (cblock-number block)))))
+    (when certificate
+      (cons :object (list* (cons "type" "finalized")
+                           (cons "seen" seen)
+                           (cdr (certified-block-json block certificate)))))))
 
 (defun certified-at (height)
   "Block HEIGHT with its certificate, or the reference's 503 naming what is missing."

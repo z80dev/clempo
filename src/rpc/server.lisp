@@ -9,7 +9,8 @@ notifications from a writer thread per websocket, fed by PUBLISH-HEAD through a 
 queue.")
   (:export #:start-server #:stop-server #:server-port #:server-backend #:publish-head
            #:connection #:connection-subscriptions #:send-notification #:*server*
-           #:new-subscription-id #:notify-head #:after-response #:log-event))
+           #:new-subscription-id #:notify-head #:after-response #:log-event
+           #:claim-consensus-slot #:release-consensus-slot))
 
 (in-package #:clempo.rpcserver)
 
@@ -25,6 +26,7 @@ starts there, so no notification precedes the response that names it)."
 
 (defstruct (server (:constructor %make-server))
   socket port backend (connections '())
+  (consensus-slots 0)
   (lock (sb-thread:make-mutex :name "rpc server"))
   (running t) acceptor (max-connections 256)
   (log *error-output*) (log-lock (sb-thread:make-mutex :name "rpc log")))
@@ -37,19 +39,32 @@ PER_BLOCK_FEED_CAPACITY, the depth of its per-block broadcast feeds.")
   socket stream
   (send-lock (sb-thread:make-mutex :name "ws send"))
   (websocket-p nil)
-  (subscriptions '())
-  ;; New heads waiting for the writer thread: (number . subscriptions) oldest first.
+  (subscriptions '()) (consensus-slots 0)
+  ;; New heads waiting for the writer thread: (number certificate seen . subscriptions).
   (outbox '()) (outbox-length 0) (skipped 0)
   (outbox-lock (sb-thread:make-mutex :name "ws outbox"))
   (outbox-ready (sb-thread:make-waitqueue))
   (closed nil) (writer nil))
 
-(defgeneric notify-head (backend connection number subscriptions)
-  (:documentation "Send the notifications of SUBSCRIPTIONS (CONNECTION's, oldest first) for
-new head NUMBER. Runs on CONNECTION's writer thread with *SERVER* bound.")
-  (:method (backend connection number subscriptions)
-    (declare (ignore backend connection number subscriptions))
+(defgeneric notify-head (backend connection number subscriptions certificate seen)
+  (:documentation "Send SUBSCRIPTIONS' notifications for head NUMBER and its optional certificate.")
+  (:method (backend connection number subscriptions certificate seen)
+    (declare (ignore backend connection number subscriptions certificate seen))
     nil))
+
+(defun claim-consensus-slot (connection)
+  (sb-thread:with-mutex ((server-lock *server*))
+    (cond ((>= (connection-consensus-slots connection) 4)
+           (rpc:rpc-fail -32006 "too many consensus subscriptions on this connection" 4))
+          ((>= (server-consensus-slots *server*) 256)
+           (rpc:rpc-fail -32009 "consensus subscription limit reached, try again later"))
+          (t (incf (connection-consensus-slots connection))
+             (incf (server-consensus-slots *server*))))))
+
+(defun release-consensus-slot (connection)
+  (sb-thread:with-mutex ((server-lock *server*))
+    (decf (connection-consensus-slots connection))
+    (decf (server-consensus-slots *server*))))
 
 (defun log-event (fmt &rest args)
   "Write one line to the current server's log (its LOG stream, *ERROR-OUTPUT* by default)."
@@ -202,7 +217,7 @@ new head NUMBER. Runs on CONNECTION's writer thread with *SERVER* bound.")
   (ignore-errors (sb-bsd-sockets:socket-shutdown (connection-socket connection) :direction :io)))
 
 (defun next-head (connection)
-  "Wait for the oldest queued (number . subscriptions); NIL once CONNECTION is closed."
+  "Wait for the oldest queued head; NIL once CONNECTION is closed."
   (let ((lock (connection-outbox-lock connection)))
     (sb-thread:with-mutex (lock)
       (loop until (or (connection-closed connection) (connection-outbox connection))
@@ -218,17 +233,17 @@ other failure is logged and the next head is sent."
   (let ((*server* server))
     (loop for item = (next-head connection)
           while item
-          do (destructuring-bind (number . subscriptions) item
+          do (destructuring-bind (number certificate seen . subscriptions) item
                (let ((running (remove-if-not (lambda (s) (member s (connection-subscriptions connection)))
                                              subscriptions)))
                  (when running
-                   (handler-case (notify-head (server-backend server) connection number running)
+                   (handler-case (notify-head (server-backend server) connection number running certificate seen)
                      ((or stream-error sb-bsd-sockets:socket-error) ()
                        (close-connection connection)
                        (return))
                      (error (e) (log-event "notifications for block ~D failed: ~A" number e)))))))))
 
-(defun queue-head (connection number)
+(defun queue-head (connection number certificate seen)
   "Queue head NUMBER for CONNECTION's subscriptions; returns the number of heads it skipped
 so far when this one pushed the oldest out, else NIL."
   (let ((subscriptions (reverse (connection-subscriptions connection))))
@@ -236,7 +251,7 @@ so far when this one pushed the oldest out, else NIL."
       (sb-thread:with-mutex ((connection-outbox-lock connection))
         (unless (connection-closed connection)
           (setf (connection-outbox connection)
-                (nconc (connection-outbox connection) (list (cons number subscriptions))))
+                (nconc (connection-outbox connection) (list (list* number certificate seen subscriptions))))
           (sb-thread:condition-notify (connection-outbox-ready connection))
           (when (> (incf (connection-outbox-length connection)) +outbox-capacity+)
             (pop (connection-outbox connection))
@@ -266,6 +281,7 @@ so far when this one pushed the oldest out, else NIL."
       (ignore-errors (close stream :abort t))
       (ignore-errors (sb-bsd-sockets:socket-close (connection-socket connection)))
       (sb-thread:with-mutex ((server-lock server))
+        (decf (server-consensus-slots server) (connection-consensus-slots connection))
         (setf (server-connections server) (remove connection (server-connections server)))))))
 
 (defun accept-loop (server)
@@ -316,15 +332,15 @@ so far when this one pushed the oldest out, else NIL."
     (close-connection c))
   server)
 
-(defun publish-head (server number)
+(defun publish-head (server number &key certificate)
   "A new head NUMBER is committed: queue it for every websocket with subscriptions and
 return at once. Each connection's writer thread renders and sends, so a slow or stalled
 client never holds back the caller; one that falls +OUTBOX-CAPACITY+ heads behind skips
 the oldest, as a lagging receiver of reth's per-block feeds does (the connection stays)."
-  (let ((*server* server))
+  (let ((*server* server) (seen (clempo.io:now-ms)))
     (dolist (c (sb-thread:with-mutex ((server-lock server)) (copy-list (server-connections server))))
       (when (connection-websocket-p c)
-        (let ((skipped (queue-head c number)))
+        (let ((skipped (queue-head c number certificate seen)))
           ;; reth logs every lagging receive at debug level; once per capacity's worth here
           (when (and skipped (= 1 (mod skipped +outbox-capacity+)))
             (log-event "websocket subscriber lagging behind: ~D heads skipped" skipped)))))))

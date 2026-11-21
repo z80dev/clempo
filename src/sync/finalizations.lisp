@@ -80,5 +80,5 @@ URL is a certificate-enabled RPC endpoint; it need not be the raw-block upstream
                                                   :previous-hash previous-hash)))
             (invariant (= (length certified) (consensus:certification-verified result))
                        "incomplete certificate verification result")
-            (length certified))
+            (values (length certified) (map 'simple-vector #'fifth certified)))
           0))))
