@@ -14,10 +14,12 @@
                (:file "eth")
                (:file "logs")
                (:file "config")
-               (:file "stubs")))
+               (:file "stubs")
+               (:file "subscribe")))
 
 (defsystem "clempo-rpc/tests"
   :depends-on ("clempo-rpc")
   :pathname "../../tests/rpc/"
   :serial t
-  :components ((:file "rpc-tests")))
+  :components ((:file "rpc-tests")
+               (:file "ws-tests")))

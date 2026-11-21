@@ -8,11 +8,19 @@ where requests are answered in order and subscriptions push eth_subscription
 notifications.")
   (:export #:start-server #:stop-server #:server-port #:server-backend #:publish-head
            #:connection #:connection-subscriptions #:send-notification #:*server*
-           #:new-subscription-id #:notify-head))
+           #:new-subscription-id #:notify-head #:after-response))
 
 (in-package #:clempo.rpcserver)
 
 (defvar *server* nil "The server serving the current request.")
+
+(defvar *after-response* nil
+  "While a websocket request runs: thunks to call, in order, once its response is sent.")
+
+(defun after-response (thunk)
+  "Call THUNK after the current websocket request's response is written (a subscription
+starts there, so no notification precedes the response that names it)."
+  (setf *after-response* (append *after-response* (list thunk))))
 
 (defstruct (server (:constructor %make-server))
   socket port backend (connections '())
@@ -151,10 +159,11 @@ notifications.")
                (sb-thread:with-mutex ((connection-send-lock connection))
                  (ws:write-frame stream ws:+op-pong+ payload)))
               ((member opcode (list ws:+op-text+ ws:+op-binary+))
-               (let ((rpc:*connection* connection))
+               (let ((rpc:*connection* connection) (*after-response* '()))
                  (multiple-value-bind (status response) (run-body (octets->string payload))
                    (declare (ignore status))
-                   (unless (string= response "null") (send-text connection response))))))))))
+                   (unless (string= response "null") (send-text connection response)))
+                 (mapc #'funcall *after-response*))))))))
 
 ;;; Connections and the listener
 

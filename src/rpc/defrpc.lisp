@@ -95,12 +95,14 @@ or null optional (or defaulted) param takes its default; a missing required one 
 (defun next-param (seq type optional default-fn)
   "Read the next positional param from the params sequence SEQ (a src positioned inside the
 array, or NIL when params were absent)."
-  (let ((c (and seq (peek seq))))
+  (let* ((start (and seq (src-pos seq)))
+         (c (and seq (peek seq))))
     (cond ((or (null seq) (eql c #\]))
            (if optional (funcall default-fn) (invalid-params "No more params")))
           (t
-           ;; A param's positions count from just after the preceding [ or ,.
-           (setf (clempo.serde::src-start seq) (src-pos seq))
+           ;; A param's positions count from just after the preceding [ or , (its leading
+           ;; whitespace included).
+           (setf (clempo.serde::src-start seq) start)
            (let ((value (if (and optional (eq (peek-kind seq) :null))
                             (progn (read-null-p seq) (funcall default-fn))
                             (handler-case (read-param type seq)
@@ -177,6 +179,8 @@ notification."
                      (notification (null id-src)))
                  (multiple-value-bind (result err)
                      (cond ((null m) (values nil (error-object +method-not-found+ "Method not found")))
+                           ;; a :raw method reads its params itself, untouched by the envelope
+                           ((eq (rpc-method-params m) :raw) (invoke-method m params-src))
                            ((null (rpc-method-params m)) (invoke-method m nil))
                            (t (let ((seq (and params-src (not (eq (peek-kind params-src) :null)) params-src)))
                                 (cond ((null seq) (invoke-method m nil))
