@@ -3,7 +3,7 @@
   (:local-nicknames (#:json #:clempo.json) (#:serde #:clempo.serde) (#:chain #:clempo.rpc.chain)
                     (#:h #:clempo.headers) (#:executor #:clempo.executor) (#:blocks #:clempo.blocks)
                     (#:state #:clempo.state) (#:tx #:clempo.transactions) (#:store #:clempo.store)
-                    (#:trie #:clempo.trie))
+                    (#:trie #:clempo.trie) (#:witness #:clempo.rpc.witness))
   (:documentation "Methods that execute requests on a state: eth_call, eth_estimateGas,
 eth_createAccessList, eth_simulateV1, eth_callMany and tempo_simulateV1, and the replaying
 debug_trace* and trace_* families.
@@ -33,7 +33,7 @@ missing piece.")
            #:estimate-request-gas #:copy-call-request #:req-valid-before #:req-valid-after
            #:req-fee-payer-signature #:req-tempo-authorizations #:req-key-authorization
            #:req-account-simulation #:req-key-authorization-simulation #:req-key-type
-           #:aa-sim-transaction #:req-key-id #:mock-webauthn-signature #:mock-primitive-signature))
+           #:aa-sim-transaction #:req-key-id #:request-witness))
 
 (in-package #:clempo.rpc.calls)
 
@@ -377,16 +377,23 @@ price."
         when (and (getf o :state) (getf o :state-diff))
           do (rpc-fail +invalid-params+ (format nil "account ~A has both 'state' and 'stateDiff'" (addr address)))))
 
+(defun request-witness (r)
+  "simulated_block_signature for R (clempo.rpc.witness): (values configurable-signature-or-nil
+key-authorization), or WITNESS-ERROR."
+  (witness:simulated-signature :from (req-from r) :key-id (req-key-id r)
+                               :key-authorization (req-key-authorization r)
+                               :key-authorization-simulation (req-key-authorization-simulation r)
+                               :account-simulation (req-account-simulation r)))
+
 (defun convert-request (r base-fee)
   "Tempo's TryIntoTxEnv up to the first state-dependent step: an AA request first builds its
-mock signature (a configurableAccount key needs its configuration witness), then both kinds
-normalize. Requests carrying simulated configurable-account or key-authorization witnesses are
-checked by the executor."
-  (cond ((not (aa-request-p r)) (normalize-request r base-fee))
-        ((or (req-account-simulation r) (req-key-authorization-simulation r) (req-key-authorization r)) nil)
-        ((eq (req-key-type r) :configurableaccount)
-         (rpc-fail +invalid-params+ "configurable account simulation requires a configuration witness"))
-        (t (normalize-request r base-fee))))
+simulated witness, else its mock signature (a configurableAccount key needs its configuration
+witness), then both kinds normalize."
+  (when (and (aa-request-p r)
+             (null (request-witness r))
+             (eq (req-key-type r) :configurableaccount))
+    (rpc-fail +invalid-params+ "configurable account simulation requires a configuration witness"))
+  (normalize-request r base-fee))
 
 ;;; Blocks and execution
 
@@ -530,31 +537,10 @@ request's EIP-7702 authorizations for CHAIN-ID."
                                    (octets-concat (word key)
                                                   (clempo.keccak:keccak256 (octets-concat (word from) (word 0)))))))))))))
 
-(defun mock-webauthn-signature (size)
-  "mock_webauthn_signature: authenticator data and a clientDataJSON padded to SIZE bytes."
-  (let* ((base "{\"type\":\"webauthn.get\",\"challenge\":\"\",\"origin\":\"\"}")
-         (size (max size (+ 37 (length base))))
-         (auth (fill (make-octets 37) #xff)))
-    (setf (aref auth 32) 1)
-    (octets-concat (octets-of 2) auth
-                   (string->octets (format nil "{\"type\":\"webauthn.get\",\"challenge\":\"\",\"origin\":\"~A\"}"
-                                           (make-string (- size 37 (length base)) :initial-element #\x)))
-                   (make-octets 128))))
-
-(defun mock-primitive-signature (type key-data)
-  "create_mock_primitive_signature as wire bytes; KEY-DATA of 1, 2 or 4 bytes sizes WebAuthn data."
-  (ecase type
-    (:secp256k1 (octets-concat (make-octets 64) (octets-of 27)))
-    (:p256 (octets-concat (octets-of 1) (make-octets 129)))
-    (:webauthn (mock-webauthn-signature
-                (min 8192 (if (and key-data (member (length key-data) '(1 2 4)))
-                              (octets->integer key-data)
-                              800))))))
-
 (defun mock-signature (r from spec)
   "create_mock_tempo_sig: the request's key type as a primitive signature, wrapped in a
 keychain signature (V2 from T1C) for an access key (keyId)."
-  (let ((inner (mock-primitive-signature (or (req-key-type r) :secp256k1) (req-key-data r))))
+  (let ((inner (witness:mock-primitive-signature (or (req-key-type r) :secp256k1) (req-key-data r))))
     (if (req-key-id r)
         (octets-concat (octets-of (if (clempo.forks:fork>= spec :t1c) 4 3)) (integer->octets from 20) inner)
         inner)))
@@ -584,7 +570,8 @@ creates."
                     (when (or (integerp to) (and create-default (null calls)))
                       (list (list to (or (req-value r) 0) (or (request-input r) (make-octets 0)))))))))
 
-(defun aa-fields (r chain-id priority max-fee gas calls access-list nonce sponsor)
+(defun aa-fields (r chain-id priority max-fee gas calls access-list nonce sponsor
+                  &optional (key-authorization (req-key-authorization r)))
   "TempoTransaction's RLP fields without its signature, SPONSOR in the fee payer signature's place."
   (flet ((address-or-empty (a) (if a (integer->octets a 20) (make-octets 0))))
     (append (list chain-id priority max-fee gas (call-items calls)
@@ -594,15 +581,16 @@ creates."
                   (or (req-nonce-key r) 0) nonce
                   (or (req-valid-before r) (make-octets 0)) (or (req-valid-after r) (make-octets 0))
                   (address-or-empty (req-fee-token r)) sponsor (req-tempo-authorizations r))
-            (when (req-key-authorization r) (list (req-key-authorization r))))))
+            (when key-authorization (list key-authorization)))))
 
-(defun aa-plist (r from gas max-fee priority nonce chain-id calls access-list fee-payer signature)
+(defun aa-plist (r from gas max-fee priority nonce chain-id calls access-list fee-payer signature
+                 key-authorization)
   (list :type #x76 :from from :gas gas :max-fee max-fee :max-priority priority
         :nonce nonce :chain-id chain-id :calls calls :access-list access-list
         :nonce-key (or (req-nonce-key r) 0) :fee-token (req-fee-token r)
         :valid-before (req-valid-before r) :valid-after (req-valid-after r)
         :tempo-authorizations (req-tempo-authorizations r)
-        :key-authorization (req-key-authorization r)
+        :key-authorization key-authorization
         :fee-payer fee-payer :signature signature))
 
 (defun aa-request-plist (r world gas price env)
@@ -612,16 +600,19 @@ creates."
          (priority (or gp (req-max-priority r) 0))
          (calls (aa-calls r)))
     (unless calls (rpc-fail +invalid-params+ "Missing 'calls' or 'to' field for Tempo transaction."))
-    (let* ((chain-id (or (req-chain-id r) (executor:block-env-chain-id env)))
-           (nonce (request-nonce r world))
-           (access-list (access-list-plist r))
-           ;; the fee payer signs the request's gas as converted, before prepare_call_env caps it
-           (fee-payer (fee-payer r (aa-fields r chain-id priority max-fee
-                                              (or (req-gas r) (executor:block-env-gas-limit env))
-                                              calls access-list nonce (integer->octets from 20)))))
-      (list* :key-id (req-key-id r) :unique-id +simulation-unique-id+
-             (aa-plist r from gas max-fee priority nonce chain-id calls access-list fee-payer
-                       (mock-signature r from (executor:block-env-spec env)))))))
+    (multiple-value-bind (witness key-authorization) (request-witness r)
+      (let* ((chain-id (or (req-chain-id r) (executor:block-env-chain-id env)))
+             (nonce (request-nonce r world))
+             (access-list (access-list-plist r))
+             ;; the fee payer signs the request's gas as converted, before prepare_call_env caps it
+             (fee-payer (fee-payer r (aa-fields r chain-id priority max-fee
+                                                (or (req-gas r) (executor:block-env-gas-limit env))
+                                                calls access-list nonce (integer->octets from 20)
+                                                key-authorization))))
+        (list* :key-id (req-key-id r) :unique-id +simulation-unique-id+
+               (aa-plist r from gas max-fee priority nonce chain-id calls access-list fee-payer
+                         (or witness (mock-signature r from (executor:block-env-spec env)))
+                         key-authorization))))))
 
 (define-constant +simulated-aa-signature+
   (octets-concat (integer->octets #x840cfc572845f5786e702984c2a582528cad4b49b2a10b9db1be7fca90058565 32)
@@ -636,24 +627,33 @@ the executor's request plist for it. Returns (values plist transaction)."
   ;; simulate_v1 fills fees by the inner request's type: a legacy or 2930 one gets no max fee
   (when (and (member (request-type r) '(0 1)) (null (req-max-fee r)))
     (rpc-fail +invalid-params+ "Failed to convert transaction into RPC response: Missing 'max_fee_per_gas' field for Tempo transaction."))
-  (let* ((from (or (req-from r) 0))
-         (max-fee (or (req-max-fee r) 0)) (priority (or (req-max-priority r) 0))
-         (calls (aa-calls r :create-default t))
-         (access-list (access-list-plist r))
-         (sponsor (req-fee-payer-signature r))
-         (fee-payer (fee-payer r (aa-fields r chain-id priority max-fee gas calls access-list nonce
-                                            (integer->octets from 20))))
-         (fields (append (aa-fields r chain-id priority max-fee gas calls access-list nonce
-                                    (if sponsor
-                                        (list (if (getf sponsor :y-parity) 1 0) (getf sponsor :r) (getf sponsor :s))
-                                        (make-octets 0)))
-                         (list +simulated-aa-signature+)))
-         (tx (tx:decode-transaction (octets-concat (octets-of #x76) (clempo.rlp:rlp-encode fields)))))
-    (values (list* :hash (octets->integer (tx:transaction-hash tx))
-                   :unique-id (octets->integer (tx:transaction-unique-identifier tx from))
-                   (aa-plist r from gas max-fee priority nonce chain-id calls access-list fee-payer
-                             +simulated-aa-signature+))
-            tx)))
+  (multiple-value-bind (witness key-authorization)
+      (handler-case (request-witness r)
+        (witness:witness-error (e)
+          (rpc-fail +invalid-params+ (format nil "Failed to convert transaction into RPC response: ~A"
+                                             (rpc-error-message e)))))
+    (when (and (null witness) (eq (req-key-type r) :configurableaccount))
+      (rpc-fail +invalid-params+ "Failed to convert transaction into RPC response: configurable account simulation requires a configuration witness"))
+    (let* ((from (or (req-from r) 0))
+           (max-fee (or (req-max-fee r) 0)) (priority (or (req-max-priority r) 0))
+           (calls (aa-calls r :create-default t))
+           (access-list (access-list-plist r))
+           (sponsor (req-fee-payer-signature r))
+           (signature (or witness +simulated-aa-signature+))
+           (fee-payer (fee-payer r (aa-fields r chain-id priority max-fee gas calls access-list nonce
+                                              (integer->octets from 20) key-authorization)))
+           (fields (append (aa-fields r chain-id priority max-fee gas calls access-list nonce
+                                      (if sponsor
+                                          (list (if (getf sponsor :y-parity) 1 0) (getf sponsor :r) (getf sponsor :s))
+                                          (make-octets 0))
+                                      key-authorization)
+                           (list signature)))
+           (tx (tx:decode-transaction (octets-concat (octets-of #x76) (clempo.rlp:rlp-encode fields)))))
+      (values (list* :hash (octets->integer (tx:transaction-hash tx))
+                     :unique-id (octets->integer (tx:transaction-unique-identifier tx from))
+                     (aa-plist r from gas max-fee priority nonce chain-id calls access-list fee-payer
+                               signature key-authorization))
+              tx))))
 
 (defun access-list-plist (r)
   "The request's access list as the executor takes it: ((address slot ...) ...)."
@@ -668,7 +668,12 @@ the executor's request plist for it. Returns (values plist transaction)."
     ("priority fee greater than max fee" -32003 "max priority fee per gas higher than max fee per gas" -32003)
     ("initcode too large" -32003 "max initcode size exceeded" -38025)
     ("sender has code" -32003 "sender is not an EOA" -38024)
-    ("wrong chain id" -32000 "invalid chain ID" -32000))
+    ("wrong chain id" -32000 "invalid chain ID" -32000)
+    ;; ConfigurableAccountError::UnsupportedContext: a configurable role or grant before T14
+    ("configurable account: unsupported context" -32003
+     "configurable account is unavailable in this execution context" -32003)
+    ("key authorization: configurable-account-unsupported-context" -32003
+     "configurable account is unavailable in this execution context" -32003))
   "clempo's invalid-transaction reasons -> reth's RpcInvalidTransactionError (code, message)
 and eth_simulateV1's code.")
 

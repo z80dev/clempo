@@ -23,6 +23,7 @@
                (:file "subscribe")
                (:file "state")
                (:file "revert")
+               (:file "witness")
                (:file "calls")
                (:file "tempo-request")
                (:file "simulate")

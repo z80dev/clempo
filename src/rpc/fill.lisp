@@ -2,7 +2,7 @@
   (:use #:cl #:clempo.base #:clempo.rpc #:clempo.rpc.render #:clempo.rpc.state)
   (:local-nicknames (#:json #:clempo.json) (#:chain #:clempo.rpc.chain) (#:calls #:clempo.rpc.calls)
                     (#:rlp #:clempo.rlp) (#:tx #:clempo.transactions) (#:state #:clempo.state)
-                    (#:contract #:clempo.contract) (#:sig #:clempo.signatures))
+                    (#:contract #:clempo.contract) (#:witness #:clempo.rpc.witness))
   (:documentation "eth_fillTransaction (reth EthTransactions::fill_transaction with Tempo's
 LoadState::next_available_nonce_for and TryIntoSimTx): the request's defaults filled in (value,
 nonce, chain id, gas from eth_estimateGas's search at the head, fees from the head's base fee)
@@ -99,108 +99,12 @@ lane's 0, else the account nonce (no pool adds pending transactions)."
   "build_simulate_v1_transaction's conversion error."
   (rpc-fail +invalid-params+ (format nil "Failed to convert transaction into RPC response: ~A" message)))
 
-;;; Simulated configurable-account witnesses (tempo crates/alloy/src/rpc/reth_compat.rs
-;;; simulated_block_signature and ConfigurableAccountSimulationSpec::mock_signature)
-
-(define-constant +max-owner-webauthn-data+ (- 2048 128)
-  "MAX_OWNER_WEBAUTHN_DATA_LEN: a WebAuthn signature's limit without r, s and the public key.")
-
-(defparameter *config-errors*
-  '((:empty-owners . "configurable account owners cannot be empty")
-    (:too-many-owners . "too many configurable account owners")
-    (:zero-threshold . "configurable account threshold cannot be zero")
-    (:zero-owner . "configurable account owner cannot be zero")
-    (:zero-weight . "configurable account owner weight cannot be zero")
-    (:duplicate-owner . "configurable account owners cannot contain duplicates")
-    (:owners-not-ascending . "configurable account owners must be strictly ascending")
-    (:total-weight-exceeds-max . "configurable account total owner weight exceeds u8::MAX")
-    (:threshold-exceeds-weight . "configurable account threshold cannot be reached within the owner approval limit")
-    (:account-is-owner . "configurable account cannot own itself"))
-  "ConfigurableAccountConfigError's messages by clempo.signatures:configurable-config-error keyword.")
-
-(defun owner-weight (owners owner)
-  "ConfigurableAccountConfig::owner_weight: Rust's binary_search_by_key over OWNERS, which
-the request need not have sorted (an unsorted list can miss an owner it holds)."
-  (let ((v (coerce owners 'simple-vector)) (base 0))
-    (unless (zerop (length v))
-      (loop with size = (length v)
-            while (> size 1)
-            do (let ((mid (+ base (floor size 2))))
-                 (unless (> (first (svref v mid)) owner) (setf base mid))
-                 (decf size (floor size 2))))
-      (when (= (first (svref v base)) owner) (second (svref v base))))))
-
-(defun owner-approval (approval)
-  "An owner's mock approval: create_mock_primitive_signature for its key type, a WebAuthn one
-of the largest data otherwise, WebAuthn data capped at +MAX-OWNER-WEBAUTHN-DATA+."
-  (destructuring-bind (&key key-type key-data &allow-other-keys) approval
-    (case key-type
-      ((nil) (calls:mock-webauthn-signature +max-owner-webauthn-data+))
-      (:webauthn (calls:mock-webauthn-signature
-                  (min +max-owner-webauthn-data+
-                       (if (and key-data (member (length key-data) '(1 2 4))) (octets->integer key-data) 800))))
-      (t (calls:mock-primitive-signature key-type key-data)))))
-
-(defun mock-witness (spec account)
-  "ConfigurableAccountSimulationSpec::mock_signature for ACCOUNT: the claimed quorum checked
-as ConfigurableAccountWeightAccumulator does (without recovery), then try_new's checks; the
-0x05 signature octets."
-  (destructuring-bind (&key salt version threshold owners) (getf spec :config)
-    (when (zerop threshold) (aa-fail "configurable account threshold cannot be zero"))
-    (let ((count 0) (weight 0) (min-weight nil) (previous nil))
-      (dolist (approval (getf spec :approvals))
-        (let* ((owner (getf approval :owner))
-               (w (or (owner-weight owners owner) (aa-fail "configurable account signer is not an owner"))))
-          (when (and (plusp count) (>= weight threshold)) (aa-fail "excess configurable account owner signatures"))
-          (when (zerop w) (aa-fail "configurable account signer is not an owner"))
-          (when (> (incf count) 8) (aa-fail "too many configurable account signatures"))
-          (when (and previous (>= previous owner))
-            (aa-fail "configurable account recovered owners must be strictly ascending"))
-          (setf previous owner weight (+ weight w) min-weight (min w (or min-weight w)))))
-      (cond ((zerop count) (aa-fail "configurable account signatures cannot be empty"))
-            ((< weight threshold) (aa-fail "configurable account signature weight below threshold"))
-            ((>= weight (+ threshold min-weight)) (aa-fail "excess configurable account owner signatures"))))
-    (when (zerop account) (aa-fail "configurable account cannot be zero"))
-    (let ((e (sig:configurable-config-error account version threshold owners)))
-      (when e (aa-fail (cdr (assoc e *config-errors*)))))
-    (sig::encode-configurable-signature
-     (sig::make-configurable-signature :account account :salt (octets->integer salt) :version version
-                                       :threshold threshold :owners owners
-                                       :signatures (mapcar #'owner-approval (getf spec :approvals))))))
-
-(defun simulated-signature (r)
-  "simulated_block_signature: a key authorization re-signed with keyAuthorizationSimulation's
-mock witness (or its own configurable witness verified), and the transaction's mock witness
-from configurableAccountSimulation, a V2 keychain one for a delegate (keyId). Returns (values
-signature-or-nil key-authorization)."
-  (let* ((from (let ((f (calls:req-from r))) (and f (plusp f) f)))
-         (ka (calls:req-key-authorization r))
-         (ka-spec (calls:req-key-authorization-simulation r))
-         (spec (calls:req-account-simulation r))
-         (key-id (calls:req-key-id r)))
-    (flet ((parent () (or from (aa-fail "configurable account simulation requires `from`"))))
-      (cond ((and ka-spec ka)
-             (setf ka (list (first ka) (mock-witness ka-spec (or (getf ka-spec :signer) (parent))))))
-            ((and ka (eq (sig:signature-kind (second ka)) :configurable-account))
-             (handler-case (sig:verify-configurable-approvals
-                            (sig:parse-configurable-signature (second ka) 1)
-                            (clempo.keccak:keccak256 (rlp:rlp-encode (first ka))))
-               (sig:signature-error (e) (aa-fail (sig::signature-error-reason e))))))
-      (if (null spec)
-          (values nil ka)
-          (let ((parent (parent)))
-            (when (eql key-id parent) (aa-fail "a configurable delegate cannot be its own parent"))
-            (let ((account (or key-id parent)))
-              (when (and (getf spec :signer) (/= (getf spec :signer) account))
-                (aa-fail "configurable account simulation signer does not match the role account"))
-              (let ((witness (mock-witness spec account)))
-                (values (if key-id (octets-concat (octets-of 4) (integer->octets parent 20) witness) witness)
-                        ka))))))))
-
 (defun aa-envelope (r)
   "Tempo TryIntoSimTx for an AA request: build_aa signed with the simulated witness, else
 TempoSignature::default, as raw 0x76 octets."
-  (multiple-value-bind (signature key-authorization) (simulated-signature r)
+  (multiple-value-bind (signature key-authorization)
+      (handler-case (calls:request-witness r)
+        (witness:witness-error (e) (aa-fail (rpc-error-message e))))
     (when (and (null signature) (eq (calls:req-key-type r) :configurableaccount))
       (aa-fail "configurable account simulation requires a configuration witness"))
     (let ((calls (calls:req-calls r)) (to (calls:req-to r)))

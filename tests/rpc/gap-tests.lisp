@@ -93,3 +93,21 @@ first one's write.")
                       (got (json:parse-json
                             (chain:with-backend-read (backend) (nth-value 1 (clempo.rpc:handle-body request))))))
                  (is (json:json-equal (json:jget c "response") got) "~A" (subseq request 0 (min 400 (length request)))))))))
+
+(deftest call-paths-run-the-simulated-witness ()
+  ;; Recorded from the reference: TryIntoTxEnv builds the configurable witness (its refusals
+  ;; are plain -32602), and before T14 the executor refuses a configurable transaction role.
+  (let ((backend (archive-backend 20))
+        (spec "{\"config\":\"0xf83ba000000000000000000000000000000000000000000000000000000000000000018001d7d694111111111111111111111111111111111111111101\",\"approvals\":[{\"owner\":\"0x~A\"}]}"))
+    (flet ((call (method owner)
+             (json:jget (answer backend method
+                                (format nil "[{\"from\":\"0x2222222222222222222222222222222222222222\",\"to\":\"0x3333333333333333333333333333333333333333\",\"nonceKey\":\"0x1\",\"configurableAccountSimulation\":~A},\"0x10\"]"
+                                        (format nil spec owner)))
+                        "error")))
+      (dolist (method '("eth_call" "eth_estimateGas" "eth_createAccessList"))
+        (is (json:json-equal (json:jobject "code" -32003 "message" "configurable account is unavailable in this execution context")
+                             (call method "1111111111111111111111111111111111111111"))
+            "~A" method)
+        (is (json:json-equal (json:jobject "code" -32602 "message" "configurable account signer is not an owner")
+                             (call method "5555555555555555555555555555555555555555"))
+            "~A" method)))))

@@ -2,14 +2,14 @@
   (:use #:cl #:clempo.base))
 (in-package #:clempo.rpc.aa-request-tests)
 
-;;; Pure pieces of the Tempo request conversion (src/rpc/calls.lisp): mock signatures as
+;;; Pure pieces of the Tempo request conversion (src/rpc/calls.lisp, witness.lisp): mock signatures as
 ;;; create_mock_tempo_sig builds them, alloy's address Display and the reference's error texts.
 ;;; Expected texts were read from the reference node (corpus-calls.jsonl, block 0x9bd9c4).
 
 (defun c (name) (symbol-function (find-symbol name "CLEMPO.RPC.CALLS")))
 
 (deftest aa-mock-signatures ()
-  (let ((mock (c "MOCK-PRIMITIVE-SIGNATURE")))
+  (let ((mock #'clempo.rpc.witness:mock-primitive-signature))
     (is= 65 (length (funcall mock :secp256k1 nil)))
     (is= 27 (aref (funcall mock :secp256k1 nil) 64))
     (is= 130 (length (funcall mock :p256 nil)))
