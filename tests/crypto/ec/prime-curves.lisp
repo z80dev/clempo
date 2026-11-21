@@ -3,7 +3,8 @@
 (in-package #:clempo.ec.tests)
 
 (defun fixture (name)
-  (asdf:system-relative-pathname "clempo-crypto-ec/tests" (concatenate 'string "data/" name)))
+  (asdf:system-relative-pathname "clempo-crypto-ec/tests"
+                                 (concatenate 'string "../../../tests/crypto/ec/data/" name)))
 
 (defun each-line (name fn)
   (with-open-file (in (fixture name))
@@ -63,8 +64,8 @@
          (hash (clempo.keccak:keccak256
                 (hex->octets "e9808504e3b29200831e848094f0109fc8df283027b6285cc889f5aa624eac1f55843b9aca0080018080"))))
     (multiple-value-bind (r s v) (clempo.secp256k1:sign hash priv)
-      (is= #xc9cf86333bcb065d140032ecaab5d9281bde80f21b9687b3e94161de42d518957 r)
-      (is= #x27a108a0b8d101465414033c3f705a9c7b826e596766046ee1183dbc8aeaa68 s)
+      (is= #xc9cf86333bcb065d140032ecaab5d9281bde80f21b9687b3e94161de42d51895 r)
+      (is= #x727a108a0b8d101465414033c3f705a9c7b826e596766046ee1183dbc8aeaa68 s)
       (is= 0 v)
       (is-equalp (clempo.secp256k1:private->public priv)
                  (clempo.secp256k1:ecrecover hash r s v))
@@ -120,8 +121,8 @@
       (loop for exponent from 0 to 18 do
         (is= (mod (expt base exponent) modulus)
              (clempo.modexp:modular-expt base exponent modulus)))))
-  (is-equalp #() (clempo.modexp:modexp #() #() #()))
-  (is-equalp (octets-of 0 0) (clempo.modexp:modexp (octets-of 7) #() (octets-of 0 0))))
+  (is-equalp (make-octets 0) (clempo.modexp:modexp (make-octets 0) (make-octets 0) (make-octets 0)))
+  (is-equalp (octets-of 0 0) (clempo.modexp:modexp (octets-of 7) (make-octets 0) (octets-of 0 0))))
 
 (deftest modexp-precompile-corpus ()
   (dolist (file '("modexp/modexp_eip2565.json" "modexp/modexp_eip7883.json"))

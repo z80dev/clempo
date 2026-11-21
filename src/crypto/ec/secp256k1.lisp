@@ -8,24 +8,13 @@
 (defconstant +secp256k1-p+ #xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f)
 (defconstant +secp256k1-n+ #xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141)
 
-(declaim (inline reduce-field))
-(defun reduce-field (x)
-  (declare #.clempo.base:*hot* (type integer x))
-  ;; 2^256 = 2^32+977 (mod p). Every product fold discards 224 bits.
-  (if (minusp x)
-      (mod x +secp256k1-p+)
-      (progn
-        (loop while (> (integer-length x) 256) do
-          (setf x (+ (ldb (byte 256 0) x) (* (ash x -256) #x1000003d1))))
-        (if (>= x +secp256k1-p+) (- x +secp256k1-p+) x))))
 
 (clempo.ec:define-prime-curve secp
   :p #xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f
   :a 0 :b 7
   :n #xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141
   :gx #x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
-  :gy #x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8
-  :reduction reduce-field)
+  :gy #x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8)
 
 (defun encode-public (x y)
   (when x (octets-concat (integer->octets x 32) (integer->octets y 32))))
