@@ -95,7 +95,6 @@
    ("COMPRESS" 4 "Varint and copy loops consume finite input lengths and matches.")
    ("DECOMPRESS" 1 "Consumes compressed tags up to the finite input length, checking the declared output bound."))
   ("src/rpc/defrpc.lisp" ("VALUE-SPANS" 1 "Advances through values of a fixed JSON slice."))
-  ("src/rpc/fill.lisp" ("OWNER-WEIGHT" 1 "Scans the finite configured owner list."))
   ("src/rpc/revert.lisp" ("SPLIT-SEQUENCE" 1 "Scans the finite signature string from one separator to the next."))
   ("src/rpc/serde.lisp"
    ("DO-ARRAY" 1 "Each element consumes input, or invalid JSON stops parsing.")
@@ -109,6 +108,7 @@
   ("src/rpc/tempo-request.lisp"
    ("RLP-VEC" 1 "Traverses finite RLP items in the supplied list.")
    ("SEQ-TRAILING" 1 "Scans finite trailing transaction fields."))
+  ("src/rpc/witness.lisp" ("OWNER-WEIGHT" 1 "Scans the finite configured owner list."))
   ("src/sim/network.lisp"
    ("HEAP-POP" 1 "Descends a finite heap.")
    ("HEAP-PUSH" 1 "Ascends a finite heap.")
@@ -118,6 +118,9 @@
    ("BOUNDARY-EXTRA" 1 "Scans the finite finalized ancestry until the epoch boundary.")
    ("ON-FINALIZATION" 1 "Walks finalized ancestry to the local head."))
   ("src/state/world.lisp" ("ROLLBACK" 1 "Pops entries until the requested journal marker."))
+  ("src/store/backed.lisp"
+   ("NODE-VALUE-SPLIT" 1 "Consumes the count prefix, bounded by the stored value and overlong-varint guard.")
+   ("WRITE-NODES" 1 "Each removed trie node is marked dead once; pending edge release traverses a finite trie."))
   ("src/tempo/builder/builder.lisp" ("BUILD-PAYLOAD" 1 "Discards or consumes candidates from the finite pool snapshot subject to payload limits."))
   ("src/tempo/contract/backends.lisp" ("HOST-REVERT" 1 "Pops finite memory-host journal entries to the snapshot marker."))
   ("src/tempo/contract/layout.lisp" ("SPLIT-DASHES" 1 "Advances past separators in a finite field name."))
@@ -198,6 +201,11 @@
    ("FINALIZE-TX" 1 "Copies independent keys without emitting effects.")
    ("STORAGE-NONEMPTY-P" 2 "Existence predicates have no iteration-dependent result.")
    ("TAKE-TRANSIENT-STORAGE" 1 "Produces an alist of independent transient keys."))
+  ("src/store/backed.lisp"
+   ("DB-FLUSH-ENTRIES" 2 "Collects independent account and slot records into a sorted flush batch.")
+   ("EVICT" 3 "Drops clean objects according to usage bits or clears whole caches.")
+   ("SORTED-ENTRIES" 1 "Sorts by the store key before serializing entries.")
+   ("WRITE-NODES" 2 "Applies independent node values/counts to a batch keyed by node hash."))
   ("src/tempo/chainspec/chainspec.lisp" ("GENESIS-STORAGE-ROOT" 1 "Distinct-key trie inserts give the same canonical root in any order."))
   ("src/tempo/contract/backends.lisp" ("MEMORY-HOST-COMMITMENTS" 1 "Collects a keyed set of configurable-account commitments in the memory host."))
   ("src/tempo/contract/calls.lisp" ("CONTRACT-ABI" 1 "Sorts declarations before exporting the ABI."))
@@ -247,4 +255,5 @@
   ("src/dev/r1-archive.lisp" "R1-ARCHIVE-RUN" 1 "R1-ARCHIVE-RUN" "Joins the archive worker group before reporting.")
   ("src/dev/rpc-corpus.lisp" "SCAN-ARCHIVE-SHAPES" 1 "SCAN-ARCHIVE-SHAPES" "Joins workers before collecting the record scan.")
   ("src/dev/rpc-corpus.lisp" "PARALLEL-MAP" 1 "PARALLEL-MAP" "Joins the bounded worker group.")
+  ("src/dev/rpc-load.lisp" "LOAD-RUN" 1 "LOAD-RUN" "Joins the load-generator workers before aggregating results.")
   ("src/dev/statetest.lisp" "RUN-STATETESTS" 1 "RUN-STATETESTS" "Joins EEST workers before returning results.")))

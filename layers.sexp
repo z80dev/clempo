@@ -11,8 +11,9 @@
  (:dir "codec")
  (:dir "trie")                              ; before types: tx/receipt roots are tries
  (:dir "types")
- ;; Persistence owns WALs/checkpoints and mapped history; statedb coordinates concurrent readers.
- (:dir "store" :io-exempt ("persist.lisp" "history.lisp" "history-write.lisp" "statedb.lisp"))
+ ;; Durable writes, segments, checkpoints/WAL and mapped history, plus shared state locks.
+ (:dir "store" :io-exempt ("binary.lisp" "kv.lisp" "persist.lisp" "history.lisp"
+                           "history-write.lisp" "statedb.lisp"))
  (:dir "state")
  (:dir "evm")
  (:dir "tempo")
