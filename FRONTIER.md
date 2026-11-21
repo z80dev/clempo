@@ -237,6 +237,22 @@ http://127.0.0.1:8545 -last 10 -batch 5 -once -no-archive -json` reached
 height 50,070,139 with 10 validated blocks and no lag, using default discovery.
 Logs are in `~/scratch/clempo/public-p2p/`.
 
+For a byte-by-byte public follow soak with operators' known public peers,
+pass `-peers FILE` (one enode per line); the reference node's read-only
+`admin_peers` can supply the enodes, but all RLPx block payloads come over
+separate public TCP connections. The observed run used:
+
+```sh
+CLEMPO_BUILD=release bin/clempo-dev p2p-follow-proof \
+  -upstream http://127.0.0.1:8545 -seconds 1800 \
+  -peers "$HOME/scratch/clempo/public-p2p/reference-peer-enodes"
+```
+
+All 3,350 consecutive finalized blocks (50,068,595–50,071,944) matched byte
+for byte in 1,800 seconds over one public eth/69 session to
+`109.94.98.205:30056` (1.86 blocks/s). All 60 progress samples were caught
+up to the RPC finalized head. Log: `~/scratch/clempo/public-p2p/configured-soak.log`.
+
 Hash/25519 crypto (SBCL 2.6.8 release, Apple Silicon, single thread): on
 64 MiB, SHA-256 **2,684 MB/s** (25 ms, no consing), BLAKE3 **317 MB/s**
 (212 ms, no consing), ChaCha20 **257 MB/s** (261 ms, one result buffer).
