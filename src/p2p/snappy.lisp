@@ -5,17 +5,26 @@
 
 (in-package #:clempo.snappy)
 
+;;; Decompression reads peer bytes, so it keeps Lisp's own bounds and type checks
+;;; (safety 1) in every build, beneath its explicit protocol checks.
 (declaim (inline little-word))
 (defun little-word (data pos bytes)
-  (declare (type octets data) (type fixnum pos) (type (integer 1 4) bytes) #.*hot*)
+  (declare (type octets data) (type fixnum pos) (type (integer 1 4) bytes)
+           (optimize (speed 3) (safety 1) (debug 0)))
   (let ((word 0))
     (declare (type (unsigned-byte 32) word))
     (dotimes (i bytes word)
       (setf word (logior word (ash (aref data (+ pos i)) (* 8 i)))))))
 
+(defconstant +max-expansion-numerator+ 64
+  "No element yields more than 64 bytes per 3 bytes read (a two-byte-offset copy), so a
+payload of K bytes after the length decodes to at most 64K/3 bytes.")
+
 (defun decompress (data &key (start 0) (end (length data)) (max-size #xffffff))
-  "Decode one raw Snappy block. Bound expansion before allocating the output."
-  (declare (type octets data) (type fixnum start end max-size) #.*hot*)
+  "Decode one raw Snappy block. Bound expansion before allocating the output: the declared
+length must fit MAX-SIZE and what the remaining bytes could possibly produce."
+  (declare (type octets data) (type fixnum start end max-size)
+           (optimize (speed 3) (safety 1) (debug 0)))
   (unless (<= 0 start end (length data)) (protocol-error "invalid Snappy input range"))
   (let ((p start) (size 0))
     (declare (type fixnum p size))
@@ -27,6 +36,8 @@
                (setf size (logior size (ash (logand b 127) shift)))
                (when (< b 128) (return))))
     (when (> size max-size) (protocol-error "Snappy output length ~D exceeds limit" size))
+    (when (> (* 3 size) (* +max-expansion-numerator+ (- end p)))
+      (protocol-error "Snappy output length ~D impossible from ~D bytes" size (- end p)))
     (let ((out (make-octets size)) (q 0))
       (declare (type fixnum q))
       (macrolet ((need (n)

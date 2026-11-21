@@ -31,6 +31,50 @@
     (signals p2p-error (sn:decompress (hex->octets hex))))
   (signals p2p-error (sn:decompress (octets-of 128 1) :max-size 100)))
 
+(defun snappy-varint (n)
+  (let ((bytes '()))
+    (loop while (>= n 128) do (push (logior 128 (logand n 127)) bytes) (setf n (ash n -7)))
+    (push n bytes)
+    (coerce (nreverse bytes) 'octets)))
+
+(deftest snappy-hostile-lengths-allocate-nothing ()
+  ;; A few bytes once claimed (and allocated) up to 16 MiB of output before any payload
+  ;; was read. A declared length beyond 64/3 of the remaining bytes is now rejected first.
+  (let ((claim (octets-concat (snappy-varint 16000000) (octets-of 0 97)))
+        (before (sb-ext:get-bytes-consed)))
+    (dotimes (i 200) (signals p2p-error (sn:decompress claim)))
+    (is (< (- (sb-ext:get-bytes-consed) before) (* 1024 1024))))
+  ;; The densest valid stream (one literal, then 64-byte two-byte-offset copies) still decodes.
+  (let* ((copies 1000)
+         (stream (apply #'octets-concat (snappy-varint (+ 1 (* 64 copies))) (octets-of 0 97)
+                        (loop repeat copies collect (octets-of (logior 2 (ash 63 2)) 1 0))))
+         (plain (sn:decompress stream)))
+    (is= (+ 1 (* 64 copies)) (length plain))
+    (is (every (lambda (b) (= b 97)) plain))
+    ;; One byte past 64/3 of the payload is impossible, so it fails before allocating.
+    (signals p2p-error (sn:decompress (octets-concat
+                                       (snappy-varint (1+ (floor (* 64 (- (length stream) 3)) 3)))
+                                       (subseq stream 3))))))
+
+(deftest snappy-fuzz-signals-only-p2p-errors ()
+  ;; Random and mutated blocks: the decoder returns octets or signals P2P-ERROR, never a
+  ;; Lisp bounds or type error (it keeps safety 1 in release builds too).
+  (let ((state (sb-ext:seed-random-state 7))
+        (seed (sn:compress (string->octets "the quick brown fox jumps over the lazy dog, the quick dog"))))
+    (flet ((try (input)
+             (handler-case (progn (sn:decompress input) t)
+               (p2p-error () t)
+               (error (e) (is nil "~A on ~A" (type-of e) (octets->hex input))))))
+      (dotimes (i 20000)
+        (let ((input (make-octets (random 24 state))))
+          (dotimes (j (length input)) (setf (aref input j) (random 256 state)))
+          (try input)))
+      (dotimes (i 20000)
+        (let ((input (copy-seq seed)))
+          (dotimes (j (1+ (random 3 state)))
+            (setf (aref input (random (length input) state)) (random 256 state)))
+          (try (if (zerop (random 4 state)) (subseq input 0 (random (length input) state)) input)))))))
+
 (deftest rlpx-reference-frames ()
   (let* ((vectors (fixtures "frames.txt"))
          (aes (gethash "aes_secret" vectors)) (mac (gethash "mac_secret" vectors))
