@@ -70,10 +70,14 @@
                      errors))
     errors))
 
-(defun layout-fixture-mismatches (fixture contract)
-  "Differences between the solc layout FIXTURE (a name under data/layouts) and CONTRACT."
+(defun layout-fixture-mismatches (fixture contract &key exclude)
+  "Differences between the solc layout FIXTURE (a name under data/layouts) and CONTRACT,
+ignoring CONTRACT's fields named in EXCLUDE (fields the Solidity model omits, as the
+reference's layout_fields! lists only the fields it compares)."
   (let ((layout (solc-layout (fixture-json fixture))))
-    (compare-entries layout (clempo.json:jget layout "storage") (layout-fields contract)
+    (compare-entries layout (clempo.json:jget layout "storage")
+                     (remove-if (lambda (f) (member (field-name f) exclude :test #'string=))
+                                (layout-fields contract))
                      (symbol-name contract))))
 
 ;;; The reference's generic layout tests (tests/storage_tests/solidity/primitives.rs).

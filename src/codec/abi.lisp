@@ -351,18 +351,34 @@ ignoring a trailing parameter name. Returns the type."
   (strict nil)
   (validate nil)
   (next 0 :type fixnum)                 ; strict_next_offset, relative to START
-  (parent nil))
+  (parent nil)
+  (memory nil))                         ; (used . limit), shared by a decode's decoders
 
 (defconstant +recursion-limit+ 16)
 
 (defun dec-remaining (d) (- (decoder-end d) (decoder-start d) (decoder-offset d)))
+
+(defun reserve (d bytes)
+  "Decoder::reserve: count BYTES of decoded data against the memory limit."
+  (let ((m (decoder-memory d)))
+    (when (> (incf (car m) bytes) (cdr m)) (abi-fail "memory limit exceeded"))))
+
+(defun token-size (type)
+  "size_of the alloy token a value of TYPE decodes into: a word 32, bytes 16, a dynamic
+array 24, fixed arrays and tuples the sum of their elements."
+  (cond ((member type '(:bytes :string)) 16)
+        ((keywordp type) 32)
+        ((eq (first type) :array)
+         (if (cddr type) (* (third type) (token-size (second type))) 24))
+        ((eq (first type) :tuple) (reduce #'+ (rest type) :key #'token-size))
+        (t 32)))
 
 (defun child-decoder (d offset)
   (when (>= (decoder-depth d) +recursion-limit+) (abi-fail "recursion limit"))
   (unless (<= offset (- (decoder-end d) (decoder-start d))) (abi-fail "overrun"))
   (%make-decoder :data (decoder-data d) :start (+ (decoder-start d) offset) :end (decoder-end d)
                  :depth (1+ (decoder-depth d)) :strict (decoder-strict d)
-                 :validate (decoder-validate d) :parent d))
+                 :validate (decoder-validate d) :parent d :memory (decoder-memory d)))
 
 (defun finish-child (child)
   "alloy's Decoder::drop: a strict child reports how far it reached to its parent."
@@ -444,6 +460,7 @@ ignoring a trailing parameter name. Returns the type."
         (with-child (c (take-indirection d))
           (let* ((len (take-offset c))
                  (bytes (take-padded-slice c len)))
+            (reserve c len)
             (if (eq type :bytes)
                 bytes
                 (utf8-decode bytes :lossy (not (decoder-validate d)))))))
@@ -463,6 +480,7 @@ ignoring a trailing parameter name. Returns the type."
                   (with-child (c2 (child-decoder c (decoder-offset c)))
                     (set-strict-head-words c2 required)
                     (when (> required (floor (dec-remaining c2) 32)) (abi-fail "overrun"))
+                    (reserve c2 (* len (token-size elem)))
                     (loop repeat len collect (decode-from elem c2))))))))
        (:tuple
         (if (abi-dynamic-p type)
@@ -474,12 +492,14 @@ ignoring a trailing parameter name. Returns the type."
   (set-strict-head-words d (reduce #'+ types :key #'abi-min-words))
   (loop for ty in types collect (decode-from ty d)))
 
-(defun abi-decode (types data &key (start 0) (end (length data)) strict validate allow-trailing)
+(defun abi-decode (types data &key (start 0) (end (length data)) strict validate allow-trailing
+                                   (memory-limit (ash 1 30)))
   "Decode DATA[START..END) as the tuple TYPES; returns the list of values. STRICT is
 alloy's strict mode (canonical layout, which also validates); VALIDATE type-checks values;
-ALLOW-TRAILING lets a strict decode leave trailing bytes. Signals ABI-DECODE-ERROR."
+ALLOW-TRAILING lets a strict decode leave trailing bytes; MEMORY-LIMIT bounds the decoded
+size as alloy's AbiDecoderConfig does. Signals ABI-DECODE-ERROR."
   (let* ((d (%make-decoder :data data :start start :end end :strict strict
-                           :validate (or validate strict)))
+                           :validate (or validate strict) :memory (cons 0 memory-limit)))
          (values (decode-sequence types d)))
     (when (and strict (not allow-trailing) (/= (decoder-next d) (- end start)))
       (abi-fail "trailing or missing bytes"))

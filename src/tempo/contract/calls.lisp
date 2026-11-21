@@ -119,7 +119,8 @@ from T12), static check for mutating calls, then the call. Returns the output oc
     (let ((args (handler-case
                     (clempo.abi:abi-decode-call (call-entry-arg-types entry) input
                                                 :strict (spec>= :t11)
-                                                :allow-trailing (spec>= :t12))
+                                                :allow-trailing (spec>= :t12)
+                                                :memory-limit (* 16 1024 1024))
                   (clempo.abi:abi-decode-error () (revert-data (make-octets 0))))))
       (when (and (call-entry-mutates entry) (static-p))
         (reject-static-call))
