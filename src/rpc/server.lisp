@@ -62,8 +62,25 @@ starts there, so no notification precedes the response that names it)."
   "New heads a websocket subscriber may fall behind before the oldest is skipped: reth's
 PER_BLOCK_FEED_CAPACITY, the depth of its per-block broadcast feeds.")
 
-(defstruct (connection (:constructor make-connection (socket stream)))
-  socket stream
+;;; A connection's input: the socket is read into the connection's own buffer, one read
+;;; system call per arrival, and request lines are found by scanning those octets (no byte
+;;; at a time through a stream). Waits go through WAIT-UNTIL-FD-USABLE, where deadlines
+;;; (WITH-IO-DEADLINE) reach them as they reach a stream's.
+
+(defconstant +inbuf-size+ 16384
+  "Room for the request lines and header lines being parsed (each at most
++HEADER-LINE-MAX+ bytes); a body is read into its own array.")
+
+(defstruct (inbuf (:constructor make-inbuf (fd)))
+  (fd -1 :type fixnum)
+  (octets (make-octets +inbuf-size+) :type octets)
+  (start 0 :type fixnum)                ; the first unconsumed byte
+  (end 0 :type fixnum)                  ; after the last byte read
+  (eof nil))
+
+(defstruct (connection (:constructor make-connection
+                           (socket stream &aux (in (and socket (make-inbuf (sb-bsd-sockets:socket-file-descriptor socket)))))))
+  socket stream in
   (send-lock (sb-thread:make-mutex :name "ws send"))
   (websocket-p nil)
   ;; Replaced whole (never mutated in place) under SUBSCRIPTIONS-LOCK, so the writer thread
@@ -174,21 +191,71 @@ those accepted in the current request that start after its response."
   (reject 413 (format nil "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32007,\"message\":\"Request is too big\",\"data\":\"Exceeded max limit of ~D\"}}"
                       +body-max+)))
 
-(defun read-line-crlf (stream &optional (limit +header-line-max+))
-  "The next line without its CR LF, NIL at end of stream; a line longer than LIMIT bytes
-is refused (431) before it is buffered further."
-  (let ((out (make-string-output-stream)) (any nil) (n 0))
-    (loop for b = (read-byte stream nil nil)
-          do (cond ((null b) (return (and any (get-output-stream-string out))))
-                   ((= b 10) (return (string-right-trim '(#\Return) (get-output-stream-string out))))
-                   ((> (incf n) limit) (reject 431))
-                   (t (setf any t) (write-char (code-char b) out))))))
+(defun fd-read (fd o start end)
+  "Read into O[START,END) what FD has, waiting for at least one byte. Returns the count, 0 at
+end of stream."
+  (declare (type fixnum fd start end) (type octets o))
+  (invariant (< start end) "empty read")
+  (loop
+    (multiple-value-bind (count errno)
+        (sb-sys:with-pinned-objects (o)
+          (sb-unix:unix-read fd (sb-sys:sap+ (sb-sys:vector-sap o) start) (- end start)))
+      (cond (count (return count))
+            ((eql errno sb-unix:ewouldblock) (sb-sys:wait-until-fd-usable fd :input))
+            ((eql errno sb-unix:eintr))
+            (t (error 'sb-int:simple-stream-error :stream nil
+                                                  :format-control "socket read failed: ~A"
+                                                  :format-arguments (list (sb-int:strerror errno))))))))
 
-(defun read-request-head (stream)
+(defun inbuf-fill (in)
+  "Read more of the socket after IN's buffered bytes (moved to the front first). NIL at end
+of stream."
+  (unless (inbuf-eof in)
+    (let ((o (inbuf-octets in)) (start (inbuf-start in)) (end (inbuf-end in)))
+      (when (plusp start)
+        (replace o o :start2 start :end2 end)
+        (setf end (- end start) (inbuf-start in) 0 (inbuf-end in) end))
+      (let ((count (fd-read (inbuf-fd in) o end (length o))))
+        (if (zerop count)
+            (progn (setf (inbuf-eof in) t) nil)
+            (incf (inbuf-end in) count))))))
+
+(defun latin1-string (o start end)
+  (declare (type octets o) (type fixnum start end))
+  (let ((s (make-string (- end start))))
+    (loop for i of-type fixnum from start below end
+          for j of-type fixnum from 0
+          do (setf (schar s j) (code-char (aref o i))))
+    s))
+
+(defun read-line-crlf (in &optional (limit +header-line-max+))
+  "The next line without its CR LF (trailing CRs dropped), NIL at end of stream; a line
+longer than LIMIT bytes is refused (431) before it is buffered further."
+  (declare (type fixnum limit))
+  (let ((scanned 0))
+    (declare (type fixnum scanned))
+    (loop
+      (let* ((o (inbuf-octets in)) (start (inbuf-start in)) (end (inbuf-end in))
+             (lf (position 10 o :start (+ start scanned) :end end)))
+        (cond (lf
+               (when (> (- lf start) limit) (reject 431))
+               (setf (inbuf-start in) (1+ lf))
+               (return (latin1-string o start (loop with e of-type fixnum = lf
+                                                    while (and (> e start) (= 13 (aref o (1- e))))
+                                                    do (decf e)
+                                                    finally (return e)))))
+              ((> (- end start) limit) (reject 431))
+              ((not (inbuf-fill in))
+               (let ((start (inbuf-start in)) (end (inbuf-end in)))
+                 (setf (inbuf-start in) end)
+                 (return (and (> end start) (latin1-string (inbuf-octets in) start end)))))
+              (t (setf scanned (- end start))))))))
+
+(defun read-request-head (in)
   "Returns (values method path headers) or NIL at end of stream. Header names are lowercased.
 Signals BAD-REQUEST for a malformed request line or header, or one over the limits."
   (let ((line (loop repeat +header-lines-max+
-                    for l = (read-line-crlf stream)
+                    for l = (read-line-crlf in)
                     while (and l (zerop (length l)))
                     finally (return l))))
     (when line
@@ -197,7 +264,7 @@ Signals BAD-REQUEST for a malformed request line or header, or one over the limi
         (values (subseq line 0 sp1)
                 (subseq line (1+ sp1) sp2)
                 (loop for count from 0
-                      for h = (read-line-crlf stream)
+                      for h = (read-line-crlf in)
                       until (or (null h) (zerop (length h)))
                       when (>= count +header-lines-max+) do (reject 431)
                       collect (let ((colon (position #\: h)))
@@ -207,9 +274,19 @@ Signals BAD-REQUEST for a malformed request line or header, or one over the limi
 
 (defun header (headers name) (cdr (assoc name headers :test #'string=)))
 
-(defun read-exactly (stream n)
-  (let ((o (make-octets n)))
-    (unless (= n (read-sequence o stream)) (error 'end-of-file :stream stream))
+(defun read-exactly (in n)
+  "The next N octets: those buffered, then the rest read straight into the result."
+  (let* ((o (make-octets n))
+         (have (min n (- (inbuf-end in) (inbuf-start in)))))
+    (replace o (inbuf-octets in) :start2 (inbuf-start in) :end2 (+ (inbuf-start in) have))
+    (incf (inbuf-start in) have)
+    (loop with pos = have
+          while (< pos n)
+          do (let ((count (if (inbuf-eof in) 0 (fd-read (inbuf-fd in) o pos n))))
+               (when (zerop count)
+                 (setf (inbuf-eof in) t)
+                 (error 'end-of-file :stream nil))
+               (incf pos count)))
     o))
 
 (defun parse-size (text radix)
@@ -220,43 +297,44 @@ Signals BAD-REQUEST for a malformed request line or header, or one over the limi
       (reject 400))
     (parse-integer text :radix radix)))
 
-(defun read-chunked (stream)
+(defun read-chunked (in)
   (let ((parts '()) (total 0))
-    (loop for line = (or (read-line-crlf stream 1024) (error 'end-of-file :stream stream))
+    (loop for line = (or (read-line-crlf in 1024) (error 'end-of-file :stream nil))
           for size = (parse-size (subseq line 0 (or (position #\; line) (length line))) 16)
           until (zerop size)
           do (when (> (incf total size) +body-max+) (too-large))
-             (push (read-exactly stream size) parts)
-             (unless (equal "" (read-line-crlf stream 2)) (reject 400)))
+             (push (read-exactly in size) parts)
+             (unless (equal "" (read-line-crlf in 2)) (reject 400)))
     (loop repeat (1+ +header-lines-max+)
-          for l = (read-line-crlf stream)
+          for l = (read-line-crlf in)
           until (or (null l) (zerop (length l)))
           finally (when (and l (plusp (length l))) (reject 431)))
     (apply #'octets-concat (nreverse parts))))
 
-(defun read-body (stream headers)
+(defun read-body (in headers)
   (let ((len (header headers "content-length"))
         (te (header headers "transfer-encoding")))
     (cond ((and len te) (reject 400))   ; both framings: refused (request smuggling)
           (te (unless (string-equal te "chunked") (reject 400))
-              (read-chunked stream))
+              (read-chunked in))
           (len (let ((n (parse-size len 10)))
                  (when (> n +body-max+) (too-large))
-                 (read-exactly stream n)))
+                 (read-exactly in n)))
           (t (make-octets 0)))))
 
 (defun write-http-response (stream status reason content-type body &key extra-headers)
-  (let ((bytes (if (stringp body) (string->octets body) body)))
+  "Write the response head and BODY (a string or octets) and send them in one write."
+  (let* ((bytes (if (stringp body) (string->octets body) body))
+         (crlf (coerce '(#\Return #\Newline) 'string))
+         (head (apply #'concatenate 'string
+                      "HTTP/1.1 " (princ-to-string status) " " reason crlf
+                      (append (when content-type (list "content-type: " content-type crlf))
+                              (list "content-length: " (princ-to-string (length bytes)) crlf)
+                              (loop for (k . v) in extra-headers
+                                    append (list (princ-to-string k) ": " (princ-to-string v) crlf))
+                              (list crlf)))))
     (with-io-deadline (*write-seconds*)
-      (write-sequence
-       (string->octets
-        (with-output-to-string (h)
-          (format h "HTTP/1.1 ~D ~A~C~C" status reason #\Return #\Newline)
-          (when content-type (format h "content-type: ~A~C~C" content-type #\Return #\Newline))
-          (format h "content-length: ~D~C~C" (length bytes) #\Return #\Newline)
-          (loop for (k . v) in extra-headers do (format h "~A: ~A~C~C" k v #\Return #\Newline))
-          (format h "~C~C" #\Return #\Newline)))
-       stream)
+      (write-sequence (string->octets head) stream)
       (write-sequence bytes stream)
       (force-output stream))))
 
@@ -288,14 +366,14 @@ object or array)."
 (defun websocket-request-p (method headers)
   (and (string-equal method "GET") (string-equal (or (header headers "upgrade") "") "websocket")))
 
-(defun read-request (stream)
+(defun read-request (in)
   "The next request: (values method headers body), NIL at end of stream. Its head and body
 must arrive within *REQUEST-SECONDS*."
   (with-io-deadline (*request-seconds*)
-    (multiple-value-bind (method path headers) (read-request-head stream)
+    (multiple-value-bind (method path headers) (read-request-head in)
       (declare (ignore path))
       (when method
-        (values method headers (unless (websocket-request-p method headers) (read-body stream headers)))))))
+        (values method headers (unless (websocket-request-p method headers) (read-body in headers)))))))
 
 (defun serve-http-request (method headers body stream)
   "Answer one HTTP request; returns T to keep the connection open."
@@ -312,8 +390,39 @@ must arrive within *REQUEST-SECONDS*."
 
 ;;; WebSocket
 
+(defclass prefixed-input (sb-gray:fundamental-binary-input-stream)
+  ((prefix :initarg :prefix :type octets) (pos :initform 0 :type fixnum) (inner :initarg :inner))
+  (:documentation "Frames read after the upgrade: octets the connection buffered past the
+upgrade request first, then the socket's stream."))
+
+(defmethod stream-element-type ((s prefixed-input)) '(unsigned-byte 8))
+
+(defmethod sb-gray:stream-read-byte ((s prefixed-input))
+  (with-slots (prefix pos inner) s
+    (if (< pos (length prefix))
+        (prog1 (aref prefix pos) (incf pos))
+        (read-byte inner nil :eof))))
+
+(defmethod sb-gray:stream-read-sequence ((s prefixed-input) seq &optional (start 0) end)
+  (with-slots (prefix pos inner) s
+    (let* ((end (or end (length seq)))
+           (n (min (- end start) (- (length prefix) pos))))
+      (replace seq prefix :start1 start :end1 (+ start n) :start2 pos)
+      (incf pos n)
+      (if (< (+ start n) end) (read-sequence seq inner :start (+ start n) :end end) end))))
+
+(defun websocket-input (connection stream)
+  "The stream frames are read from: STREAM, after any octets already buffered."
+  (let ((in (connection-in connection)))
+    (if (< (inbuf-start in) (inbuf-end in))
+        (prog1 (make-instance 'prefixed-input :inner stream
+                                              :prefix (subseq (inbuf-octets in) (inbuf-start in) (inbuf-end in)))
+          (setf (inbuf-start in) (inbuf-end in)))
+        stream)))
+
 (defun serve-websocket (connection headers stream)
-  (let ((key (header headers "sec-websocket-key")))
+  (let ((key (header headers "sec-websocket-key"))
+        (input (websocket-input connection stream)))
     (unless key (reject 400))
     (with-io-deadline (*write-seconds*)
       (write-sequence
@@ -343,7 +452,7 @@ must arrive within *REQUEST-SECONDS*."
             (handler-case (let ((ws:*message-max* +body-max+)
                                 (ws:*frame-seconds* *request-seconds*)
                                 (ws:*require-mask* t))
-                            (ws:read-message stream #'control))
+                            (ws:read-message input #'control))
               (ws:frame-error (e)
                 (close-with (integer->octets (ws:frame-error-code e) 2))
                 (return)))
@@ -413,19 +522,21 @@ so far when this one pushed the oldest out, else NIL."
 
 (defun wait-for-request (connection)
   "True once CONNECTION has input (or end of stream) within *IDLE-SECONDS*."
-  (or (listen (connection-stream connection))
-      (sb-sys:wait-until-fd-usable (sb-bsd-sockets:socket-file-descriptor (connection-socket connection))
-                                   :input *idle-seconds*)))
+  (let ((in (connection-in connection)))
+    (or (< (inbuf-start in) (inbuf-end in))
+        (inbuf-eof in)
+        (sb-sys:wait-until-fd-usable (inbuf-fd in) :input *idle-seconds*))))
 
 (defun serve-connection (server connection)
   (let ((stream (connection-stream connection))
+        (in (connection-in connection))
         (*server* server))
     (unwind-protect
          (handler-case
              (loop
                (unless (wait-for-request connection) (return))
                (multiple-value-bind (method headers body)
-                   (handler-case (read-request stream)
+                   (handler-case (read-request in)
                      (bad-request (e)
                        (let ((status (bad-request-status e)))
                          (write-http-response stream status (reason status)

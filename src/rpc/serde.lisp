@@ -82,9 +82,29 @@ representation.")
 
 (defun eof-error (src) (serde-fail-here src "EOF while parsing a value"))
 
+(defun quote-or-escape (text start end)
+  "The position of the first \" or \\ in TEXT[START,END), or NIL."
+  (declare #.*hot* (type simple-string text) (type fixnum start end))
+  (macrolet ((scan (type)
+               `(let ((text text))
+                  (declare (type ,type text))
+                  (loop for i of-type fixnum from start below end
+                        do (let ((c (schar text i)))
+                             (when (or (char= c #\") (char= c #\\)) (return i)))))))
+    (etypecase text
+      ((simple-array character (*)) (scan (simple-array character (*))))
+      (simple-base-string (scan simple-base-string)))))
+
 (defun read-string (src)
   "Consume a JSON string (the next value must be one) and return it."
   (unless (eql (peek src) #\") (unreachable "read-string on non-string"))
+  ;; Without escapes (nearly every string) the value is a copy of the text up to the quote.
+  (let* ((text (src-text src))
+         (start (1+ (src-pos src)))
+         (stop (quote-or-escape text start (src-end src))))
+    (when (and stop (char= (schar text stop) #\"))
+      (setf (src-pos src) (1+ stop))
+      (return-from read-string (subseq text start stop))))
   (let ((text (src-text src)) (out (make-string-output-stream)))
     (advance src 1)
     (loop

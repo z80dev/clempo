@@ -38,6 +38,19 @@
   (write-sequence (if (stringp data) (map 'octets #'char-code data) data) stream)
   (force-output stream))
 
+(defun read-line-crlf (stream)
+  "The client's next response line without its CR LF, NIL at end of stream."
+  (let ((out (make-string-output-stream)) (any nil))
+    (loop for b = (read-byte stream nil nil)
+          do (cond ((null b) (return (and any (get-output-stream-string out))))
+                   ((= b 10) (return (string-right-trim '(#\Return) (get-output-stream-string out))))
+                   (t (setf any t) (write-char (code-char b) out))))))
+
+(defun read-exactly (stream n)
+  (let ((o (make-octets n)))
+    (unless (= n (read-sequence o stream)) (error 'end-of-file :stream stream))
+    o))
+
 (defun read-all (stream)
   "Everything until the server closes the connection, as a string."
   (let ((out (make-string-output-stream)))
@@ -187,10 +200,10 @@
                                        (loop for i below requests
                                              count (let ((body (format nil "{\"jsonrpc\":\"2.0\",\"id\":~D,\"method\":\"web3_sha3\",\"params\":[\"0x~(~4,'0x~)\"]}" i (+ (* 256 k) i))))
                                                      (send stream (post body))
-                                                     (let* ((head (loop for line = (server::read-line-crlf stream)
+                                                     (let* ((head (loop for line = (read-line-crlf stream)
                                                                         until (equal line "") collect line))
                                                             (len (parse-integer (subseq (find "content-length" head :test (lambda (a b) (search a b :test #'char-equal))) 16)))
-                                                            (got (octets->string (server::read-exactly stream len))))
+                                                            (got (octets->string (read-exactly stream len))))
                                                        (equal (json:jget (json:parse-json got) "result")
                                                               (octets->hex (clempo.keccak:keccak256 (integer->octets (+ (* 256 k) i) 2)))))))
                                     (close stream)))
@@ -205,7 +218,7 @@
     (declare (ignore socket))
     (send stream (crlf "GET / HTTP/1.1" "Host: x" "Upgrade: websocket" "Connection: Upgrade"
                        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" "Sec-WebSocket-Version: 13" ""))
-    (loop for line = (server::read-line-crlf stream) until (equal line ""))
+    (loop for line = (read-line-crlf stream) until (equal line ""))
     stream))
 
 (defun close-code (stream)
