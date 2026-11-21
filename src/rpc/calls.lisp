@@ -25,7 +25,7 @@ missing piece.")
            #:req-type #:req-calls #:req-fee-token #:req-nonce-key
            #:request-input #:aa-request-p #:request-type #:request-plist #:request-gas
            #:call-env #:block-hash-fn #:apply-state-overrides #:check-state-overrides
-           #:run-request #:call-result #:revert-reason #:invalid-request-error
+           #:run-request #:call-result #:revert-reason #:invalid-request-error #:error-text
            #:+invalid-transaction-errors+ #:*rpc-gas-cap* #:header-base-fee))
 
 (in-package #:clempo.rpc.calls)

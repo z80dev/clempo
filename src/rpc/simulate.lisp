@@ -231,7 +231,7 @@ lanes included); returns (values sim-calls remaining-cap)."
                                 "gasUsed" (q used) "maxUsedGas" (q max-used) "status" "0x0"
                                 "error" (apply #'json:jobject
                                                "code" (if (eql (rpc-error-code e) 3) 3 -32015)
-                                               "message" (rpc-error-message e)
+                                               "message" (error-text e)
                                                (when (rpc-error-data e) (list "data" (rpc-error-data e)))))
                   log-start)))))
 
