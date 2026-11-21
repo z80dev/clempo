@@ -346,7 +346,12 @@ into a precompile that runs out of gas ends :PRECOMPILE-OUT-OF-GAS (evm2 Precomp
         (let ((address (evm:create-address caller nonce)))
           (state:warm-address world address)
           (if (evm:collision-p world (state:get-account world address))
-              (values :create-collision 0 (make-octets 0))
+              (progn
+                ;; evm2 still reports the create frame, ended by the collision
+                (when evm:*tracer*
+                  (evm:trace-unstarted :create caller address address value (make-octets 0)
+                                       input gas 0 :create-collision 0))
+                (values :create-collision 0 (make-octets 0)))
               (evm:create-message caller address value input gas 0)))
         (let* ((code (state:get-code world to))
                (target (state:delegation-target code)))

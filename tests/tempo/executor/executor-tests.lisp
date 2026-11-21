@@ -123,3 +123,31 @@ so the state is genesis (every header through 3210 carries the genesis state roo
     (is= 3210 (replay-result-matched-through result))
     (is= 3211 (store:db-number db))
     (is-equalp (header-state-root b3211) (store:db-root-hash db))))
+
+(deftest top-level-create-collision-is-traced ()
+  ;; A transaction creating over an account that already has a nonce (mainnet tx
+  ;; 0x07471adf...4ed1, the Multicall3 deployer): the reference's trace_transaction is one
+  ;; "create" frame at traceAddress [] with error "Contract address collision" and a null
+  ;; result; clempo's top-level path used to return without opening a frame.
+  (let* ((sender #x05f32b3cc3888453ff71b01135b34ff8e41263f2)
+         (address (clempo.evm:create-address sender 0))
+         (b (clempo.state:make-memory-backend))
+         (initcode (hex->octets "6080604052"))
+         (gas #xd9220))
+    (clempo.state:memory-backend-put-account b sender :balance (expt 10 18))
+    (clempo.state:memory-backend-put-account b address :nonce 1)
+    (let* ((world (clempo.state:make-world b))
+           (clempo.evm:*world* world)
+           (clempo.evm:*spec* (clempo.evm:make-spec :osaka))
+           (tracer (clempo.tracing:make-parity-tracer '(:trace))))
+      (clempo.tracing:with-tracer (tracer world)
+        (is= :create-collision
+             (clempo.executor::run-initial-frame sender 0 nil initcode 0 gas)))
+      (let ((traces (clempo.tracing:parity-transaction-traces tracer)))
+        (is= 1 (length traces))
+        (let ((trace (aref traces 0)))
+          (is-equalp "create" (clempo.json:jget trace "type"))
+          (is-equalp "Contract address collision" (clempo.json:jget trace "error"))
+          (is= 0 (length (clempo.json:jget trace "traceAddress")))
+          (is-equalp "0xd9220" (clempo.json:jget (clempo.json:jget trace "action") "gas"))
+          (is-equalp "0x6080604052" (clempo.json:jget (clempo.json:jget trace "action") "init")))))))
