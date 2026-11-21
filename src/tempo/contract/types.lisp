@@ -132,10 +132,12 @@
       (:int (ldb (byte (second word) 0) key))
       (:bool (if key 1 0)))))
 
-(let ((buf (make-octets 64)))
-  (defun mapping-slot (key-word base-slot)
-    "keccak256(be32(KEY-WORD) || be32(BASE-SLOT)) as an integer."
-    (declare (type (unsigned-byte 256) key-word base-slot))
+(defun mapping-slot (key-word base-slot)
+  "keccak256(be32(KEY-WORD) || be32(BASE-SLOT)) as an integer. The buffer is per call
+\(stack-allocated), so concurrent callers (parallel eth_calls) never share it."
+  (declare (type (unsigned-byte 256) key-word base-slot))
+  (let ((buf (make-array 64 :element-type '(unsigned-byte 8))))
+    (declare (dynamic-extent buf))
     (loop for i from 0 below 32
           do (setf (aref buf (- 31 i)) (ldb (byte 8 (* 8 i)) key-word)
                    (aref buf (- 63 i)) (ldb (byte 8 (* 8 i)) base-slot)))
