@@ -10,25 +10,30 @@
 | R3p Precompiles | 4,986/4,992 (goempo's frontier; every Tempo precompile T0..T14; the 6 differences are T14 keychain grants where clempo follows tempo c8b89f9, newer than the corpus: +2,600 gas root-retirement probe) | `fd2d4cf` | 2026-11-21 |
 | R4 Follow | - | | |
 | R5 RPC | 109/132 methods, 5,426/8,221 cases; 107/156 reference methods served (blocks 3,890/3,890, logs 366/366, envelope 50/50, static 106/119; state, calls and traces wait on the executor) | rpc slice 4 | 2026-11-21 |
-| R6 Validator | Sims: 4, 5 and 7 validators, three epochs each. Live Rust devnet: one Clempo signer necessary through two reshares, two Clempo signers necessary through three | `cb8ae2e`, `dbe14d1` | 2026-11-21 |
+| R6 Validator | Sims: 4, 5 and 7 validators, three epochs each, every reshare concluded through per-node DKG managers. Live Rust devnet: one Clempo signer necessary through two reshares, two Clempo signers necessary through three | `b680aaf`, `dbe14d1` | 2026-11-21 |
 | R7 Speed | - | | |
 
 ## Evidence
 
-R6 sim (cb8ae2e): `bin/clempo-dev score -rung R6 -json` (or `bin/clempo-dev sim -scenario r6-4`)
-runs src/sim/scenarios.lisp: clempo.simplex voters (commonware 2026.10.1 voter, Random V1
-elector) and clempo.dkg (commonware Feldman/Desmedt reshare, Tempo's dealer logs in extraData
-and boundary outcomes) on a seeded network; the produced chain goes through the same
+R6 sim (b680aaf): `CLEMPO_BUILD=release bin/clempo-dev score -rung R6 -json` (or
+`bin/clempo-dev sim -scenario r6-4`) runs src/sim/scenarios.lisp: clempo.simplex voters
+(commonware 2026.10.1 voter, Random V1 elector) and one clempo.dkg manager per node, driven
+as Tempo drives its DKG actor (every finalized block in order, the DKG channel over the
+simulated network, dealer logs and boundary outcomes in extraData, Enter/Exit starting and
+stopping each epoch's voter), on a seeded network; the produced chain goes through the same
 certify-blocks used for mainnet, anchored at the genesis DKG outcome. Release build:
-- r6-4: 4 validators, epochs of 20, latency 5-60 ms, 2% drops, node 3 down 1.5-4 s: 59/59
-  blocks certified, 3/3 ceremonies concluded, group key unchanged, all 4 nodes at height 59
-  (6,263 messages, 272 dropped; 7.9 s simulated, 131 s real).
+- r6-4: 4 validators, epochs of 24, latency 5-60 ms, 2% drops, node 3 down 1.5-4 s: 71/71
+  blocks certified, 3/3 ceremonies concluded, group key unchanged, all 4 nodes at height 71
+  (4,286 messages, 246 dropped; 6.7 s simulated, 4 s real). With epochs of 20 (cb8ae2e)
+  epoch 0's second half had only two distinct leaders, so its reshare carried the previous
+  output forward: 2/3 ceremonies, not the 3/3 recorded then.
 - r6-5: 5 validators, epochs of 25, node 1 down 1-3 s, partition {0,1}|{2,3,4} 5-6.5 s:
   74/74 blocks certified (73 certificates, one block covered by its child's), 3/3 ceremonies,
-  all 5 nodes at height 74 (183 s real).
+  all 5 nodes at height 74 (7,737 messages, 395 dropped; 9.8 s simulated, 6 s real).
 - r6-7: 7 validators, epochs of 35, node 6 crashed for the whole run, node 2 down 3-6 s:
-  104/104 blocks certified, 3/3 ceremonies, the 6 live nodes at height 104 (474 s real).
-Real time is BLS12-381 field arithmetic (bignum mod); verify.sh runs smoke-4 (2 epochs).
+  104/104 blocks certified, 3/3 ceremonies, the 6 live nodes at height 104 (19,798 messages,
+  3,870 dropped; 15.2 s simulated, 11 s real).
+verify.sh runs smoke-4 (2 epochs of 12, both reshares concluded).
 
 R6 mixed Rust devnet (`dbe14d1` on main): separate loopback T13 networks,
 four-member committees and a 3-of-4 threshold, with only slots `0,2,3`
