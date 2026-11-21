@@ -267,8 +267,9 @@ description of the first difference."
     by-fork))
 
 (defcommand "statetest" (args)
-  "run EEST state tests: statetest [dir-or-file] [-fork Osaka] [-threads N] [-trace] [-v]"
-  (let* ((target (or (first (arg args :rest)) (namestring *statetest-dir*)))
+  "run EEST state tests: statetest [dir-or-file] [-fork Osaka] [-threads N] [-trace] [-v] [-jit [N] | -interp]"
+  (let* ((jit (clempo.dev.evm-compile:jit-option args))
+         (target (or (first (arg args :rest)) (namestring *statetest-dir*)))
          (fork-filter (let ((f (arg args :fork))) (and f (or (clempo.evm:parse-fork f)
                                                              (error "unknown fork ~A" f)))))
          (verbose (arg-flag args :v))
@@ -292,6 +293,7 @@ description of the first difference."
         (when cell (format t "~10A ~D/~D~%" (string-capitalize f) (car cell) (cdr cell)))))
     (format t "statetest: ~D/~D passed in ~,1F s~%" passed (length results)
             (/ (- (get-internal-real-time) start) internal-time-units-per-second))
+    (when jit (clempo.dev.evm-compile:jit-summary))
     (if (= passed (length results)) 0 1)))
 
 (clempo.dev::defrung "R3e" (args)

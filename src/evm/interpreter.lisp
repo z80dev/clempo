@@ -28,20 +28,46 @@
           ,@(op-info-body info))
         ,@(unless (op-info-manual-pc info) '((incf pc)))))))
 
+;;; Gas and memory helpers shared by every runner of DEFOP bodies (this interpreter and
+;;; the compiler in compile.lisp). They expect GAS, FRAME and GP in scope and a local
+;;; HALT macro.
+
+(defmacro charge (n)
+  `(let ((c ,n))
+     (declare (type fixnum c))
+     (decf gas c)
+     (when (< gas 0) (halt :out-of-gas))))
+
+(defmacro sync-gas () '(setf (frame-gas frame) gas))
+(defmacro reload-gas () '(setf gas (frame-gas frame)))
+
+(defmacro mem-ensure (offset size)
+  `(unless (eql ,size 0)
+     (let ((end (mem-end ,offset ,size)))
+       (unless end (halt :memory-out-of-gas))
+       (when (> end (frame-mem-size frame))
+         (let ((c (expansion-cost frame end gp)))
+           (declare (type fixnum c))
+           (decf gas c)
+           (when (< gas 0) (halt :memory-out-of-gas)))
+         (grow-memory frame end)))))
+
 (defmacro define-interpreter (name &key traced)
-  `(defun ,name (frame)
-     ,(format nil "Run FRAME's code~:[~; calling TRACE-STEP and TRACE-STEP-END around each op~].
+  `(defun ,name (frame &optional (start-pc 0) (start-sp 0))
+     ,(format nil "Run FRAME's code~:[~; calling TRACE-STEP and TRACE-STEP-END around each op~]
+from START-PC with START-SP words already on its depth's stack (compiled code resumes here).
 Returns (values status output); FRAME-GAS holds the gas left (0 after an exceptional halt)."
               traced)
-     (declare #.*hot* (type frame frame) (sb-ext:muffle-conditions sb-ext:compiler-note))
+     (declare #.*hot* (type frame frame) (type fixnum start-pc start-sp)
+              (sb-ext:muffle-conditions sb-ext:compiler-note))
      (let* ((code (frame-code frame))
             (code-len (length code))
             (analysis (code-analysis code))
             (jumpdests (analysis-jumpdests analysis))
             (pushes (analysis-pushes analysis))
             (stack (acquire-stack (frame-depth frame)))
-            (sp 0)
-            (pc 0)
+            (sp start-sp)
+            (pc start-pc)
             (gas (frame-gas frame))
             (world *world*)
             (spec *spec*)
@@ -59,13 +85,6 @@ Returns (values status output); FRAME-GAS holds the gas left (0 after an excepti
                     (declare (ignorable body))
                     ,(if traced '(cons 'progn body) nil))
                   (push-word (x) `(progn (setf (svref stack sp) ,x) (incf sp)))
-                  (charge (n)
-                    `(let ((c ,n))
-                       (declare (type fixnum c))
-                       (decf gas c)
-                       (when (< gas 0) (halt :out-of-gas))))
-                  (sync-gas () '(setf (frame-gas frame) gas))
-                  (reload-gas () '(setf gas (frame-gas frame)))
                   (halt (status &optional (output '+empty-code+))
                     `(let ((st ,status) (out ,output))
                        (setf (frame-gas frame)
@@ -76,17 +95,7 @@ Returns (values status output); FRAME-GAS holds the gas left (0 after an excepti
                              '((trace-step-end tracer frame step-pc
                                 (if (< step-pc code-len) (aref code step-pc) 0)
                                 gas sp stack st)))   ; gas the op had left, before zeroing
-                       (return-from run (values st out))))
-                  (mem-ensure (offset size)
-                    `(unless (eql ,size 0)
-                       (let ((end (mem-end ,offset ,size)))
-                         (unless end (halt :memory-out-of-gas))
-                         (when (> end (frame-mem-size frame))
-                           (let ((c (expansion-cost frame end gp)))
-                             (declare (type fixnum c))
-                             (decf gas c)
-                             (when (< gas 0) (halt :memory-out-of-gas)))
-                           (grow-memory frame end))))))
+                       (return-from run (values st out)))))
          (block run
            (loop
              (let ((op (if (< pc code-len) (aref code pc) 0)))
@@ -112,6 +121,12 @@ Returns (values status output); FRAME-GAS holds the gas left (0 after an excepti
 (define-interpreter interpret)
 (define-interpreter interpret-traced :traced t)
 
+(defvar *jit* nil
+  "NIL, or a function (frame) -> (values status output) that runs FRAME's code (compiled
+or not; see compile.lisp). Never used while *TRACER* is set.")
+
 (defun run-frame (frame)
   "Execute FRAME's code. Returns (values status output) with the gas left in FRAME-GAS."
-  (if *tracer* (interpret-traced frame) (interpret frame)))
+  (cond (*tracer* (interpret-traced frame))
+        (*jit* (funcall (the function *jit*) frame))
+        (t (interpret frame))))

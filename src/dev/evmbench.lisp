@@ -28,10 +28,11 @@
         (values status (- gas gas-left))))))
 
 (defcommand "evm-bench" (args)
-  "interpreter throughput: evm-bench [-n iterations] [-only name]"
+  "EVM throughput: evm-bench [-n iterations] [-only name] [-jit [N] | -interp]"
   (let ((n (arg-int args :n 1000000))
-        (only (arg args :only)))
-    (dolist (entry *bodies* 0)
+        (only (arg args :only))
+        (jit (clempo.dev.evm-compile:jit-option args)))
+    (dolist (entry *bodies*)
       (destructuring-bind (name body doc) entry
         (when (or (null only) (string= only name))
           (let ((code (program body n)))
@@ -40,4 +41,6 @@
               (multiple-value-bind (status used) (run-program code most-positive-fixnum)
                 (let ((secs (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
                   (format t "~8A ~A: ~,1F Mgas/s (~:D gas in ~,3F s, ~A) - ~A~%"
-                          name status (/ used secs 1d6) used (float secs) status doc))))))))))
+                          name status (/ used secs 1d6) used (float secs) status doc))))))))
+    (when jit (clempo.dev.evm-compile:jit-summary))
+    0))

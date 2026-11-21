@@ -14,10 +14,13 @@
                (:file "precompiles")
                (:file "precompiles-curves")
                (:file "tx")
-               (:file "tracing")))
+               (:file "tracing")
+               (:file "compile")
+               (:file "compile-cache")))
 
 (defsystem "clempo-evm/tests"
   :depends-on ("clempo-evm")
   :pathname "../../tests/evm/"
   :components ((:file "evm-tests")
-               (:file "tracing-tests")))
+               (:file "tracing-tests")
+               (:file "compile-tests")))

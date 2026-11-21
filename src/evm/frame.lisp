@@ -5,7 +5,8 @@
 
 (defstruct (analysis (:constructor %make-analysis (jumpdests pushes)))
   (jumpdests #* :type simple-bit-vector)
-  (pushes #() :type simple-vector))
+  (pushes #() :type simple-vector)
+  (jit nil))                         ; compile.lisp's per-code state (call count, code)
 
 (defun analyze-code (code)
   (declare #.*hot* (type octets code))
