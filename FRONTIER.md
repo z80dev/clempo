@@ -321,32 +321,54 @@ reported **49.37 s wall**, **20.08 s CPU**, **1.65 GB peak RSS**,
 unwind of the detached archive to provision its exact parent.
 
 EVM bytecode compiled to native code (R7 evidence; SBCL 2.6.8 release, Apple
-Silicon). `src/evm/compile.lisp` turns a contract into Lisp (blocks as TAGBODY
-tags, a symbolic stack in lexical variables, the DEFOP bodies themselves, static
-gas charged once per segment, interpreter resume on short gas or broken stack
-bounds) and `compile`s it; `compile-cache.lisp` shares the functions by (code
-hash, fork). At `4c479c7`, `bin/clempo-dev statetest -jit` passed
-**61,903/61,903** (50,193 compilations, 89,803 shared-cache uses, 46,179 LRU
-evictions, no compilation failures, 561 s). `-interp` passed the same suite
-in 9.9 s. Historical `jit-latency` compiled all 9,480 distinct fixture codes
-without a warning; historical `evm-bench -n 10000000`, median of three,
-interpreter (`-interp`) to compiled (`-jit`), Mgas/s:
+Silicon M3 Max unless noted). `src/evm/compile.lisp` turns a contract into Lisp
+(blocks as TAGBODY tags, a symbolic stack in lexical variables, the DEFOP bodies
+themselves, static gas charged once per segment, interpreter resume on short gas
+or broken stack bounds) and `compile`s it; `compile-cache.lisp` shares the
+functions by (code hash, fork). Differential: `bin/clempo-dev statetest -jit`
+(every code of any size compiled at its first call) passed **61,903/61,903** at
+`4c479c7` (50,193 compilations, 89,803 shared-cache uses, 46,179 LRU evictions,
+no compilation failures, 561 s); `-interp` passed the same suite in 9.9 s. On
+Linux x86-64 (newphy, release, 12 threads, 16 GiB heap) `-jit` also passed
+**61,903/61,903** at `6dc2b56`, peak RSS 4.6 GB. `jit-latency` compiles all 9,480
+distinct fixture codes without a warning. `evm-bench -n 10000000` at `6dc2b56`,
+median of three, interpreter (`-interp`) to compiled (`-jit`), Mgas/s (the host
+had a load average near 10 from other validation runs):
 
 | Workload | Interpreter | Compiled | |
 |---|---:|---:|---:|
-| arith (small-word MUL/ADD/DIV) | 1,511 | 11,573 | 7.7x |
-| bignum (256-bit MUL/MULMOD) | 454 | 1,639 | 3.6x |
-| memory (MSTORE/MLOAD/KECCAK256) | 250 | 276 | 1.1x |
-| storage (SSTORE/SLOAD) | 1,321 | 1,450 | 1.1x |
+| arith (small-word MUL/ADD/DIV) | 1,605 | 11,825 | 7.4x |
+| bignum (256-bit MUL/MULMOD) | 508 | 1,862 | 3.7x |
+| memory (MSTORE/MLOAD/KECCAK256) | 301 | 328 | 1.09x |
+| storage (SSTORE/SLOAD) | 1,548 | 1,605 | 1.04x |
 
-Compile latency (Osaka, all fixture codes): 2.9 ms mean under 64 bytes, 5 ms
-to 256, 13 ms to 1 KiB, 102 ms to 4 KiB, 1.2 s to 16 KiB, 8.8 s above
-(75–190 µs/byte). `clempo.evm` loads with compilation off. The node starts
-a compiler thread unless `--no-jit` is supplied; dev tools can select `-jit-bg`.
-A code becomes eligible after 100,000 interpreted gas per byte of its own work,
-excluding callees. Execution never waits for compilation. At most 16 jobs
-wait, code larger than 24 KiB is not compiled, and the shared LRU cache is
-capped at 4,096 functions and 256 MiB.
+Compile latency (`jit-latency`, Osaka, all fixture codes, 252.9 s in total): mean
+2.7 ms under 64 bytes, 4.9 ms to 256, 12.8 ms to 1 KiB, 98 ms to 4 KiB, 0.95 s
+to 16 KiB, 7.1 s above (max 13.2 s); 34–150 µs/byte. `clempo.evm` loads with
+compilation off. The node starts a compiler thread unless `--no-jit` is
+supplied; dev tools can select `-jit-bg`. A code becomes eligible after 100,000
+interpreted gas per byte of its own work, excluding callees. Execution never
+waits for compilation. At most 16 jobs wait, code larger than 24 KiB is not
+compiled, and the shared LRU cache is capped at 4,096 functions and 256 MiB.
+That byte cap is real memory since `6dc2b56`: SBCL's `compile` kept each
+region's whole Lisp source in its debug source (and, at debug 1, on the
+function), about 6 times the native code, so the cache held roughly six times
+what it counted (14.7 MB for 2.4 MB reported on 397 fixture codes). Regions now
+compile with `store-source-form 0` and drop that form, and the count includes
+the debug info: a release build retains 2.05 MB for 2.48 MB reported, a check
+build 4.5 MB for 3.7 MB.
+
+Check builds (`safety 1`) cannot run `statetest -jit` with 12 threads in a
+16 GiB heap: it exhausted the heap after about 21 minutes on Linux, before these
+changes as well (`4940311`). It is not a leak. With a full collection every
+minute the live heap was in-flight compiler IR (`sb-c::equality-constraint`,
+lvars, refs, and 1.5 GB of constraint-set bit vectors), reached from
+`sb-c::*constraint-universe*` bound in the threads that were mid-compile. One
+region held 133,119 constraints. The JIT cache stayed under 4,096 entries and
+110 MB, and the analysis store under 700 entries. Safety 1 bounds and type
+checks make constraint propagation superlinear in a region, and 12 such
+compilations run at once. Release builds fit, and a node compiles on one thread
+with code capped at 24 KiB.
 
 Keccak-256 (SBCL 2.6.8 release, Apple Silicon): the ARM SHA3 permutation and
 copy-free 32/64-byte paths reduced 64-byte hashes from **626 ns to 178 ns**

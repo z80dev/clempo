@@ -385,6 +385,36 @@ bignum. Bind `clempo.secp256k1:*recovery-scratch*` and
 The 25-µs recovery target remains unmet. See
 [arithmetic, GC safety, exact timings and allocation-counter rounding](../tests/crypto/ec/secp256k1/performance.md).
 
+### EVM compiler (`6dc2b56`)
+
+```sh
+export CLEMPO_BUILD=release
+bin/clempo-dev evm-bench -n 10000000 -interp   # three runs each, take the median
+bin/clempo-dev evm-bench -n 10000000 -jit
+bin/clempo-dev jit-latency                     # every distinct state-test fixture code
+bin/clempo-dev statetest -jit                  # the differential: every code compiled
+```
+
+On the M3 Max (load average near 10 from other validation runs), medians of three,
+interpreter to compiled, Mgas/s: arith 1,605 to 11,825 (7.4x), bignum 508 to
+1,862 (3.7x), memory 301 to 328 (1.09x), storage 1,548 to 1,605 (1.04x).
+`jit-latency` compiled 9,480 codes with no failures in 252.9 s: mean 2.7 ms under
+64 bytes, 4.9 ms to 256, 12.8 ms to 1 KiB, 98 ms to 4 KiB, 0.95 s to 16 KiB and
+7.1 s above (max 13.2 s). `statetest -jit` passes 61,903/61,903 on the Mac (561 s at
+`4c479c7`) and on Linux x86-64 (release, 12 threads, 16 GiB heap, peak RSS 4.6 GB).
+
+Since `6dc2b56`, compiled regions keep no copy of their Lisp source. SBCL's
+`compile` had kept about 6 times the native code there, so the cache's 256 MiB
+bound held roughly 1.5 GB. Now a release build retains less than the bytes it
+reports (2.05 MB for 2.48 MB on 397 fixture codes).
+
+Run the differential as a release build. In a check build, 12 threads in 16 GiB
+exhaust the heap: each `safety 1` region compile holds a superlinear constraint
+set in `sb-c::*constraint-universe*` (133,119 constraints in one region) while it
+runs, and twelve run at once. It is not a leak: the live heap is in-flight
+compiler IR, and the JIT cache and analysis store stay within their bounds (see
+FRONTIER.md).
+
 ## Go replay on the same host
 
 Use goempo's own archive and state formats; its binary cannot open a Clempo
