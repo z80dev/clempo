@@ -11,6 +11,7 @@ envelope errors).")
            #:rpc-error-data #:invalid-params #:internal-error
            #:find-method* #:method-names #:method-doc #:method-params
            #:handle-body #:handle-request-object #:*methods* #:read-param
+           #:*response-buffer* #:make-response-buffer
            #:*connection* #:+invalid-params+ #:+internal-error+ #:+method-not-found+
            ;; parameter types (params.lisp)
            #:hash #:address #:bool #:any #:index #:block-number-or-tag #:block-id #:bytes #:u64 #:u256
@@ -113,15 +114,34 @@ array, or NIL when params were absent)."
 
 ;;; Envelope
 
+(defvar *response-buffer* nil
+  "A thread's reusable response buffer (MAKE-RESPONSE-BUFFER), or NIL to write each response
+into a fresh string. While it is bound, a response (and so HANDLE-BODY's answer to a single
+request) is this buffer itself, a string with a fill pointer, valid only until the thread
+writes its next response: a server binds it per thread and sends each answer at once.")
+
+(defun make-response-buffer ()
+  (make-array 4096 :element-type 'character :fill-pointer 0 :adjustable t))
+
+(defun write-response (out id-raw resultp result error)
+  (write-string "{\"jsonrpc\":\"2.0\",\"id\":" out)
+  (write-string (or id-raw "null") out)
+  (if resultp
+      (progn (write-string ",\"result\":" out) (json:write-json result out))
+      (progn (write-string ",\"error\":" out)
+             (json:write-json error out)))
+  (write-char #\} out))
+
 (defun response-string (id-raw &key (result nil resultp) error)
-  (with-output-to-string (out)
-    (write-string "{\"jsonrpc\":\"2.0\",\"id\":" out)
-    (write-string (or id-raw "null") out)
-    (if resultp
-        (progn (write-string ",\"result\":" out) (json:write-json result out))
-        (progn (write-string ",\"error\":" out)
-               (json:write-json error out)))
-    (write-char #\} out)))
+  (let ((buffer *response-buffer*))
+    (cond ((null buffer)
+           (with-output-to-string (out) (write-response out id-raw resultp result error)))
+          (t ;; the room a huge answer took is not kept for the small ones after it
+             (if (> (array-dimension buffer 0) (* 4 1024 1024))
+                 (adjust-array buffer 4096 :fill-pointer 0)
+                 (setf (fill-pointer buffer) 0))
+             (with-output-to-string (out buffer) (write-response out id-raw resultp result error))
+             buffer))))
 
 (defun error-object (code message &optional data)
   (if data
@@ -264,7 +284,8 @@ under METHOD."
                            for r = (if (char= (char text s) #\{)
                                        (handle-request-object text s e)
                                        (error-response nil +invalid-request+ "Invalid request"))
-                           when r collect r)))
+                           ;; each kept apart from the reused response buffer
+                           when r collect (coerce r 'simple-string))))
                (values 200 (cond ((null responses) "null")
                                  ((> (reduce #'+ responses :key #'length) *response-max*)
                                   (response-too-big nil))

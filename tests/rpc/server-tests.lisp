@@ -275,7 +275,7 @@
 (defun handle (text) (nth-value 1 (rpc:handle-body text)))
 
 (deftest subscriptions-per-connection-limit ()
-  (let ((rpc:*connection* (server::make-connection nil nil)))
+  (let ((rpc:*connection* (server::make-connection)))
     (loop repeat server:+subscriptions-max+
           do (let ((server::*after-response* '()))
                (is (search "\"result\":\"0x" (handle "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_subscribe\",\"params\":[\"newHeads\"]}")))
@@ -297,7 +297,7 @@
 
 (deftest subscriptions-change-safely-under-concurrency ()
   ;; adds and removes from many threads never lose an update
-  (let ((c (server::make-connection nil nil)))
+  (let ((c (server::make-connection)))
     (mapc #'sb-thread:join-thread
           (loop for k below 8
                 collect (let ((k k))

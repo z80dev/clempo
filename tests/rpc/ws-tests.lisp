@@ -113,7 +113,7 @@ answer to one more round trip."
 ;;; Parameters and errors, without a socket: the method runs as on a websocket connection.
 
 (defun ws-answer (body)
-  (let ((rpc:*connection* (server::make-connection nil nil))
+  (let ((rpc:*connection* (server::make-connection))
         (server::*after-response* '()))
     (nth-value 1 (rpc:handle-body body))))
 
@@ -429,9 +429,8 @@ stream LOG."
                    ;; A small receive window alone does not stall the writer: the default
                    ;; Linux send buffer can hold the entire burst. Cap the stalled peer's
                    ;; server-side send buffer before connecting the live peer.
-                   (setf (sb-bsd-sockets:sockopt-send-buffer
-                          (server::connection-socket (first (server::server-connections server))))
-                         4096)
+                   (clempo.poll:set-send-buffer
+                    (server::connection-fd (first (server::server-connections server))) 4096)
                    (connect (server:server-port server)))))
       (unwind-protect
            (let ((stalled-heads (json:jget (call stalled 1 "eth_subscribe" #("newHeads")) "result"))

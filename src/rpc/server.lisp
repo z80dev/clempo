@@ -1,12 +1,17 @@
 (defpackage #:clempo.rpcserver
   (:use #:cl #:clempo.base)
-  (:local-nicknames (#:ws #:clempo.websocket) (#:rpc #:clempo.rpc) (#:chain #:clempo.rpc.chain))
-  (:documentation "HTTP/1.1 and WebSocket JSON-RPC on one port, on sb-bsd-sockets with a thread
-per connection. HTTP answers as the reference does (POST with Content-Type application/json,
-405 and 415 otherwise); a GET with Upgrade: websocket switches the connection to frames,
-where requests are answered in order and subscriptions push eth_subscription
-notifications from a writer thread per websocket, fed by PUBLISH-HEAD through a bounded
-queue.
+  (:local-nicknames (#:ws #:clempo.websocket) (#:rpc #:clempo.rpc) (#:chain #:clempo.rpc.chain)
+                    (#:poll #:clempo.poll))
+  (:documentation "HTTP/1.1 and WebSocket JSON-RPC on one port. A bounded pool of workers (one
+per available CPU by default), each with its own readiness poller (CLEMPO.POLL: kqueue or
+epoll), shares the connections out in turn as they are accepted. On an event a worker reads
+what has arrived into the connection's buffer, parses as far as it goes without waiting, and
+answers each request completed there, so a slow client never holds a worker; a socket is
+watched by its edges, so a request costs a read and a send between waits. HTTP answers as
+the reference does (POST with Content-Type application/json, 405 and 415 otherwise); a GET
+with Upgrade: websocket hands the connection to a thread of its own, where requests are
+answered in order and subscriptions push eth_subscription notifications from a writer thread
+per websocket, fed by PUBLISH-HEAD through a bounded queue.
 
 Every input a client controls is bounded before it is buffered: a request line or header
 line (+HEADER-LINE-MAX+), the header count (+HEADER-LINES-MAX+), a body, chunked or not, and
@@ -52,35 +57,72 @@ starts there, so no notification precedes the response that names it)."
   (setf *after-response* (append *after-response* (list thunk))))
 
 (defstruct (server (:constructor %make-server))
-  socket port backend (connections '())
+  socket port backend
+  ;; Connections by descriptor (replaced whole when it grows, under LOCK), and as a list.
+  (table (make-array 256 :initial-element nil) :type simple-vector)
+  (connections '()) (count 0 :type fixnum)
   (consensus-slots 0)
   (lock (sb-thread:make-mutex :name "rpc server"))
-  (running t) acceptor (max-connections 256)
+  (running t) (max-connections 256)
+  ;; a poller per worker; each connection is watched by one, and run only by its worker
+  (pollers #() :type simple-vector) (next-poller 0 :type fixnum)
+  (listen-fd -1) (wake-read -1) (wake-write -1)
+  (workers '()) (reaper nil)
+  (reaper-lock (sb-thread:make-mutex :name "rpc reaper"))
+  (reaper-wait (sb-thread:make-waitqueue))
   (log *error-output*) (log-lock (sb-thread:make-mutex :name "rpc log")))
 
 (defconstant +outbox-capacity+ 256
   "New heads a websocket subscriber may fall behind before the oldest is skipped: reth's
 PER_BLOCK_FEED_CAPACITY, the depth of its per-block broadcast feeds.")
 
-;;; A connection's input: the socket is read into the connection's own buffer, one read
-;;; system call per arrival, and request lines are found by scanning those octets (no byte
-;;; at a time through a stream). Waits go through WAIT-UNTIL-FD-USABLE, where deadlines
-;;; (WITH-IO-DEADLINE) reach them as they reach a stream's.
-
 (defconstant +inbuf-size+ 16384
   "Room for the request lines and header lines being parsed (each at most
-+HEADER-LINE-MAX+ bytes); a body is read into its own array.")
++HEADER-LINE-MAX+ bytes) and for a body that fits; a larger body gets its own array.")
 
-(defstruct (inbuf (:constructor make-inbuf (fd)))
-  (fd -1 :type fixnum)
+(defstruct (inbuf (:constructor make-inbuf ()))
   (octets (make-octets +inbuf-size+) :type octets)
   (start 0 :type fixnum)                ; the first unconsumed byte
   (end 0 :type fixnum)                  ; after the last byte read
   (eof nil))
 
-(defstruct (connection (:constructor make-connection
-                           (socket stream &aux (in (and socket (make-inbuf (sb-bsd-sockets:socket-file-descriptor socket)))))))
-  socket stream in
+;;; A request being parsed: what its lines said so far, kept between arrivals so each byte
+;;; is scanned once however the request is split.
+
+(defstruct (request (:conc-name req-))
+  ;; :START (blank lines before the request line), :HEADERS, :BODY, :CHUNK-SIZE,
+  ;; :CHUNK-DATA, :CHUNK-END, :TRAILERS
+  (stage :start)
+  (scanned 0 :type fixnum)              ; bytes of the current line searched for its LF
+  (lines 0 :type fixnum)                ; blank lines, then header lines, then trailers
+  (method :other)                       ; :POST, :GET or :OTHER
+  (seen 0 :type fixnum)                 ; a bit per header kind: the first of each counts
+  (length nil)                          ; Content-Length: an integer, :BAD, or NIL
+  (chunked nil)                         ; Transfer-Encoding: :CHUNKED, :OTHER, or NIL
+  (json nil) (close nil) (upgrade nil) (key nil)
+  (need 0 :type fixnum)                 ; body (or chunk) bytes still to come
+  (body nil) (body-end 0 :type fixnum)  ; the body, when it is not in the input buffer
+  (total 0 :type fixnum))               ; chunked: the body's size so far
+
+(defun reset-request (req)
+  (setf (req-stage req) :start (req-scanned req) 0 (req-lines req) 0 (req-method req) :other
+        (req-seen req) 0 (req-length req) nil (req-chunked req) nil (req-json req) nil
+        (req-close req) nil (req-upgrade req) nil (req-key req) nil (req-need req) 0
+        (req-body req) nil (req-body-end req) 0 (req-total req) 0))
+
+(defstruct (connection (:constructor make-connection (&optional (fd -1))))
+  (fd -1 :type fixnum)
+  (in (make-inbuf)) (request (make-request))
+  poller                                ; its worker's, which alone runs it
+  (must-read t)                         ; input may be waiting that no event will announce
+  (hangup nil)                          ; an event said the peer ended its side
+  (phase :idle)                         ; :IDLE, :REQUEST, :BUSY, :WRITING or :THREAD
+  ;; When the reaper ends it (monotonic milliseconds), one word so it reads it whole.
+  (deadline most-positive-fixnum :type fixnum)
+  (expired nil)
+  (out nil) (out-start 0 :type fixnum)  ; response bytes the socket has not taken yet
+  (close-after nil)
+  stream
   (send-lock (sb-thread:make-mutex :name "ws send"))
   (websocket-p nil)
   ;; Replaced whole (never mutated in place) under SUBSCRIPTIONS-LOCK, so the writer thread
@@ -164,6 +206,12 @@ those accepted in the current request that start after its response."
   `(handler-case (sb-sys:with-deadline (:seconds ,seconds) ,@body)
      (sb-sys:deadline-timeout () (error 'connection-timeout))))
 
+(defun now-ms ()
+  "Monotonic milliseconds."
+  (values (floor (clempo.io:monotonic-ticks) (floor internal-time-units-per-second 1000))))
+
+(defun ms-after (seconds) (+ (now-ms) (round (* 1000 seconds))))
+
 (defun send-text (connection text)
   (sb-thread:with-mutex ((connection-send-lock connection))
     (with-io-deadline (*write-seconds*)
@@ -177,7 +225,7 @@ those accepted in the current request that start after its response."
                                    "params" (clempo.json:jobject "subscription" subscription
                                                                  "result" result)))))
 
-;;; HTTP
+;;; HTTP requests, parsed from the octets in the connection's buffer without waiting
 
 (define-condition bad-request (error)
   ((status :initarg :status :reader bad-request-status)
@@ -191,35 +239,6 @@ those accepted in the current request that start after its response."
   (reject 413 (format nil "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32007,\"message\":\"Request is too big\",\"data\":\"Exceeded max limit of ~D\"}}"
                       +body-max+)))
 
-(defun fd-read (fd o start end)
-  "Read into O[START,END) what FD has, waiting for at least one byte. Returns the count, 0 at
-end of stream."
-  (declare (type fixnum fd start end) (type octets o))
-  (invariant (< start end) "empty read")
-  (loop
-    (multiple-value-bind (count errno)
-        (sb-sys:with-pinned-objects (o)
-          (sb-unix:unix-read fd (sb-sys:sap+ (sb-sys:vector-sap o) start) (- end start)))
-      (cond (count (return count))
-            ((eql errno sb-unix:ewouldblock) (sb-sys:wait-until-fd-usable fd :input))
-            ((eql errno sb-unix:eintr))
-            (t (error 'sb-int:simple-stream-error :stream nil
-                                                  :format-control "socket read failed: ~A"
-                                                  :format-arguments (list (sb-int:strerror errno))))))))
-
-(defun inbuf-fill (in)
-  "Read more of the socket after IN's buffered bytes (moved to the front first). NIL at end
-of stream."
-  (unless (inbuf-eof in)
-    (let ((o (inbuf-octets in)) (start (inbuf-start in)) (end (inbuf-end in)))
-      (when (plusp start)
-        (replace o o :start2 start :end2 end)
-        (setf end (- end start) (inbuf-start in) 0 (inbuf-end in) end))
-      (let ((count (fd-read (inbuf-fd in) o end (length o))))
-        (if (zerop count)
-            (progn (setf (inbuf-eof in) t) nil)
-            (incf (inbuf-end in) count))))))
-
 (defun latin1-string (o start end)
   (declare (type octets o) (type fixnum start end))
   (let ((s (make-string (- end start))))
@@ -228,133 +247,214 @@ of stream."
           do (setf (schar s j) (code-char (aref o i))))
     s))
 
-(defun read-line-crlf (in &optional (limit +header-line-max+))
-  "The next line without its CR LF (trailing CRs dropped), NIL at end of stream; a line
-longer than LIMIT bytes is refused (431) before it is buffered further."
+(defun next-line (c limit)
+  "The next line of C's input, consumed: (values start end) of its octets in the input
+buffer, without its LF and trailing CRs (a last line cut by the end of stream is taken as it
+is); :MORE while its LF has not arrived; NIL at end of stream. A line longer than LIMIT bytes
+is refused (431) as soon as that much of it is here."
   (declare (type fixnum limit))
-  (let ((scanned 0))
-    (declare (type fixnum scanned))
-    (loop
-      (let* ((o (inbuf-octets in)) (start (inbuf-start in)) (end (inbuf-end in))
-             (lf (position 10 o :start (+ start scanned) :end end)))
-        (cond (lf
-               (when (> (- lf start) limit) (reject 431))
-               (setf (inbuf-start in) (1+ lf))
-               (return (latin1-string o start (loop with e of-type fixnum = lf
-                                                    while (and (> e start) (= 13 (aref o (1- e))))
-                                                    do (decf e)
-                                                    finally (return e)))))
-              ((> (- end start) limit) (reject 431))
-              ((not (inbuf-fill in))
-               (let ((start (inbuf-start in)) (end (inbuf-end in)))
-                 (setf (inbuf-start in) end)
-                 (return (and (> end start) (latin1-string (inbuf-octets in) start end)))))
-              (t (setf scanned (- end start))))))))
+  (let* ((in (connection-in c)) (req (connection-request c))
+         (o (inbuf-octets in)) (start (inbuf-start in)) (end (inbuf-end in))
+         (lf (position 10 o :start (+ start (req-scanned req)) :end end)))
+    (declare (type fixnum start end))
+    (cond (lf
+           (when (> (- lf start) limit) (reject 431))
+           (setf (inbuf-start in) (1+ lf) (req-scanned req) 0)
+           (values start (loop with e of-type fixnum = lf
+                               while (and (> e start) (= 13 (aref o (1- e))))
+                               do (decf e)
+                               finally (return e))))
+          ((> (- end start) limit) (reject 431))
+          ((inbuf-eof in)
+           (setf (inbuf-start in) end (req-scanned req) 0)
+           (and (> end start) (values start end)))
+          (t (setf (req-scanned req) (- end start))
+             :more))))
 
-(defun read-request-head (in)
-  "Returns (values method path headers) or NIL at end of stream. Header names are lowercased.
-Signals BAD-REQUEST for a malformed request line or header, or one over the limits."
-  (let ((line (loop repeat +header-lines-max+
-                    for l = (read-line-crlf in)
-                    while (and l (zerop (length l)))
-                    finally (return l))))
-    (when line
-      (let* ((sp1 (position #\Space line)) (sp2 (and sp1 (position #\Space line :start (1+ sp1)))))
-        (unless (and sp1 sp2 (plusp sp1)) (reject 400))
-        (values (subseq line 0 sp1)
-                (subseq line (1+ sp1) sp2)
-                (loop for count from 0
-                      for h = (read-line-crlf in)
-                      until (or (null h) (zerop (length h)))
-                      when (>= count +header-lines-max+) do (reject 431)
-                      collect (let ((colon (position #\: h)))
-                                (unless colon (reject 400))
-                                (cons (string-downcase (string-trim " " (subseq h 0 colon)))
-                                      (string-trim " " (subseq h (1+ colon)))))))))))
+(defun ci= (o start end text)
+  "Whether O[START,END) spells TEXT (lowercase ASCII), ignoring ASCII case."
+  (declare (type octets o) (type fixnum start end) (type simple-string text))
+  (and (= (- end start) (length text))
+       (loop for i of-type fixnum from start below end
+             for ch across text
+             always (= (let ((b (aref o i))) (if (<= 65 b 90) (+ b 32) b)) (char-code ch)))))
 
-(defun header (headers name) (cdr (assoc name headers :test #'string=)))
+(defun trim-spaces (o start end)
+  "O[START,END) without leading and trailing spaces: (values start end)."
+  (declare (type octets o) (type fixnum start end))
+  (loop while (and (< start end) (= 32 (aref o start))) do (incf start))
+  (loop while (and (> end start) (= 32 (aref o (1- end)))) do (decf end))
+  (values start end))
 
-(defun read-exactly (in n)
-  "The next N octets: those buffered, then the rest read straight into the result."
-  (let* ((o (make-octets n))
-         (have (min n (- (inbuf-end in) (inbuf-start in)))))
-    (replace o (inbuf-octets in) :start2 (inbuf-start in) :end2 (+ (inbuf-start in) have))
-    (incf (inbuf-start in) have)
-    (loop with pos = have
-          while (< pos n)
-          do (let ((count (if (inbuf-eof in) 0 (fd-read (inbuf-fd in) o pos n))))
-               (when (zerop count)
-                 (setf (inbuf-eof in) t)
-                 (error 'end-of-file :stream nil))
-               (incf pos count)))
-    o))
+(defun parse-size (o start end radix)
+  "O[START,END), spaces trimmed, as a non-negative integer in RADIX of at most 16 digits, or
+:BAD."
+  (declare (type octets o) (type fixnum start end))
+  (multiple-value-bind (start end) (trim-spaces o start end)
+    (if (and (< start end) (<= (- end start) 16)
+             (loop for i from start below end always (digit-char-p (code-char (aref o i)) radix)))
+        (loop with n = 0 for i from start below end
+              do (setf n (+ (* n radix) (digit-char-p (code-char (aref o i)) radix)))
+              finally (return n))
+        :bad)))
 
-(defun parse-size (text radix)
-  "TEXT as a non-negative integer in RADIX, or a 400 refusal."
-  (let ((text (string-trim " " text)))
-    (unless (and (plusp (length text)) (<= (length text) 16)
-                 (every (lambda (c) (digit-char-p c radix)) text))
-      (reject 400))
-    (parse-integer text :radix radix)))
+(defun json-content-type-p (o start end)
+  "Whether the Content-Type O[START,END) is application/json, parameters aside."
+  (multiple-value-bind (s e) (trim-spaces o start (or (position 59 o :start start :end end) end))
+    (ci= o s e "application/json")))
 
-(defun read-chunked (in)
-  (let ((parts '()) (total 0))
-    (loop for line = (or (read-line-crlf in 1024) (error 'end-of-file :stream nil))
-          for size = (parse-size (subseq line 0 (or (position #\; line) (length line))) 16)
-          until (zerop size)
-          do (when (> (incf total size) +body-max+) (too-large))
-             (push (read-exactly in size) parts)
-             (unless (equal "" (read-line-crlf in 2)) (reject 400)))
-    (loop repeat (1+ +header-lines-max+)
-          for l = (read-line-crlf in)
-          until (or (null l) (zerop (length l)))
-          finally (when (and l (plusp (length l))) (reject 431)))
-    (apply #'octets-concat (nreverse parts))))
+(defun take-request-line (req o start end)
+  (let* ((sp1 (position 32 o :start start :end end))
+         (sp2 (and sp1 (position 32 o :start (1+ sp1) :end end))))
+    (unless (and sp1 sp2 (> sp1 start)) (reject 400))
+    (setf (req-method req) (cond ((ci= o start sp1 "post") :post)
+                                 ((ci= o start sp1 "get") :get)
+                                 (t :other)))))
 
-(defun read-body (in headers)
-  (let ((len (header headers "content-length"))
-        (te (header headers "transfer-encoding")))
-    (cond ((and len te) (reject 400))   ; both framings: refused (request smuggling)
-          (te (unless (string-equal te "chunked") (reject 400))
-              (read-chunked in))
-          (len (let ((n (parse-size len 10)))
-                 (when (> n +body-max+) (too-large))
-                 (read-exactly in n)))
-          (t (make-octets 0)))))
+(defun take-header (req o start end)
+  "Note the header line O[START,END) if it is the first of a kind the server reads."
+  (let ((colon (position 58 o :start start :end end)))
+    (unless colon (reject 400))
+    (multiple-value-bind (ns ne) (trim-spaces o start colon)
+      (let ((bit (cond ((ci= o ns ne "content-length") 1)
+                       ((ci= o ns ne "transfer-encoding") 2)
+                       ((ci= o ns ne "content-type") 4)
+                       ((ci= o ns ne "connection") 8)
+                       ((ci= o ns ne "upgrade") 16)
+                       ((ci= o ns ne "sec-websocket-key") 32))))
+        (when (and bit (not (logtest bit (req-seen req))))
+          (setf (req-seen req) (logior bit (req-seen req)))
+          (multiple-value-bind (vs ve) (trim-spaces o (1+ colon) end)
+            (case bit
+              (1 (setf (req-length req) (parse-size o vs ve 10)))
+              (2 (setf (req-chunked req) (if (ci= o vs ve "chunked") :chunked :other)))
+              (4 (setf (req-json req) (json-content-type-p o vs ve)))
+              (8 (setf (req-close req) (ci= o vs ve "close")))
+              (16 (setf (req-upgrade req) (ci= o vs ve "websocket")))
+              (32 (setf (req-key req) (latin1-string o vs ve))))))))))
 
-(defun write-http-response (stream status reason content-type body &key extra-headers)
-  "Write the response head and BODY (a string or octets) and send them in one write."
-  (let* ((bytes (if (stringp body) (string->octets body) body))
-         (crlf (coerce '(#\Return #\Newline) 'string))
-         (head (apply #'concatenate 'string
-                      "HTTP/1.1 " (princ-to-string status) " " reason crlf
-                      (append (when content-type (list "content-type: " content-type crlf))
-                              (list "content-length: " (princ-to-string (length bytes)) crlf)
-                              (loop for (k . v) in extra-headers
-                                    append (list (princ-to-string k) ": " (princ-to-string v) crlf))
-                              (list crlf)))))
-    (with-io-deadline (*write-seconds*)
-      (write-sequence (string->octets head) stream)
-      (write-sequence bytes stream)
-      (force-output stream))))
+(defun grow-body (req size)
+  "Room in REQ's body array for SIZE bytes in all."
+  (let ((body (req-body req)))
+    (when (or (null body) (< (length body) size))
+      (let ((new (make-octets (min +body-max+ (max size (if body (* 2 (length body)) 0))))))
+        (when body (replace new body :end2 (req-body-end req)))
+        (setf (req-body req) new)))))
 
-(defun reason (status)
-  (case status (200 "OK") (400 "Bad Request") (405 "Method Not Allowed")
-    (413 "Payload Too Large") (415 "Unsupported Media Type")
-    (431 "Request Header Fields Too Large") (t "Error")))
+(defun head-done (req)
+  "The head has ended: choose how the body is framed. Returns the next stage, or :WEBSOCKET."
+  (let ((length (req-length req)) (chunked (req-chunked req)))
+    (cond ((and (eq (req-method req) :get) (req-upgrade req)) :websocket)
+          ((and length chunked) (reject 400)) ; both framings: refused (request smuggling)
+          (chunked (unless (eq chunked :chunked) (reject 400))
+                   :chunk-size)
+          (length (when (eq length :bad) (reject 400))
+                  (when (> length +body-max+) (too-large))
+                  (setf (req-need req) length)
+                  (when (> length +inbuf-size+) (grow-body req length))
+                  :body)
+          (t :done))))
 
-(defun json-content-type-p (value)
-  (and value
-       (let ((main (string-trim " " (subseq value 0 (or (position #\; value) (length value))))))
-         (string-equal main "application/json"))))
+(defun advance (c)
+  "Parse C's buffered input as far as it goes: :REQUEST once a whole request is here, :MORE
+while the rest has yet to arrive, :WEBSOCKET for an upgrade, NIL when the stream ended
+first. Signals BAD-REQUEST for a request to refuse."
+  (let* ((req (connection-request c)) (in (connection-in c)) (o (inbuf-octets in)))
+    (macrolet ((with-line ((s e limit) &body body)
+                 `(multiple-value-bind (,s ,e) (next-line c ,limit)
+                    (when (eq ,s :more) (return :more))
+                    ,@body)))
+      (loop
+        (case (req-stage req)
+          (:start
+           (with-line (s e +header-line-max+)
+             (cond ((null s) (return nil))
+                   ((= s e)
+                    (when (>= (incf (req-lines req)) +header-lines-max+) (reject 400)))
+                   (t (take-request-line req o s e)
+                      (setf (req-stage req) :headers (req-lines req) 0)))))
+          (:headers
+           (with-line (s e +header-line-max+)
+             (if (or (null s) (= s e))
+                 (let ((next (head-done req)))
+                   (case next
+                     (:websocket (return :websocket))
+                     (:done (return :request))
+                     (t (setf (req-stage req) next))))
+                 (progn (when (>= (req-lines req) +header-lines-max+) (reject 431))
+                        (incf (req-lines req))
+                        (take-header req o s e)))))
+          (:body
+           (let ((have (- (inbuf-end in) (inbuf-start in))) (body (req-body req)))
+             (cond (body
+                    (let ((take (min have (req-need req))))
+                      (replace body o :start1 (req-body-end req)
+                                      :start2 (inbuf-start in) :end2 (+ (inbuf-start in) take))
+                      (incf (req-body-end req) take)
+                      (incf (inbuf-start in) take)
+                      (decf (req-need req) take)
+                      (cond ((zerop (req-need req)) (return :request))
+                            ((inbuf-eof in) (return nil))
+                            (t (return :more)))))
+                   ((>= have (req-need req)) (return :request))
+                   ((inbuf-eof in) (return nil))
+                   (t (return :more)))))
+          (:chunk-size
+           (with-line (s e 1024)
+             (unless s (return nil))
+             (let ((size (parse-size o s (or (position 59 o :start s :end e) e) 16)))
+               (when (eq size :bad) (reject 400))
+               (cond ((zerop size) (setf (req-stage req) :trailers (req-lines req) 0))
+                     (t (when (> (incf (req-total req) size) +body-max+) (too-large))
+                        (grow-body req (req-total req))
+                        (setf (req-need req) size (req-stage req) :chunk-data))))))
+          (:chunk-data
+           (let ((take (min (req-need req) (- (inbuf-end in) (inbuf-start in)))))
+             (replace (req-body req) o :start1 (req-body-end req)
+                                       :start2 (inbuf-start in) :end2 (+ (inbuf-start in) take))
+             (incf (req-body-end req) take)
+             (incf (inbuf-start in) take)
+             (cond ((zerop (decf (req-need req) take)) (setf (req-stage req) :chunk-end))
+                   ((inbuf-eof in) (return nil))
+                   (t (return :more)))))
+          (:chunk-end
+           (with-line (s e 2)
+             (unless (and s (= s e)) (reject 400))
+             (setf (req-stage req) :chunk-size)))
+          (:trailers
+           (with-line (s e +header-line-max+)
+             (when (or (null s) (= s e)) (return :request))
+             (when (>= (incf (req-lines req)) (1+ +header-lines-max+)) (reject 431)))))))))
 
-(defun run-body (octets)
-  "Answer one JSON-RPC body: (values status response), inside the backend's read lock. A body
-that is not UTF-8 is a parse error, as the reference answers it (400 unless it starts as an
-object or array)."
-  (let ((text (handler-case (octets->string octets)
+(defun request-body (c)
+  "The complete request's body: (values octets start end)."
+  (let ((req (connection-request c)) (in (connection-in c)))
+    (cond ((req-body req) (values (req-body req) 0 (req-body-end req)))
+          ((eq (req-stage req) :body)
+           (values (inbuf-octets in) (inbuf-start in) (+ (inbuf-start in) (req-need req))))
+          (t (values (inbuf-octets in) 0 0)))))
+
+(defun body-text (octets start end)
+  "OCTETS[START,END) decoded as UTF-8: an ASCII body (nearly every request) becomes a base
+string, a byte a character, without the general decoder's buffers. Signals for bytes that
+are not UTF-8."
+  (declare (type octets octets) (type fixnum start end))
+  (if (loop for i of-type fixnum from start below end always (< (aref octets i) #x80))
+      (let ((s (make-string (- end start) :element-type 'base-char)))
+        (loop for i of-type fixnum from start below end
+              for j of-type fixnum from 0
+              do (setf (schar s j) (code-char (aref octets i))))
+        s)
+      (octets->string octets :start start :end end)))
+
+(defun run-body (octets &optional (start 0) (end (length octets)))
+  "Answer one JSON-RPC body, OCTETS[START,END): (values status response), inside the
+backend's read lock. A body that is not UTF-8 is a parse error, as the reference answers it
+\(400 unless it starts as an object or array)."
+  (let ((text (handler-case (body-text octets start end)
                 (error ()
-                  (let ((first (find-if-not (lambda (b) (member b '(32 9 10 13))) octets)))
+                  (let ((first (find-if-not (lambda (b) (member b '(32 9 10 13))) octets
+                                            :start start :end end)))
                     (return-from run-body
                       (values (if (member first '(123 91)) 200 400)
                               "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}"))))))
@@ -363,30 +463,357 @@ object or array)."
         (chain:with-backend-read (backend) (rpc:handle-body text))
         (rpc:handle-body text))))
 
-(defun websocket-request-p (method headers)
-  (and (string-equal method "GET") (string-equal (or (header headers "upgrade") "") "websocket")))
+;;; HTTP responses, rendered into the worker's buffer
 
-(defun read-request (in)
-  "The next request: (values method headers body), NIL at end of stream. Its head and body
-must arrive within *REQUEST-SECONDS*."
-  (with-io-deadline (*request-seconds*)
-    (multiple-value-bind (method path headers) (read-request-head in)
-      (declare (ignore path))
-      (when method
-        (values method headers (unless (websocket-request-p method headers) (read-body in headers)))))))
+(defvar *out* nil "The calling worker's response buffer (octets).")
 
-(defun serve-http-request (method headers body stream)
-  "Answer one HTTP request; returns T to keep the connection open."
-  (let ((keep (not (string-equal (or (header headers "connection") "") "close"))))
-    (cond ((string-equal method "POST")
-           (if (json-content-type-p (header headers "content-type"))
-               (multiple-value-bind (status response) (run-body body)
-                 (write-http-response stream status (reason status) "application/json; charset=utf-8" response))
-               (write-http-response stream 415 (reason 415) "text/plain"
-                                    "Supplied content type is not allowed. Content-Type: application/json is required")))
-          (t (write-http-response stream 405 (reason 405) "text/plain"
-                                  "Used HTTP Method is not allowed. POST is required")))
-    keep))
+(defun reason (status)
+  (case status (200 "OK") (400 "Bad Request") (405 "Method Not Allowed")
+    (413 "Payload Too Large") (415 "Unsupported Media Type")
+    (431 "Request Header Fields Too Large") (t "Error")))
+
+(defun put-ascii (o pos s)
+  (declare (type octets o) (type fixnum pos) (type simple-string s))
+  (loop for ch across s for i of-type fixnum from pos do (setf (aref o i) (char-code ch)))
+  (+ pos (length s)))
+
+(defun put-decimal (o pos n)
+  (declare (type octets o) (type fixnum pos) (type (integer 0 #.most-positive-fixnum) n))
+  (let ((digits (if (zerop n) 1 (loop for k of-type fixnum = n then (floor k 10)
+                                      while (plusp k) count t))))
+    (loop for i of-type fixnum from (+ pos digits -1) downto pos
+          for k of-type fixnum = n then (floor k 10)
+          do (setf (aref o i) (+ 48 (mod k 10))))
+    (+ pos digits)))
+
+(defun string-span (s)
+  "The characters of the string S as (values simple-string start end), without copying a
+string with a fill pointer (as a reused response buffer is)."
+  (cond ((typep s 'simple-string) (values s 0 (length s)))
+        ((and (array-has-fill-pointer-p s) (not (array-displacement s)))
+         (values (sb-ext:array-storage-vector s) 0 (fill-pointer s)))
+        (t (let ((s (coerce s 'simple-string))) (values s 0 (length s))))))
+
+(defun utf8-length (s start end)
+  "The UTF-8 length of S[START,END) (S a simple string), or NIL when it holds a surrogate."
+  (declare #.clempo.base:*hot* (type simple-string s) (type fixnum start end))
+  (etypecase s
+    (simple-base-string (- end start))
+    ((simple-array character (*))
+     (let ((n 0))
+       (declare (type fixnum n))
+       (loop for i of-type fixnum from start below end
+             do (let ((code (char-code (schar s i))))
+                  (incf n (cond ((< code #x80) 1) ((< code #x800) 2)
+                                ((<= #xD800 code #xDFFF) (return-from utf8-length nil))
+                                ((< code #x10000) 3) (t 4)))))
+       n))
+    (simple-string nil)))
+
+(defun put-utf8 (o pos s start end)
+  "Encode S[START,END), which UTF8-LENGTH measured, into O from POS (O has room for it)."
+  (declare #.clempo.base:*hot* (type octets o) (type fixnum pos start end) (type simple-string s))
+  (macrolet ((put (b) `(progn (setf (aref o pos) ,b) (incf pos))))
+    (etypecase s
+      (simple-base-string
+       (loop for i of-type fixnum from start below end do (put (char-code (schar s i)))))
+      ((simple-array character (*))
+       (loop for i of-type fixnum from start below end
+             do (let ((code (char-code (schar s i))))
+                  (cond ((< code #x80) (put code))
+                        ((< code #x800) (put (logior #xC0 (ash code -6)))
+                         (put (logior #x80 (logand code #x3F))))
+                        ((< code #x10000) (put (logior #xE0 (ash code -12)))
+                         (put (logior #x80 (logand (ash code -6) #x3F)))
+                         (put (logior #x80 (logand code #x3F))))
+                        (t (put (logior #xF0 (ash code -18)))
+                           (put (logior #x80 (logand (ash code -12) #x3F)))
+                           (put (logior #x80 (logand (ash code -6) #x3F)))
+                           (put (logior #x80 (logand code #x3F)))))))))))
+
+(defun copy-ascii (o pos s start end)
+  "Copy S[START,END) into O from POS while its characters are ASCII, four at a time where
+it can: the index of S reached (END when every one was)."
+  (declare #.clempo.base:*hot* (type octets o) (type fixnum pos start end) (type simple-string s))
+  (etypecase s
+    (simple-base-string
+     (loop for i of-type fixnum from start below end
+           for j of-type fixnum from pos
+           do (setf (aref o j) (char-code (schar s i))))
+     end)
+    ((simple-array character (*))
+     (let ((i start) (j pos))
+       (declare (type fixnum i j))
+       ;; characters are 32-bit little-endian words: four ASCII ones in two loads
+       #+little-endian
+       (sb-sys:with-pinned-objects (s o)
+         (let ((from (sb-sys:vector-sap s)) (to (sb-sys:vector-sap o)))
+           (loop while (<= (+ i 4) end)
+                 do (let ((a (sb-sys:sap-ref-64 from (* 4 i)))
+                          (b (sb-sys:sap-ref-64 from (* 4 (+ i 2)))))
+                      (declare (type (unsigned-byte 64) a b))
+                      (unless (zerop (logand (logior a b) #xFFFFFF80FFFFFF80)) (return))
+                      (setf (sb-sys:sap-ref-32 to j)
+                            (logior (ldb (byte 8 0) a) (ash (ldb (byte 8 32) a) 8)
+                                    (ash (ldb (byte 8 0) b) 16) (ash (ldb (byte 8 32) b) 24)))
+                      (incf i 4) (incf j 4)))))
+       (loop while (and (< i end) (< (char-code (schar s i)) #x80))
+             do (setf (aref o j) (char-code (schar s i)))
+                (incf i) (incf j))
+       i))
+    (simple-string start)))
+
+(defconstant +head-room+ 512
+  "Octets of *OUT* before a response body, where its head is put once the body's length is
+known (the longest head is under 200).")
+
+(defun render-response (status content-type body refused)
+  "Write BODY (a string) into *OUT* after +HEAD-ROOM+ octets, then the response head right
+before it: (values start end) of the response in *OUT*. A REFUSED request's answer says
+Connection: close."
+  (multiple-value-bind (chars start end) (string-span body)
+    (flet ((make-room (n)
+             (when (< (length *out*) (+ +head-room+ n))
+               (setf *out* (make-octets (max (+ +head-room+ n) (* 2 (length *out*))))))))
+      ;; nearly every answer is ASCII and goes over in one pass; others are measured first
+      (make-room (- end start))
+      (let ((size (if (= end (copy-ascii *out* +head-room+ chars start end))
+                      (- end start)
+                      (let ((size (utf8-length chars start end)))
+                        (cond (size (make-room size) (put-utf8 *out* +head-room+ chars start end) size)
+                              ;; surrogates: the encoder refuses them, as it always did
+                              (t (let ((bytes (string->octets (subseq chars start end))))
+                                   (make-room (length bytes))
+                                   (replace *out* bytes :start1 +head-room+)
+                                   (length bytes))))))))
+        (let* ((o *out*)
+               (head (make-octets 256))
+               (pos (put-ascii head 0 "HTTP/1.1 "))
+               (pos (put-decimal head pos status))
+               (pos (put-ascii head pos " "))
+               (pos (put-ascii head pos (reason status)))
+               (pos (put-ascii head pos #.(format nil "~C~Ccontent-type: " #\Return #\Newline)))
+               (pos (put-ascii head pos content-type))
+               (pos (put-ascii head pos #.(format nil "~C~Ccontent-length: " #\Return #\Newline)))
+               (pos (put-decimal head pos size))
+               (pos (put-ascii head pos (if refused
+                                            #.(format nil "~C~Cconnection: close~C~C~C~C" #\Return #\Newline #\Return #\Newline #\Return #\Newline)
+                                            #.(format nil "~C~C~C~C" #\Return #\Newline #\Return #\Newline))))
+               (start (- +head-room+ pos)))
+          (replace o head :start1 start :end2 pos)
+          (values start (+ +head-room+ size)))))))
+
+(defun send-out (c o start end)
+  "Send O[START,END) on C's socket as far as it takes it: :DONE, :AGAIN (the rest is kept
+in C until the socket can take more) or :FAILED."
+  (declare (type fixnum start end))
+  (loop while (< start end)
+        do (multiple-value-bind (count errno) (poll:fd-send-some (connection-fd c) o start end)
+             (cond (count (incf start count))
+                   ((eql errno sb-unix:ewouldblock)
+                    (if (eq o (connection-out c))
+                        (setf (connection-out-start c) start)
+                        (setf (connection-out c) (subseq o start end) (connection-out-start c) 0))
+                    (return-from send-out :again))
+                   (t (return-from send-out :failed)))))
+  (setf (connection-out c) nil)
+  (when (> (length *out*) (* 4 1024 1024)) (setf *out* (make-octets 65536)))
+  :done)
+
+(defun send-response (c status content-type body &key refused)
+  (multiple-value-bind (start end) (render-response status content-type body refused)
+    (setf (connection-phase c) :writing (connection-deadline c) (ms-after *write-seconds*))
+    (when refused (setf (connection-close-after c) t))
+    (send-out c *out* start end)))
+
+(defun answer (c)
+  "Answer C's complete request: :DONE, :AGAIN or :FAILED as SEND-OUT."
+  (let ((req (connection-request c)))
+    (setf (connection-phase c) :busy (connection-deadline c) most-positive-fixnum)
+    (when (req-close req) (setf (connection-close-after c) t))
+    (cond ((not (eq (req-method req) :post))
+           (send-response c 405 "text/plain" "Used HTTP Method is not allowed. POST is required"))
+          ((not (req-json req))
+           (send-response c 415 "text/plain"
+                          "Supplied content type is not allowed. Content-Type: application/json is required"))
+          (t (multiple-value-bind (status response) (multiple-value-call #'run-body (request-body c))
+               (send-response c status "application/json; charset=utf-8" response))))))
+
+(defun refuse (c condition)
+  "Answer a refused request and close once it is sent."
+  (let ((status (bad-request-status condition)))
+    (send-response c status (if (= status 413) "application/json; charset=utf-8" "text/plain")
+                   (bad-request-body condition) :refused t)))
+
+(defun request-done (c)
+  "After a response: forget the request, consume its body, and wait for the next one."
+  (let ((req (connection-request c)) (in (connection-in c)))
+    (when (and (eq (req-stage req) :body) (null (req-body req)))
+      (incf (inbuf-start in) (req-need req)))
+    (reset-request req)
+    (if (< (inbuf-start in) (inbuf-end in))
+        (setf (connection-phase c) :request (connection-deadline c) (ms-after *request-seconds*))
+        (setf (connection-phase c) :idle (connection-deadline c) (ms-after *idle-seconds*)))))
+
+(defun fill-input (c)
+  "Read what C's socket has after its buffered input: :READ, :AGAIN (nothing yet), :EOF or
+:FAILED. Notes whether more may be waiting (a read that filled the buffer)."
+  (let* ((in (connection-in c)) (o (inbuf-octets in)) (start (inbuf-start in)) (end (inbuf-end in)))
+    (when (inbuf-eof in) (return-from fill-input :failed))
+    (when (plusp start)
+      (replace o o :start2 start :end2 end)
+      (setf end (- end start) (inbuf-start in) 0 (inbuf-end in) end))
+    (invariant (< end (length o)) "input buffer full")
+    (multiple-value-bind (count errno) (poll:fd-read-some (connection-fd c) o end (length o))
+      (cond ((null count)
+             (setf (connection-must-read c) nil)
+             (if (eql errno sb-unix:ewouldblock) :again :failed))
+            ((zerop count) (setf (inbuf-eof in) t (connection-must-read c) nil) :eof)
+            (t (setf (inbuf-end in) (+ end count)
+                     ;; a full buffer may have left more behind; after a hang-up the end of
+                     ;; stream, announced by no further event, is behind the data
+                     (connection-must-read c) (or (= (+ end count) (length o)) (connection-hangup c)))
+               (when (eq (connection-phase c) :idle)
+                 (setf (connection-phase c) :request (connection-deadline c) (ms-after *request-seconds*)))
+               :read)))))
+
+;;; Connections: each is run by its poller's worker alone, from its events
+
+(defun finish (server c)
+  "End C: forget it and close its socket (which also leaves its poller)."
+  (sb-thread:with-mutex ((server-lock server))
+    (let ((fd (connection-fd c)) (table (server-table server)))
+      (when (>= fd 0)
+        (when (and (< fd (length table)) (eq c (svref table fd)))
+          (setf (svref table fd) nil))
+        (decf (server-count server))
+        (decf (server-consensus-slots server) (connection-consensus-slots c))
+        (setf (server-connections server) (delete c (server-connections server)))
+        (poll:fd-close fd)
+        (setf (connection-fd c) -1)))))
+
+(defun want-write (server c)
+  "Wait for room to send the rest of C's response."
+  (unless (poll:watch-write (connection-poller c) (connection-fd c))
+    (finish server c)))
+
+(defun drive (server c)
+  "Run C on an event from its socket: answer every request its input completes, then return
+to wait for the next event (input, room to write, or the reaper's shutdown), or end it."
+  ;; the event may announce input: a socket watched by its edges must be read until a read
+  ;; leaves nothing behind
+  (setf (connection-must-read c) t)
+  (handler-case
+      (loop
+        (cond ((connection-expired c) (return (finish server c)))
+              ((connection-out c)
+               (ecase (send-out c (connection-out c) (connection-out-start c) (length (connection-out c)))
+                 (:again (return (want-write server c)))
+                 (:failed (return (finish server c)))
+                 (:done (if (connection-close-after c)
+                            (return (finish server c))
+                            (request-done c)))))
+              (t
+               (let ((step (handler-case (advance c)
+                             (bad-request (e) (list (refuse c e))))))
+                 (case step
+                   (:request
+                    (ecase (answer c)
+                      (:again (return (want-write server c)))
+                      (:failed (return (finish server c)))
+                      (:done (when (connection-close-after c) (return (finish server c)))
+                             (request-done c))))
+                   (:more
+                    (unless (connection-must-read c) (return))
+                    (ecase (fill-input c)
+                      ((:read :eof))
+                      (:again (return))
+                      (:failed (return (finish server c)))))
+                   (:websocket (return (start-websocket server c)))
+                   ((nil) (return (finish server c)))
+                   (t                   ; refused: the answer went (or waits to go) out
+                    (ecase (first step)
+                      (:again (return (want-write server c)))
+                      ((:done :failed) (return (finish server c))))))))))
+    ;; A broken, slow or hostile request ends its connection, never the worker.
+    ;; SERIOUS-CONDITION: stack or heap exhaustion is not an ERROR, and must end only this
+    ;; connection.
+    (serious-condition () (finish server c))))
+
+(defun add-connection (server fd)
+  "Take the accepted socket FD, giving it to the next worker's poller in turn."
+  (let* ((c (make-connection fd))
+         (pollers (server-pollers server))
+         (poller (svref pollers (mod (incf (server-next-poller server)) (length pollers))))
+         (accepted nil))
+    (setf (connection-poller c) poller
+          (connection-deadline c) (ms-after *idle-seconds*))
+    (sb-thread:with-mutex ((server-lock server))
+      (when (and (server-running server) (< (server-count server) (server-max-connections server)))
+        (let ((table (server-table server)))
+          (when (>= fd (length table))
+            (let ((new (make-array (max (1+ fd) (* 2 (length table))) :initial-element nil)))
+              (replace new table)
+              (setf (server-table server) new table new)))
+          (setf (svref table fd) c))
+        (push c (server-connections server))
+        (incf (server-count server))
+        (setf accepted t)))
+    (cond ((not accepted) (poll:fd-close fd))
+          ;; input already waiting is reported at once
+          ((not (poll:watch poller fd)) (finish server c)))))
+
+(defun accept-all (server)
+  "Take every pending connection."
+  (loop (let ((fd (poll:accept-connection (server-listen-fd server))))
+          (unless fd (return))
+          (add-connection server fd))))
+
+(defun worker-loop (server poller)
+  "Wait for events on POLLER and run each one's connection (the first worker's poller also
+watches the listening socket)."
+  (let ((wake (server-wake-read server))
+        (listen (server-listen-fd server)))
+    (loop while (server-running server)
+          do (dotimes (i (poll:poller-wait poller nil))
+               (let ((fd (poll:poller-event poller i)))
+                 (cond ((= fd wake))
+                       ((= fd listen) (accept-all server))
+                       (t (let* ((table (server-table server))
+                                 (c (and (< fd (length table)) (svref table fd))))
+                            (when (and c (eq (connection-poller c) poller)
+                                       (not (eq (connection-phase c) :thread)))
+                              (when (poll:poller-event-hangup-p poller i)
+                                (setf (connection-hangup c) t))
+                              (drive server c))))))))))
+
+(defun call-with-rpc-thread (server function)
+  "Call FUNCTION on a thread that runs requests: calls and traces run the EVM there, so it gets
+its own EVM scratch and signature arenas (P-384 memoizing: an attestation's CA chain is the
+same on every zone verification replayed)."
+  (let ((*server* server)
+        (*out* (make-octets 65536))
+        (rpc:*response-buffer* (rpc:make-response-buffer))
+        (clempo.secp256k1:*recovery-scratch* (clempo.secp256k1:make-recovery-scratch))
+        (clempo.p256:*p256-scratch* (clempo.p256:make-p256-scratch))
+        (clempo.p384:*p384-scratch* (clempo.p384:make-p384-scratch :memoize t)))
+    (clempo.evm:with-evm-thread (funcall function))))
+
+(defun reap-loop (server)
+  "End connections past their deadline: mark them and shut their sockets down, which wakes
+the poller for them, and the worker taking that event closes them."
+  (loop while (server-running server)
+        do (sb-thread:with-mutex ((server-reaper-lock server))
+             (when (server-running server)
+               (sb-thread:condition-wait (server-reaper-wait server) (server-reaper-lock server)
+                                         :timeout 0.2)))
+           (let ((now (now-ms)))
+             (sb-thread:with-mutex ((server-lock server))
+               (dolist (c (server-connections server))
+                 (when (and (> now (connection-deadline c)) (not (connection-expired c))
+                            (>= (connection-fd c) 0))
+                   (setf (connection-expired c) t)
+                   (poll:fd-shutdown (connection-fd c))))))))
 
 ;;; WebSocket
 
@@ -420,9 +847,34 @@ upgrade request first, then the socket's stream."))
           (setf (inbuf-start in) (inbuf-end in)))
         stream)))
 
-(defun serve-websocket (connection headers stream)
-  (let ((key (header headers "sec-websocket-key"))
-        (input (websocket-input connection stream)))
+(defun start-websocket (server c)
+  "Hand C, upgrading to a websocket, to a thread of its own for the rest of its life."
+  (setf (connection-phase c) :thread (connection-deadline c) most-positive-fixnum)
+  (poll:unwatch (connection-poller c) (connection-fd c))
+  (sb-thread:with-mutex ((server-lock server))
+    (setf (connection-thread c)
+          (sb-thread:make-thread
+           (lambda () (call-with-rpc-thread server (lambda () (serve-websocket-connection server c))))
+           :name "rpc websocket"))))
+
+(defun serve-websocket-connection (server c)
+  ;; a socket: reading and writing are separate channels (else a write drops buffered input)
+  (let ((stream (sb-sys:make-fd-stream (connection-fd c) :input t :output t :dual-channel-p t
+                                                         :element-type '(unsigned-byte 8)
+                                                         :buffering :full :auto-close nil
+                                                         :serve-events nil)))
+    (setf (connection-stream c) stream)
+    (unwind-protect
+         (handler-case (serve-websocket c (req-key (connection-request c)) stream)
+           (serious-condition () nil))
+      (close-connection server c)
+      (let ((writer (connection-writer c)))
+        (when writer (sb-thread:join-thread writer :default nil :timeout 10)))
+      (ignore-errors (close stream :abort t))
+      (finish server c))))
+
+(defun serve-websocket (connection key stream)
+  (let ((input (websocket-input connection stream)))
     (unless key (reject 400))
     (with-io-deadline (*write-seconds*)
       (write-sequence
@@ -468,12 +920,15 @@ upgrade request first, then the socket's stream."))
 
 ;;; Subscription notifications: PUBLISH-HEAD queues, a writer thread per websocket sends.
 
-(defun close-connection (connection)
+(defun close-connection (server connection)
   "Stop CONNECTION's writer and wake its reader: both see the socket shut down."
   (sb-thread:with-mutex ((connection-outbox-lock connection))
     (setf (connection-closed connection) t)
     (sb-thread:condition-broadcast (connection-outbox-ready connection)))
-  (ignore-errors (sb-bsd-sockets:socket-shutdown (connection-socket connection) :direction :io)))
+  ;; under the server lock, so the descriptor is not closed (and reused) meanwhile
+  (sb-thread:with-mutex ((server-lock server))
+    (when (>= (connection-fd connection) 0)
+      (poll:fd-shutdown (connection-fd connection)))))
 
 (defun next-head (connection)
   "Wait for the oldest queued head; NIL once CONNECTION is closed."
@@ -499,7 +954,7 @@ the next head is sent."
                  (when running
                    (handler-case (notify-head (server-backend server) connection number running certificate seen)
                      ((or stream-error sb-bsd-sockets:socket-error connection-timeout) ()
-                       (close-connection connection)
+                       (close-connection server connection)
                        (return))
                      (serious-condition (e) (log-event "notifications for block ~D failed: ~A" number e)))))))))
 
@@ -518,109 +973,59 @@ so far when this one pushed the oldest out, else NIL."
             (decf (connection-outbox-length connection))
             (incf (connection-skipped connection))))))))
 
-;;; Connections and the listener
-
-(defun wait-for-request (connection)
-  "True once CONNECTION has input (or end of stream) within *IDLE-SECONDS*."
-  (let ((in (connection-in connection)))
-    (or (< (inbuf-start in) (inbuf-end in))
-        (inbuf-eof in)
-        (sb-sys:wait-until-fd-usable (inbuf-fd in) :input *idle-seconds*))))
-
-(defun serve-connection (server connection)
-  (let ((stream (connection-stream connection))
-        (in (connection-in connection))
-        (*server* server))
-    (unwind-protect
-         (handler-case
-             (loop
-               (unless (wait-for-request connection) (return))
-               (multiple-value-bind (method headers body)
-                   (handler-case (read-request in)
-                     (bad-request (e)
-                       (let ((status (bad-request-status e)))
-                         (write-http-response stream status (reason status)
-                                              (if (= status 413) "application/json; charset=utf-8" "text/plain")
-                                              (bad-request-body e)
-                                              :extra-headers '(("connection" . "close"))))
-                       (return)))
-                 (unless method (return))
-                 (if (websocket-request-p method headers)
-                     (progn (serve-websocket connection headers stream) (return))
-                     (unless (serve-http-request method headers body stream) (return)))))
-           ;; A broken, closed, slow or hostile connection ends its thread, never the process.
-           ;; SERIOUS-CONDITION: stack or heap exhaustion is not an ERROR, and must end only
-           ;; this connection.
-           (serious-condition () nil))
-      (close-connection connection)
-      (let ((writer (connection-writer connection)))
-        (when writer (sb-thread:join-thread writer :default nil :timeout 10)))
-      (ignore-errors (close stream :abort t))
-      (ignore-errors (sb-bsd-sockets:socket-close (connection-socket connection)))
-      (sb-thread:with-mutex ((server-lock server))
-        (decf (server-consensus-slots server) (connection-consensus-slots connection))
-        (setf (server-connections server) (remove connection (server-connections server)))))))
-
-(defun accept-loop (server)
-  (loop while (server-running server)
-        do (let ((client (handler-case (sb-bsd-sockets:socket-accept (server-socket server))
-                           (error () nil))))
-             (when (and client (server-running server))
-               (setf (sb-bsd-sockets:sockopt-tcp-nodelay client) t
-                     ;; reads and writes wait in SBCL, where deadlines reach them
-                     (sb-bsd-sockets:non-blocking-mode client) t)
-               (let ((connection (make-connection
-                                  client (sb-bsd-sockets:socket-make-stream
-                                          client :input t :output t :element-type '(unsigned-byte 8)
-                                                 :buffering :full))))
-                 (sb-thread:with-mutex ((server-lock server))
-                   (if (>= (length (server-connections server)) (server-max-connections server))
-                       (ignore-errors (sb-bsd-sockets:socket-close client))
-                       (progn
-                         (push connection (server-connections server))
-                         ;; Calls and traces run the EVM on this thread: give it its own scratch,
-                         ;; and signature arenas (P-384 memoizing: an attestation's CA chain is
-                         ;; the same on every zone verification this connection replays).
-                         (setf (connection-thread connection)
-                               (sb-thread:make-thread
-                                (lambda ()
-                                  (let ((clempo.secp256k1:*recovery-scratch* (clempo.secp256k1:make-recovery-scratch))
-                                        (clempo.p256:*p256-scratch* (clempo.p256:make-p256-scratch))
-                                        (clempo.p384:*p384-scratch* (clempo.p384:make-p384-scratch :memoize t)))
-                                    (clempo.evm:with-evm-thread (serve-connection server connection))))
-                                :name "rpc connection"))))))))))
+;;; The server
 
 (defun start-server (&key (host "127.0.0.1") (port 8545) backend (max-connections 256)
-                       (log *error-output*))
-  "Listen on HOST:PORT (0 picks a free port) and serve BACKEND, logging to the stream LOG
-\(NIL for none). Returns the server; STOP-SERVER joins every thread it started."
+                       (workers (poll:available-cpus)) (log *error-output*))
+  "Listen on HOST:PORT (0 picks a free port) and serve BACKEND with WORKERS threads, logging
+to the stream LOG (NIL for none). Returns the server; STOP-SERVER joins every thread it
+started."
   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
     (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
     (sb-bsd-sockets:socket-bind socket (sb-bsd-sockets:make-inet-address host) port)
     (sb-bsd-sockets:socket-listen socket 128)
-    (let ((server (%make-server :socket socket
-                                :port (nth-value 1 (sb-bsd-sockets:socket-name socket))
-                                :backend backend :max-connections max-connections :log log)))
-      (setf (server-acceptor server)
-            (sb-thread:make-thread (lambda () (accept-loop server)) :name "rpc accept"))
-      server)))
+    (setf (sb-bsd-sockets:non-blocking-mode socket) t)
+    (multiple-value-bind (wake-read wake-write) (poll:make-wakeup-pipe)
+      (let* ((pollers (coerce (loop repeat (max 1 workers) collect (poll:make-poller)) 'simple-vector))
+             (listen-fd (sb-bsd-sockets:socket-file-descriptor socket))
+             (server (%make-server :socket socket
+                                   :port (nth-value 1 (sb-bsd-sockets:socket-name socket))
+                                   :backend backend :max-connections max-connections :log log
+                                   :pollers pollers :listen-fd listen-fd
+                                   :wake-read wake-read :wake-write wake-write)))
+        (loop for p across pollers do (poll:watch-level p wake-read))
+        (poll:watch-level (svref pollers 0) listen-fd)
+        (setf (server-reaper server)
+              (sb-thread:make-thread (lambda () (reap-loop server)) :name "rpc reaper")
+              (server-workers server)
+              (loop for p across pollers
+                    collect (let ((p p))
+                              (sb-thread:make-thread
+                               (lambda () (call-with-rpc-thread server (lambda () (worker-loop server p))))
+                               :name "rpc worker"))))
+        server))))
 
 (defun stop-server (server)
-  "Stop accepting, close every open connection and join the acceptor and connection threads
-\(each connection thread joins its websocket writer)."
+  "Stop accepting and serving, close every open connection, and join the workers, the
+reaper and the websocket threads (each joins its notification writer)."
   (setf (server-running server) nil)
+  (poll:wakeup (server-wake-write server))
+  (sb-thread:with-mutex ((server-reaper-lock server))
+    (sb-thread:condition-broadcast (server-reaper-wait server)))
+  (dolist (w (server-workers server)) (sb-thread:join-thread w :default nil :timeout 10))
+  (sb-thread:join-thread (server-reaper server) :default nil :timeout 10)
   (ignore-errors (sb-bsd-sockets:socket-close (server-socket server)))
-  ;; Wake a blocked accept on platforms where closing the socket does not.
-  (ignore-errors
-   (let ((s (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
-     (sb-bsd-sockets:socket-connect s #(127 0 0 1) (server-port server))
-     (sb-bsd-sockets:socket-close s)))
-  (ignore-errors (sb-thread:join-thread (server-acceptor server) :timeout 5))
   (let ((connections (sb-thread:with-mutex ((server-lock server)) (copy-list (server-connections server)))))
-    (mapc #'close-connection connections)
+    (dolist (c connections)
+      (if (eq (connection-phase c) :thread)
+          (close-connection server c)
+          (finish server c)))
     (dolist (c connections)
       (let ((thread (connection-thread c)))
         (when thread (sb-thread:join-thread thread :default nil :timeout 10)))))
+  (loop for p across (server-pollers server) do (poll:poller-close p))
+  (poll:fd-close (server-wake-read server))
+  (poll:fd-close (server-wake-write server))
   server)
 
 (defun publish-head (server number &key certificate)
