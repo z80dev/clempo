@@ -43,7 +43,12 @@
   (logs '() :type list)
   (tx-accounts '() :type list)
   (block-accounts '() :type list)
-  (observer nil :type (or null function)))
+  (observer nil :type (or null function))
+  ;; One-entry memos of the last account and warm-slot table looked up: consecutive accesses
+  ;; mostly hit one contract, and its address is a bignum, costly to hash.
+  (last-account nil :type (or null account))
+  (last-slots-address nil)
+  (last-slots nil :type (or null hash-table)))
 
 (defun make-world (backend)
   "A world state over BACKEND, empty of changes."
@@ -62,21 +67,26 @@
 OBSERVER, when set, is called as (observer account nil nil) on every access."
   (declare #.*hot* (type world world))
   (let* ((accounts (world-accounts world))
+         (last (world-last-account world))
          (account
-           (or (gethash address accounts)
-               (setf (gethash address accounts)
-                     (let ((a (%make-account address)))
-                       (multiple-value-bind (found nonce balance code-hash)
-                           (backend-account (world-backend world) address)
-                         (when found
-                           (setf (account-exists a) t
-                                 (account-in-backend a) t
-                                 (account-nonce a) nonce
-                                 (account-balance a) balance
-                                 (account-code-hash a) (if (octets= code-hash +empty-code-hash+)
-                                                           +empty-code-hash+
-                                                           code-hash))))
-                       a))))
+           (if (and last (eql address (account-address last)))
+               last
+               (setf (world-last-account world)
+                     (or (gethash address accounts)
+                         (setf (gethash address accounts)
+                               (let ((a (%make-account address)))
+                                 (multiple-value-bind (found nonce balance code-hash)
+                                     (backend-account (world-backend world) address)
+                                   (when found
+                                     (setf (account-exists a) t
+                                           (account-in-backend a) t
+                                           (account-nonce a) nonce
+                                           (account-balance a) balance
+                                           (account-code-hash a)
+                                           (if (octets= code-hash +empty-code-hash+)
+                                               +empty-code-hash+
+                                               code-hash))))
+                                 a))))))
          (observer (world-observer world)))
     (when observer (funcall observer account nil nil))
     account))
@@ -325,19 +335,41 @@ as (observer account slot original): every storage read and write goes through h
                (journal world (lambda () (remhash address table)))
                nil))))
 
+(defun warm-slots-of (world address create)
+  "ADDRESS's table of warm slots (made when CREATE), or NIL."
+  (declare #.*hot* (type world world))
+  (if (and (world-last-slots world) (eql address (world-last-slots-address world)))
+      (world-last-slots world)
+      (let* ((table (world-warm-slots world))
+             (slots (or (gethash address table)
+                        (and create (setf (gethash address table) (make-hash-table))))))
+        (when slots
+          (setf (world-last-slots-address world) address (world-last-slots world) slots))
+        slots)))
+
 (defun slot-warm-p (world address slot)
-  (let ((slots (gethash address (world-warm-slots world))))
+  (let ((slots (warm-slots-of world address nil)))
     (and slots (values (gethash slot slots)))))
 
 (defun warm-slot (world address slot)
   "Mark (ADDRESS, SLOT) warm. Returns T when it already was."
   (declare #.*hot*)
-  (let ((slots (or (gethash address (world-warm-slots world))
-                   (setf (gethash address (world-warm-slots world)) (make-hash-table)))))
+  (let ((slots (warm-slots-of world address t)))
     (or (gethash slot slots)
         (progn (setf (gethash slot slots) t)
                (journal world (lambda () (remhash slot slots)))
                nil))))
+
+(defun access-slot (world address slot skip-cold)
+  "EIP-2929 access to (ADDRESS, SLOT): (values cold-p skipped-p). A cold slot is warmed,
+unless SKIP-COLD, when it stays cold and SKIPPED-P is true."
+  (declare #.*hot*)
+  (let ((slots (warm-slots-of world address (not skip-cold))))
+    (cond ((and slots (gethash slot slots)) (values nil nil))
+          (skip-cold (values t t))
+          (t (setf (gethash slot slots) t)
+             (journal world (lambda () (remhash slot slots)))
+             (values t nil)))))
 
 ;;; Refunds and logs
 
@@ -376,7 +408,9 @@ as (observer account slot original): every storage read and write goes through h
   (setf (fill-pointer (world-journal world)) 0
         (world-refund world) 0
         (world-logs world) '()
-        (world-tx-accounts world) '())
+        (world-tx-accounts world) '()
+        (world-last-slots-address world) nil
+        (world-last-slots world) nil)
   (clrhash (world-warm-addresses world))
   (clrhash (world-warm-slots world))
   (clrhash (world-transient world)))

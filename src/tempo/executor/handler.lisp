@@ -526,10 +526,12 @@ INVALID-TRANSACTION with the block as it was before TX."
         (incf (ctx-cumulative ctx) (tx-outcome-gas-used outcome))
         (incf (ctx-block-gas ctx) (tx-outcome-block-gas outcome))
         (incf (ctx-index ctx))
+        ;; the bloom is computed once here for both the receipts root and the block bloom
         (push (receipts:make-receipt :type (tx:transaction-type tx)
                                      :status (if (tx-outcome-status outcome) 1 0)
                                      :cumulative-gas-used (ctx-cumulative ctx)
-                                     :logs (tx-outcome-logs outcome))
+                                     :logs (tx-outcome-logs outcome)
+                                     :bloom (receipts:logs-bloom (tx-outcome-logs outcome)))
               (ctx-receipts ctx))
         outcome))))
 

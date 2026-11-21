@@ -119,11 +119,9 @@ evm2's journaled semantics (crates/precompiles/src/storage/evm.rs sload_journal 
 
 (defun warm-slot-or-skip (world address slot skip-cold)
   "evm2 into_slot_with_skip_and_warm: T when the slot was cold."
-  (if (state:slot-warm-p world address slot)
-      nil
-      (if skip-cold
-          (error 'contract:cold-load-skipped)
-          (progn (state:warm-slot world address slot) t))))
+  (multiple-value-bind (cold skipped) (state:access-slot world address slot skip-cold)
+    (when skipped (error 'contract:cold-load-skipped))
+    cold))
 
 (defmethod contract:host-sload ((h world-host) address slot skip-cold)
   (let ((world evm:*world*))

@@ -13,25 +13,31 @@
   (cumulative-gas-used 0 :type (unsigned-byte 64)) (logs nil :type list)
   (bloom nil :type (or null octets)) fee-token fee-payer)
 
-(defun bloom-accrue (bloom bytes)
+(defun bloom-accrue (bloom bytes &optional k)
+  "Set BYTES' three bloom bits in BLOOM. K, a reusable keccak context, saves allocating one
+for inputs that are not 32 or 64 bytes."
   (declare (type octets bloom bytes) #.clempo.base:*hot*)
-  (let ((hash (clempo.keccak:keccak256 bytes)))
-    (declare (type octets hash))
+  (let ((hash (make-array 32 :element-type '(unsigned-byte 8))))
+    (declare (dynamic-extent hash))
+    (clempo.keccak:keccak256-into bytes 0 (length bytes) hash 0 k)
     (dotimes (i 3)
       (let* ((bit (logand #x7ff (logior (ash (aref hash (* i 2)) 8) (aref hash (1+ (* i 2))))))
              (byte (- 255 (ash bit -3))))
         (setf (aref bloom byte) (logior (aref bloom byte) (ash 1 (logand bit 7))))))))
 
 (defun logs-bloom (logs)
-  (let ((bloom (make-octets 256)))
+  (let ((bloom (make-octets 256))
+        (address (make-array 20 :element-type '(unsigned-byte 8)))
+        (k (when logs (clempo.keccak:make-keccak))))
+    (declare (dynamic-extent address))
     (dolist (log logs bloom)
-      (bloom-accrue bloom (integer->octets (event-log-address log) 20))
-      (dolist (topic (event-log-topics log)) (bloom-accrue bloom topic)))))
+      (bloom-accrue bloom (integer-into-octets (event-log-address log) address 0 20) k)
+      (dolist (topic (event-log-topics log)) (bloom-accrue bloom topic k)))))
 
 (defun receipts-bloom (receipts)
   (let ((bloom (make-octets 256)))
     (dolist (receipt receipts bloom)
-      (let ((other (logs-bloom (receipt-logs receipt))))
+      (let ((other (or (receipt-bloom receipt) (logs-bloom (receipt-logs receipt)))))
         (dotimes (i 256) (setf (aref bloom i) (logior (aref bloom i) (aref other i))))))))
 
 (defun log-items (log)

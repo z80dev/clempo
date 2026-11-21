@@ -36,7 +36,7 @@ writes them down.")
    #:account-storage-original
    #:tload #:tstore #:take-transient-storage
    ;; access lists
-   #:warm-address #:address-warm-p #:warm-slot #:slot-warm-p
+   #:warm-address #:address-warm-p #:warm-slot #:slot-warm-p #:access-slot
    ;; journal, refunds, logs
    #:checkpoint #:rollback #:add-refund #:set-refund
    #:log-entry #:make-log-entry #:log-entry-address #:log-entry-topics #:log-entry-data
