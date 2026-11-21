@@ -29,6 +29,6 @@
  (:dir "sim")
  ;; Validator process, peer supervision, and persistent configuration/journal.
  (:dir "validator" :io-exempt ("engine.lisp" "journal.lisp" "manifest.lisp" "network.lisp"
-                               "keys.lisp"))
+                               "keys.lisp" "chain.lisp" "process.lisp"))
  (:dir "node" :io t)
  (:dir "dev" :io t))
