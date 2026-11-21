@@ -28,7 +28,7 @@ read (the RPC backend's write lock).")
    #:history-height #:history-ranges #:history-segment-count #:history-seeds
    #:history-state #:history-state-p #:history-state-number #:history-state-history
    #:history-account #:history-storage #:history-code #:history-storage-empty-p
-   #:history-code-by-hash
+   #:history-code-by-hash #:history-map-changes #:history-gap-seeds
    ;; writing
    #:history-start-writer #:history-record-block #:history-record-state #:history-flush
    #:history-tail-blocks #:history-tail-versions #:history-job #:history-job-resume
@@ -642,6 +642,79 @@ executor layer, which may see this one)."
 (defun history-code (view hash)
   (or (history-code-by-hash (history-state-history view) hash)
       (error "history: no code for hash ~A" (octets->hex hash))))
+
+;;; Changes between two blocks: the keys a state must rewrite to move from one block's state to
+;;; another's (both directions), e.g. a state database with tries moved to an older block.
+
+(defun segment-map-changes (seg from to fn)
+  "Call (FN address slot-or-nil) for each key of SEG with a version in blocks FROM+1..TO."
+  (declare #.*hot* (type fixnum from to) (type function fn))
+  (let* ((sap (segment-sap seg))
+         (pos (if (plusp (length (segment-page-offsets seg))) (aref (segment-page-offsets seg) 0) 0))
+         (end (segment-index-offset seg))
+         (buf (make-octets 53)))
+    (declare (type fixnum pos end) (type sb-sys:system-area-pointer sap))
+    (with-sap-reader (sap pos)
+      (loop while (< pos end)
+            do (let* ((shared (u8)) (suffix (u8)) (klen (+ shared suffix)))
+                 (declare (type fixnum shared suffix klen))
+                 (dotimes (i suffix) (setf (aref buf (+ shared i)) (sb-sys:sap-ref-8 sap (+ pos i))))
+                 (incf pos suffix)
+                 (let* ((first (varint)) (count (varint)) (body-len (varint))
+                        (body-end (+ pos body-len))
+                        (hit (cond ((> first to) nil)
+                                   ((> first from) t)
+                                   ;; walk the versions to the first one after FROM
+                                   (t (let ((p pos) (block first) (slot-p (= klen 53)))
+                                        (declare (type fixnum p block))
+                                        (loop repeat count
+                                              do (setf pos p)
+                                                 (incf block (varint))
+                                                 (when (> block from) (return (<= block to)))
+                                                 (setf p (if slot-p
+                                                             (+ pos 1 (sb-sys:sap-ref-8 sap pos))
+                                                             (skip-aver sap pos)))
+                                                 (setf pos p)))))))
+                   (declare (type fixnum first count body-len body-end))
+                   (when hit
+                     (funcall fn (octets->integer buf :start 1 :end 21)
+                              (when (= klen 53) (octets->integer buf :start 21 :end 53))))
+                   (setf pos body-end)))))))
+
+(defun history-gap-seeds (history)
+  "The first blocks of full segments that no other segment covers: a job seeded there from a
+checkpoint, so that block's deletions (accounts and slots it removed) are written nowhere;
+HISTORY-MAP-CHANGES across such a block misses them."
+  (loop for s in (history-segments history)
+        when (and (segment-full-p s) (plusp (segment-from s))
+                  (notany (lambda (o) (and (not (segment-full-p o))
+                                           (<= (segment-from o) (segment-from s) (segment-to o))))
+                          (history-segments history)))
+          collect (segment-from s)))
+
+(defun history-map-changes (history from to fn)
+  "Call (FN address slot-or-nil) for every account (slot NIL) and storage slot with a version
+written by blocks FROM+1..TO: a superset of the keys whose values differ between the states
+after FROM and after TO (a full segment in the range lists its whole state), unless the range
+holds one of HISTORY-GAP-SEEDS. A key may be given more than once. Returns the addresses with
+a storage wipe in the range."
+  (let ((from (min from to)) (to (max from to)) (wiped '()))
+    (dolist (seg (history-segments history))
+      (when (and (<= (segment-from seg) to) (> (segment-to seg) from))
+        (segment-map-changes seg from to fn)
+        (loop for (address . block) in (segment-wipes seg)
+              when (and (> block from) (<= block to)) do (pushnew address wiped))))
+    (let ((tail (history-tail history)))
+      (when tail
+        (maphash (lambda (key versions)
+                   (when (find-if (lambda (e) (and (> (car e) from) (<= (car e) to))) versions)
+                     (if (< key +slot-tag+)
+                         (funcall fn key nil)
+                         (funcall fn (ldb (byte 160 256) key) (ldb (byte 256 0) key)))))
+                 (tail-keys tail))
+        (loop for (address . block) in (tail-wipes tail)
+              when (and (> block from) (<= block to)) do (pushnew address wiped))))
+    wiped))
 
 (defun history-seeds (history)
   "The first blocks of the full segments (the jobs' starting states), ascending."

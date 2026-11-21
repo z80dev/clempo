@@ -28,13 +28,22 @@
          (let ((at (search "head " message :from-end t)))
            (and at (< (+ at 5) (length message)) (digit-char-p (char message (+ at 5))))))))
 
+(defun reference-timeout-p (response)
+  "The reference gave no answer: its database read transaction hit MDBX's timeout (-96000).
+Deep-history debug_intermediateRoots cases were recorded so under 16 recording threads;
+re-sent one at a time the reference answers them (taking 60-300 s each, see FRONTIER R5), so
+the error depends on the reference's load, not on the request."
+  (let ((message (clempo.json:jget* response "error" "message")))
+    (and (stringp message) (search "read transaction has been timed out (-96000)" message))))
+
 (defun case-compare-class (c)
   (let ((class (clempo.json:jget c "class")))
-    (if (and (string= class "stable")
-             (or (member (clempo.json:jget c "method") *head-dependent-methods* :test #'string=)
-                 (mentions-head-p (clempo.json:jget c "response"))))
-        "live"
-        class)))
+    (cond ((reference-timeout-p (clempo.json:jget c "response")) "reference-timeout")
+          ((and (string= class "stable")
+                (or (member (clempo.json:jget c "method") *head-dependent-methods* :test #'string=)
+                    (mentions-head-p (clempo.json:jget c "response"))))
+           "live")
+          (t class))))
 
 (defun json-shape-equal (a b)
   "Same JSON types and object keys; error objects must share their code."
@@ -53,10 +62,14 @@
         (t (eq a b))))
 
 (defun case-matches (c status response)
+  "A reference-timeout case matches an answer with a result: the reference recorded none to
+compare with."
   (and (eql status (clempo.json:jget c "status"))
-       (if (string= (case-compare-class c) "stable")
-           (clempo.json:json-equal (clempo.json:jget c "response") response)
-           (json-shape-equal (clempo.json:jget c "response") response))))
+       (let ((class (case-compare-class c)))
+         (cond ((string= class "stable") (clempo.json:json-equal (clempo.json:jget c "response") response))
+               ((string= class "reference-timeout")
+                (and (clempo.json:jobject-p response) (assoc "result" (cdr response) :test #'string=) t))
+               (t (json-shape-equal (clempo.json:jget c "response") response))))))
 
 (defmacro with-clempo-server ((url-var &key url upstream) &body body)
   "Bind URL-VAR to URL, or start an in-process server over the archive for BODY."

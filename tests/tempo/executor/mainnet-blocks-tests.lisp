@@ -139,3 +139,23 @@ transactions touched."
   "T3: an access key's call scopes are validated (metered) before the batch runs.")
 (defblock-test create-under-2d-nonce-pays-new-account 18337286
   "A CREATE batch under a 2D nonce from an account with nonce 0 pays the new-account cost.")
+
+(deftest flushing-each-transaction-keeps-the-block ()
+  "FLUSH-TRANSACTIONS after every transaction (debug_intermediateRoots) leaves the block's
+gas, receipts, bloom and state root as EXECUTE-BLOCK has them."
+  (dolist (n '(3865 4711932 16986086))
+    (let* ((block (fixture-block n))
+           (header (blocks:block-header block))
+           (plain (let ((db (prestate-db n block)))
+                    (block-mismatches (execute-block db block :chain :mainnet) header)))
+           (db (prestate-db n block))
+           (ctx (let ((*chain* :mainnet))
+                  (begin-block db (header-block-env header :chain :mainnet) :block block)))
+           (roots (let ((*chain* :mainnet))
+                    (loop for tx in (blocks:block-transactions block)
+                          do (apply-transaction ctx tx (clempo.transactions:transaction-sender tx))
+                             (flush-transactions ctx)
+                          collect (store:db-state-root db))))
+           (flushed (let ((*chain* :mainnet)) (block-mismatches (finish-block ctx) header))))
+      (is (equalp plain flushed) "block ~D: ~S vs ~S" n plain flushed)
+      (is (= (length roots) (length (blocks:block-transactions block)))))))

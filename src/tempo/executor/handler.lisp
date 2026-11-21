@@ -546,6 +546,14 @@ world as it was."
         (execute-aa-transaction ctx v)
         (execute-ethereum-transaction ctx v))))
 
+(defun flush-transactions (ctx)
+  "Write the changes of CTX's finished transactions (and its pre-execution changes) into its
+state database's open block now rather than at FINISH-BLOCK, so the database's state root
+covers them: the per-transaction roots of reth's debug_intermediateRoots. Execution goes on
+unchanged; the world keeps its accounts and reads the written values back."
+  (unless (ctx-db ctx) (error "FLUSH-TRANSACTIONS on an overlay context"))
+  (write-changes (ctx-db ctx) (state:drain-changes (ctx-world ctx))))
+
 (defun finish-block (ctx)
   "Run the post-execution system calls, write the block's changes into the state database and
 return the BLOCK-RESULT (the db block stays open for the caller to commit or revert)."

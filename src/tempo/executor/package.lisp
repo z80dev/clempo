@@ -31,6 +31,7 @@ with RETRY-BLOCK, HEAL-FROM-REFERENCE, SKIP-BLOCK and ABORT-REPLAY restarts.")
    #:invalid-transaction #:unsupported-transaction #:invalid-transaction-kind
    ;; incremental execution (builder, pool, validators)
    #:begin-block #:apply-transaction #:finish-block #:check-transaction #:block-context
+   #:flush-transactions
    #:with-state-storage #:tx-outcome-storage-changes #:payment-transaction-p
    #:proposer-fee-recipient #:collect-storage-changes #:tip20-prefix-p #:block-env-proposer
    #:tx-outcome #:tx-outcome-status #:tx-outcome-gas-used #:tx-outcome-block-gas

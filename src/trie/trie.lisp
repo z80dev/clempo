@@ -5,7 +5,7 @@
                             #:rlp-item-bounds #:rlp-decode #:rlp-decode-integer #:rlp-error)
   (:export #:trie #:make-trie #:make-secure-trie #:trie-clone
            #:trie-get #:trie-put #:trie-delete #:trie-root #:ordered-trie-root
-           #:trie-proof #:verify-proof #:node-store-get #:node-store-put
+           #:trie-proof #:verify-proof #:trie-node-at #:node-store-get #:node-store-put
            #:call-with-trie-hashing #:trie-from-items
            #:trie-node-error #:encode-account #:decode-account
            #:+empty-trie-root+ #:+empty-code-hash+))
@@ -624,6 +624,62 @@ Includes the root even if short; inline children travel inside their parents."
                     (push (if (= (length ref) 32) (encode-node node store) ref) proof))
                   (setf first nil))))
     (nreverse proof)))
+
+;;; Node introspection (reth's TrieUpdates describe branch nodes by their nibble path).
+
+(defun node-kind (node)
+  (etypecase node
+    (branch-node :branch)
+    (short-node (if (leaf-path-p (short-node-path node)) :leaf :extension))))
+
+(defun node-cached-ref (node)
+  (if (stored-node-p node) (stored-node-hash node) (node-ref node)))
+
+(defun trie-node-at (trie nibbles)
+  "The node of TRIE whose path starts exactly at NIBBLES (a sequence of 0..15 in hashed-key
+space): (values :branch children) with CHILDREN a 16-vector of NIL or (kind . ref), kind
+:branch, :extension or :leaf and ref the child's 32-byte hash or inline RLP;
+(values :extension ext-nibbles child-kind) for an extension (EXT-NIBBLES a list);
+(values :leaf key-nibbles) for a leaf (the rest of its key); NIL when no node starts there. Reads cached refs only: the trie
+must be fully hashed (TRIE-ROOT); returned refs are shared and must not be mutated. Opening
+a stored node publishes its decoded memo (safe for concurrent clean readers)."
+  (let ((store (trie-store trie))
+        (node (trie-root-node trie))
+        (want (coerce nibbles 'simple-vector))
+        (at 0))
+    (loop
+      (unless node (return nil))
+      (setf node (open-node node store))
+      (when (= at (length want))
+        (return
+          (etypecase node
+            (branch-node
+             (values :branch
+                     (map 'simple-vector
+                          (lambda (child)
+                            (when child
+                              (cons (node-kind (open-node child store)) (node-cached-ref child))))
+                          (branch-node-children node))))
+            (short-node
+             (let* ((path (short-node-path node))
+                    (nibbles (loop for i from (path-start path) below (+ (path-start path) (path-length path))
+                                   collect (nibble path i))))
+               (if (leaf-path-p path)
+                   (values :leaf nibbles)
+                   (values :extension nibbles (node-kind (open-node (short-node-item node) store)))))))))
+      (etypecase node
+        (branch-node
+         (setf node (svref (branch-node-children node) (svref want at)))
+         (incf at))
+        (short-node
+         (let* ((path (short-node-path node))
+                (len (path-length path))
+                (start (path-start path)))
+           (when (or (leaf-path-p path) (> (+ at len) (length want))
+                     (loop for i below len thereis (/= (nibble path (+ start i)) (svref want (+ at i)))))
+             (return nil))
+           (incf at len)
+           (setf node (short-node-item node))))))))
 
 (defstruct (proof-store (:constructor make-proof-store (nodes)))
   nodes)

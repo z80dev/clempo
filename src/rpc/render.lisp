@@ -9,7 +9,7 @@ senders and receipts, which are filled in on first use.")
   (:export #:cblock #:chain-block #:cblock-number #:cblock-hash #:cblock-header #:cblock-raw
            #:cblock-txs #:cblock-tx-hashes #:cblock-size #:cblock-sender #:cblock-receipts
            #:cblock-tx-raw #:cblock-timestamp #:cblock-base-fee #:cblock-inner
-           #:make-cblock #:cblock-senders
+           #:make-cblock #:cblock-senders #:decoded-cblock
            #:header-json #:block-json #:tx-json #:receipt-json #:receipt-jsons #:log-json
            #:block-logs #:q #:hex32 #:addr #:hexbytes #:effective-gas-price #:tx-to
            #:primitive-header-json #:primitive-tx-json #:primitive-block-json))
@@ -38,22 +38,26 @@ senders and receipts, which are filled in on first use.")
   (or (gethash backend *caches*)
       (setf (gethash backend *caches*) (make-hash-table :synchronized t))))
 
+(defun decoded-cblock (block raw)
+  "A cblock of the decoded BLOCK whose RLP octets are RAW (numbered by its header)."
+  (let ((header (clempo.blocks:block-header block))
+        (txs (coerce (clempo.blocks:block-transactions block) 'simple-vector)))
+    (make-cblock :number (h:ethereum-header-number (h:header-inner header)) :raw raw
+                 :hash (h:header-hash header) :header header
+                 :txs txs
+                 :tx-hashes (map 'simple-vector #'tx:transaction-hash txs)
+                 :senders (make-array (length txs) :initial-element nil)
+                 :size (length raw))))
+
 (defun chain-block (n &optional (backend chain:*backend*))
   "The decoded block N from BACKEND, or NIL when it has none."
   (let ((cache (backend-cache backend)))
     (or (gethash n cache)
         (let ((raw (chain:backend-block-raw backend n)))
           (when raw
-            (let* ((b (clempo.blocks:decode-block raw))
-                   (header (clempo.blocks:block-header b))
-                   (txs (coerce (clempo.blocks:block-transactions b) 'simple-vector)))
+            (let ((b (decoded-cblock (clempo.blocks:decode-block raw) raw)))
               (when (>= (hash-table-count cache) *cache-limit*) (clrhash cache))
-              (setf (gethash n cache)
-                    (make-cblock :number n :raw raw :hash (h:header-hash header) :header header
-                                 :txs txs
-                                 :tx-hashes (map 'simple-vector #'tx:transaction-hash txs)
-                                 :senders (make-array (length txs) :initial-element nil)
-                                 :size (length raw)))))))))
+              (setf (gethash n cache) b)))))))
 
 (defun cblock-inner (b) (h:header-inner (cblock-header b)))
 (defun cblock-timestamp (b) (h:ethereum-header-timestamp (cblock-inner b)))

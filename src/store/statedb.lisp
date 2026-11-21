@@ -22,6 +22,7 @@ committed blocks into a log and periodic checkpoints.")
    ;; writes
    #:db-set-account #:db-delete-account #:db-set-storage #:db-wipe-storage
    #:db-put-code #:db-state-root #:db-account-proof #:db-storage-proof
+   #:db-account-trie #:db-storage-trie
    #:db-begin-block #:db-commit-block #:db-revert-block #:db-block-open-p
    #:with-speculative-blocks
    ;; block diffs
@@ -212,6 +213,20 @@ root is the empty root, which has no nodes)."
         (if (octets= (trie-root trie) +empty-trie-root+)
             '()
             (trie-proof trie (slot-octets slot)))))))
+
+(defun db-account-trie (db)
+  "The account trie of the db as it is now, fully hashed (for read-only introspection)."
+  (db-state-root db)
+  (db-trie db))
+
+(defun db-storage-trie (db address)
+  "ADDRESS's storage trie as it is now, fully hashed; NIL when ADDRESS has no account."
+  (let ((a (db-account db address)))
+    (when a
+      (db-state-root db)
+      (let ((trie (sb-thread:with-mutex ((db-proof-lock db)) (ensure-storage-trie a))))
+        (trie-root trie)
+        trie))))
 
 ;;; Writes. Every write happens inside an open block so it can be undone and logged.
 

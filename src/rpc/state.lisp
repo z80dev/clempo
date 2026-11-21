@@ -235,7 +235,15 @@ quantity."
         (push (cons address (nreverse slots)) out)))
     (nreverse out)))
 
-;;; Proofs: the store's proof readers over the committed tries.
+;;; Proofs: the store's proof readers over the committed tries. An archive backend's head
+;;; state is a flat history view; its tries come from clempo.rpc.tries.
+
+(defun trie-state-at (id)
+  "STATE-AT for the methods that read tries (proofs, storage roots): a state database."
+  (multiple-value-bind (state n) (state-at id)
+    (if (or (typep state 'store:statedb) (/= n chain:*head*))
+        state
+        (clempo.rpc.tries:head-trie-state))))
 
 (defun proof-db (state)
   (if (typep state 'store:statedb)
@@ -296,7 +304,7 @@ quantity."
 
 (defrpc "eth_getAccount" ((address address) (block block-id)) "nonce, balance, storage root and code hash"
   (ensure-within-proof-window block)
-  (multiple-value-bind (exists nonce balance code-hash storage-root) (account-fields (state-at block) address)
+  (multiple-value-bind (exists nonce balance code-hash storage-root) (account-fields (trie-state-at block) address)
     (if exists
         (json:jobject "nonce" (q nonce) "balance" (q balance)
                       "storageRoot" (hex32 storage-root) "codeHash" (hex32 code-hash))
@@ -313,7 +321,7 @@ quantity."
   (when (> (length keys) +max-proof-slots+)
     (rpc-fail +invalid-params+ (format nil "storage key count ~D exceeds limit ~D" (length keys) +max-proof-slots+)))
   (ensure-within-proof-window block)
-  (proof-json (state-at block) address keys))
+  (proof-json (trie-state-at block) address keys))
 
 (defrpc "eth_getMultiProof" ((targets proof-targets) (block block-id :optional t))
   "EIP-1186 proofs for several accounts"
@@ -326,7 +334,7 @@ quantity."
   ;; No targets: the answer is empty whatever the state holds.
   (if (null targets)
       (progn (state-block block) #())
-      (let ((db (state-at block)))
+      (let ((db (trie-state-at block)))
         (map 'simple-vector
              (lambda (target)
                (proof-json db (car target)

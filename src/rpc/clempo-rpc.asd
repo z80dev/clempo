@@ -12,6 +12,7 @@
                (:file "websocket")
                (:file "server")
                (:file "render")
+               (:file "tries")
                (:file "eth")
                (:file "logs")
                (:file "config")

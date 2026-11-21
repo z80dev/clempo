@@ -2,7 +2,8 @@
   (:use #:cl #:clempo.base #:clempo.rpc #:clempo.rpc.render #:clempo.rpc.state)
   (:local-nicknames (#:json #:clempo.json) (#:serde #:clempo.serde) (#:chain #:clempo.rpc.chain)
                     (#:h #:clempo.headers) (#:executor #:clempo.executor) (#:blocks #:clempo.blocks)
-                    (#:state #:clempo.state) (#:tx #:clempo.transactions))
+                    (#:state #:clempo.state) (#:tx #:clempo.transactions) (#:store #:clempo.store)
+                    (#:trie #:clempo.trie))
   (:documentation "Methods that execute requests on a state: eth_call, eth_estimateGas,
 eth_createAccessList, eth_simulateV1, eth_callMany and tempo_simulateV1, and the replaying
 debug_trace* and trace_* families.
@@ -1066,18 +1067,10 @@ transactions). Each request renders as RENDER (tracer request outcome gas) under
 
 ;;; Re-executing recorded blocks: witnesses, intermediate roots, raw block traces
 
-(defun replay-unavailable (what)
-  (internal-error (format nil "~A: re-executing a block needs the executor's overlay replay (clempo.executor begin-call-block), which has not landed yet" what)))
-
 (defun known-block (id)
   "reth recovered_block for ID, failing with \"block not found\"."
   (let ((n (block-id-number id)))
     (or (and n (<= n chain:*head*) (chain-block n)) (header-not-found id))))
-
-(defun parent-state (b what)
-  "The state a block executes on: its parent's (the genesis block has none)."
-  (when (plusp (cblock-number b)) (state-at (1- (cblock-number b))))
-  (replay-unavailable what))
 
 (defparam witness-mode (src) "reth ExecutionWitnessMode: \"legacy\" or \"canonical\""
   (case (serde:peek-kind src)
@@ -1088,29 +1081,223 @@ transactions). Each request renders as RENDER (tracer request outcome gas) under
     (:object (serde:skip-value src) (serde:serde-fail-here src "invalid type: map, expected enum ExecutionWitnessMode"))
     (t (serde:peek src) (incf (serde:src-pos src)) (serde:serde-fail-here src "expected value"))))
 
-(defun execution-witness (b)
-  (parent-state b "debug_executionWitness"))
+(defclass recording-backend ()
+  ((db :initarg :db :reader recording-db)
+   (accounts :initform (make-hash-table) :reader recorded-accounts) ; address -> slot table
+   (order :initform '() :accessor recorded-order))
+  (:documentation "A state backend over a state database that records every account and slot
+read from it: what reth's CacheDB holds after executing a block."))
+
+(defun record-read (b address &optional (slot nil slot-p))
+  (let ((slots (or (gethash address (recorded-accounts b))
+                   (progn (push address (recorded-order b))
+                          (setf (gethash address (recorded-accounts b)) (make-hash-table))))))
+    (when slot-p (setf (gethash slot slots) t))))
+
+(defmethod state:backend-account ((b recording-backend) address)
+  (record-read b address)
+  (state:backend-account (recording-db b) address))
+
+(defmethod state:backend-storage ((b recording-backend) address slot)
+  (record-read b address slot)
+  (state:backend-storage (recording-db b) address slot))
+
+(defmethod state:backend-code ((b recording-backend) code-hash)
+  (state:backend-code (recording-db b) code-hash))
+
+(defmethod state:backend-storage-empty-p ((b recording-backend) address)
+  (record-read b address)
+  (state:backend-storage-empty-p (recording-db b) address))
+
+(defun execution-witness (b mode)
+  "reth ExecutionWitnessRecord: block B executed on its parent's state with every account and
+slot it loads recorded; the parent trie's proof nodes of those keys (state), the code of the
+loaded accounts (codes: every loaded account's, the empty code included, in legacy MODE; the
+non-empty ones sorted in canonical mode), the keys themselves (addresses, then each account's
+slots) and the headers from the lowest one BLOCKHASH read (else the parent's) to the parent.
+reth's witness also holds the nodes its sparse trie needs to apply the block's changes; the
+recorded cases compare by shape."
+  (let ((n (cblock-number b)))
+    (when (zerop n) (header-not-found (list :hash (make-octets 32))))
+    (clempo.rpc.tries:with-trie-state (db (1- n))
+      (let* ((recorder (make-instance 'recording-backend :db db))
+             (lowest (1- n))
+             (hashes (block-hash-fn))
+             (ctx (executor:begin-call-block recorder (executor:header-block-env (cblock-header b))
+                                             :block-hash-fn (lambda (k)
+                                                              (setf lowest (min lowest k))
+                                                              (funcall hashes k)))))
+        (dotimes (i (length (cblock-txs b)))
+          (replay-tx ctx b i))
+        (executor:finish-call-block ctx)
+        (let ((nodes (make-hash-table :test 'equalp)) (state '()) (codes '()) (keys '()))
+          (flet ((add (proof) (dolist (node proof)
+                                (unless (gethash node nodes)
+                                  (setf (gethash node nodes) t)
+                                  (push node state)))))
+            (dolist (address (reverse (recorded-order recorder)))
+              (add (store:db-account-proof db address))
+              (push (integer->octets address 20) keys)
+              (let ((a (store:db-account db address)))
+                (when (and a (or (eq mode :legacy)
+                                 (not (octets= (store:account-code-hash a) trie:+empty-code-hash+))))
+                  (pushnew (store:db-code db (store:account-code-hash a)) codes :test #'equalp)))
+              (loop for slot being the hash-keys of (gethash address (recorded-accounts recorder))
+                    do (add (store:db-storage-proof db address slot))
+                       (push (integer->octets slot 32) keys))))
+          (json:jobject "state" (map 'simple-vector #'hexbytes (nreverse state))
+                        "codes" (map 'simple-vector #'hexbytes (sort codes #'octets-before-p))
+                        "keys" (map 'simple-vector #'hexbytes (nreverse keys))
+                        "headers" (coerce (loop for k from lowest below n
+                                                for header = (cblock-header (chain-block k))
+                                                collect (hexbytes (or (h:header-raw header) (h:encode-header header))))
+                                          'simple-vector)))))))
+
+(defun octets-before-p (a b)
+  "Byte-wise lexicographic order (alloy Bytes' Ord)."
+  (let ((i (mismatch a b)))
+    (cond ((null i) nil)
+          ((>= i (length a)) t)
+          ((>= i (length b)) nil)
+          (t (< (aref a i) (aref b i))))))
 
 (defrpc "debug_executionWitness" ((block block-id) (mode witness-mode :optional t))
   "the trie nodes, codes and keys a block's execution reads"
-  (execution-witness (known-block block)))
+  (execution-witness (known-block block) (or mode :legacy)))
 
 (defrpc "debug_executionWitnessByBlockHash" ((hash hash) (mode witness-mode :optional t))
   "debug_executionWitness by block hash"
-  (execution-witness (known-block (list :hash hash))))
+  (execution-witness (known-block (list :hash hash)) (or mode :legacy)))
+
+(defun intermediate-roots (b)
+  "reth intermediate_roots: block B re-executed on its parent's state (a state database with
+tries, clempo.rpc.tries), the state root after the pre-execution changes and each transaction
+in turn; execution stops at the first invalid transaction."
+  (let ((n (cblock-number b)))
+    ;; reth looks the parent up by hash: the genesis block's is the zero hash
+    (when (zerop n) (header-not-found (list :hash (make-octets 32))))
+    (clempo.rpc.tries:with-trie-state (db (1- n))
+      (store:with-speculative-blocks (db)
+        (let* ((block (blocks:decode-block (cblock-raw b)))
+               (ctx (executor:begin-block db (executor:header-block-env (cblock-header b)) :block block))
+               (roots '()))
+          (dotimes (i (length (cblock-txs b)))
+            (handler-case (executor:apply-transaction ctx (svref (cblock-txs b) i) (cblock-sender b i))
+              (executor:invalid-transaction () (return))
+              (executor:execution-failure (e)
+                (internal-error (format nil "replaying transaction ~D of block ~D: ~A"
+                                        i n (executor:execution-failure-reason e)))))
+            (executor:flush-transactions ctx)
+            (push (hex32 (store:db-state-root db)) roots))
+          (coerce (nreverse roots) 'simple-vector))))))
 
 (defrpc "debug_intermediateRoots" ((hash hash) (options call-tracing-options :optional t))
   "the state root after each transaction of a block"
-  (parent-state (known-block (list :hash hash)) "debug_intermediateRoots"))
+  (intermediate-roots (known-block (list :hash hash))))
 
 (defobject hashed-post-state (:expected "struct HashedPostState")
   (:accounts "accounts" raw :required t)
   (:storages "storages" raw :required t))
 
+(defun preimages (hashes candidates)
+  "HASHES (32-octet keys) -> the CANDIDATES (address or slot integers, WIDTH octets wide as a
+cons (width . list)) whose keccak they are, as an EQUALP table."
+  (let ((want (make-hash-table :test 'equalp)) (found (make-hash-table :test 'equalp)))
+    (dolist (h hashes) (setf (gethash h want) t))
+    (destructuring-bind (width . values) candidates
+      (dolist (v values found)
+        (let ((h (clempo.keccak:keccak256 (integer->octets v width))))
+          (when (gethash h want) (setf (gethash h found) v)))))))
+
+(defun trie-updates-json (nodes removed)
+  (values (cons :object
+                (loop for (path state tree hash hashes) in (sort (copy-list nodes) #'string<
+                                                                 :key (lambda (n) (clempo.rpc.tries:nibbles-hex (car n))))
+                      collect (cons (clempo.rpc.tries:nibbles-hex path)
+                                    (json:jobject "state_mask" state "tree_mask" tree "hash_mask" hash
+                                                  "hashes" (map 'simple-vector #'hex32 hashes)
+                                                  "root_hash" :null))))
+          (sort (map 'simple-vector #'clempo.rpc.tries:nibbles-hex removed) #'string<)))
+
+(defun state-root-with-updates (input n)
+  "reth state_root_with_updates: the hashed post-state INPUT (accounts and storages keyed by
+keccak) applied to the state after block N; the new state root and reth's trie updates, as
+its walker over the stored trie would rebuild them (clempo.rpc.tries:trie-updates). Hashed
+keys are mapped back to the state's addresses and slots, so only existing ones can change."
+  (clempo.rpc.tries:with-trie-state (db n)
+    (store:with-speculative-blocks (db)
+      (let* ((accounts (cdr (getf input :accounts)))
+             (storages (cdr (getf input :storages)))
+             (all-addresses (let ((out '())) (store:map-accounts (lambda (a acc) (declare (ignore acc)) (push a out)) db) out))
+             (hashed (lambda (s) (hex->octets s)))
+             (addresses (preimages (mapcar (lambda (e) (funcall hashed (car e))) (append accounts storages))
+                                   (cons 20 all-addresses)))
+             (address-of (lambda (s) (or (gethash (funcall hashed s) addresses)
+                                         (internal-error (format nil "no account hashes to ~A" s)))))
+             (pre (trie:trie-clone (store:db-account-trie db)))
+             (pre-storage (make-hash-table)))
+        (loop for (key . storage) in storages
+              for address = (funcall address-of key)
+              do (setf (gethash address pre-storage) (trie:trie-clone (store:db-storage-trie db address))))
+        (store:db-begin-block db)
+        (loop for (key . account) in accounts
+              for address = (funcall address-of key)
+              do (if (eq account :null)
+                     (store:db-delete-account db address)
+                     (let ((code (json:jget account "bytecode_hash")))
+                       (store:db-set-account db address (hex-or-integer (json:jget account "nonce" 0))
+                                             (hex-or-integer (json:jget account "balance" 0))
+                                             (if (stringp code) (hex->octets code) trie:+empty-code-hash+)))))
+        (let ((slot-changes (make-hash-table)))
+          (loop for (key . storage) in storages
+                for address = (funcall address-of key)
+                for slots = (cdr (json:jget storage "storage" '(:object)))
+                for known = (let ((out '()) (a (store:db-account db address)))
+                              (when a (store:map-account-storage (lambda (s v) (declare (ignore v)) (push s out)) a))
+                              out)
+                for preimages = (preimages (mapcar (lambda (e) (funcall hashed (car e))) slots) (cons 32 known))
+                do (when (eq (json:jget storage "wiped") :true) (store:db-wipe-storage db address))
+                   (loop for (slot-key . value) in slots
+                         do (store:db-set-storage db address
+                                                  (or (gethash (funcall hashed slot-key) preimages)
+                                                      (internal-error (format nil "no slot hashes to ~A" slot-key)))
+                                                  (hex-or-integer value)))
+                   (setf (gethash address slot-changes)
+                         (mapcar (lambda (e) (clempo.rpc.tries:octets-nibbles (funcall hashed (car e)))) slots)))
+          (let ((root (store:db-state-root db))
+                (post (store:db-account-trie db))
+                (changes (mapcar (lambda (e) (clempo.rpc.tries:octets-nibbles (funcall hashed (car e))))
+                                 (append accounts storages))))
+            (multiple-value-bind (nodes removed leaves) (clempo.rpc.tries:trie-updates pre post changes)
+              (let* ((leaf-keys (mapcar (lambda (nibbles)
+                                          (let ((o (make-octets 32)))
+                                            (loop for (a b) on nibbles by #'cddr for i from 0
+                                                  do (setf (aref o i) (logior (ash a 4) b)))
+                                            o))
+                                        leaves))
+                     (leaf-addresses (preimages leaf-keys (cons 20 all-addresses)))
+                     (storage-tries
+                       (loop for key in leaf-keys
+                             for address = (gethash key leaf-addresses)
+                             for post-storage = (and address (store:db-storage-trie db address))
+                             when post-storage
+                               append (multiple-value-bind (snodes sremoved)
+                                          (clempo.rpc.tries:trie-updates (or (gethash address pre-storage) post-storage)
+                                                                         post-storage (gethash address slot-changes))
+                                        (when (or snodes sremoved)
+                                          (multiple-value-bind (sn rn) (trie-updates-json snodes sremoved)
+                                            (list (cons (hex32 key) (json:jobject "storage_nodes" sn "removed_nodes" rn)))))))))
+                (multiple-value-bind (an rn) (trie-updates-json nodes removed)
+                  (vector (hex32 root)
+                          (json:jobject "account_nodes" an "removed_nodes" rn
+                                        "storage_tries" (cons :object storage-tries))))))))))))
+
+(defun hex-or-integer (v)
+  (etypecase v (integer v) (string (hex->integer v))))
+
 (defrpc "debug_stateRootWithUpdates" ((state hashed-post-state) (block block-id :optional t))
   "the state root of a hashed post-state on top of a block's state, with its trie updates"
-  (state-at block)
-  (internal-error "debug_stateRootWithUpdates: state roots over hashed keys (keccak-addressed tries) are not implemented over clempo's state database"))
+  (state-root-with-updates state (state-block block)))
 
 (defun rlp-error-text (e)
   "alloy_rlp's Display for the clempo.rlp failure E."
@@ -1136,11 +1323,11 @@ transactions). Each request renders as RENDER (tracer request outcome gas) under
 (defrpc "debug_traceBlock" ((raw hex-data) (options tracing-options :optional t))
   "trace every transaction of an RLP-encoded block on its parent's state"
   (let* ((block (decode-raw-block raw))
-         (parent (list :hash (h:header-parent-hash (blocks:block-header block)))))
-    (state-block parent)
-    (check-tracer options)
-    (state-at parent)
-    (replay-unavailable "debug_traceBlock")))
+         (parent (list :hash (h:header-parent-hash (blocks:block-header block))))
+         (b (decoded-cblock block raw)))
+    (unless (eql (state-block parent) (1- (cblock-number b)))
+      (header-not-found parent))
+    (trace-block-replay b options)))
 
 ;;; Tracing: geth's debug_trace* and parity's trace_* families, replayed on the executor's
 ;;; overlay call block over the parent's state (clempo.executor begin-call-block /
@@ -1469,9 +1656,8 @@ results in order."
         :null)))
 
 (defrpc "trace_replayTransaction" ((hash hash) (types trace-types))
-  "replay a transaction with parity tracers"
-  (or (tx-trace hash (parity-maker types) #'parity-replay)
-      (rpc-fail -32000 "transaction not found")))
+  "replay a transaction with parity tracers (reth: None for an unknown transaction)"
+  (or (tx-trace hash (parity-maker types) #'parity-replay) :null))
 
 (defrpc "trace_transactionOpcodeGas" ((hash hash))
   "opcode counts and gas of a transaction"
