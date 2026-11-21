@@ -15,7 +15,8 @@ reth's limits and messages (100,000 blocks per query, 20,000 logs per response).
 (defstruct (log-filter (:conc-name filter-))
   from to block-hash
   (addresses nil)          ; list of integers; NIL matches any
-  (topics nil))            ; list per position: NIL (any) or a list of 32-byte octets
+  (topics nil)             ; list per position: NIL (any) or a list of 32-byte octets
+  (bloom nil))             ; FILTER-BLOOM-BITS, once computed
 
 ;;; Reading a Filter object
 
@@ -80,19 +81,35 @@ reth's limits and messages (100,000 blocks per query, 20,000 logs per response).
 
 ;;; Matching
 
-(defun bloom-has-p (bloom bytes)
-  "BLOOM (256 octets) contains the 3 bits of keccak(BYTES)."
-  (let ((h (clempo.keccak:keccak256 bytes)))
+(defun bloom-bits (bytes)
+  "Where keccak(BYTES) sets its 3 bits in a 256-octet bloom: (octet mask octet mask octet mask)."
+  (let ((h (clempo.keccak:keccak256 bytes)) (v (make-array 6 :element-type 'fixnum)))
     (loop for i from 0 below 6 by 2
-          always (let* ((bit (logand (logior (ash (aref h i) 8) (aref h (1+ i))) 2047))
-                        (byte (- 255 (floor bit 8))))
-                   (logbitp (mod bit 8) (aref bloom byte))))))
+          do (let ((bit (logand (logior (ash (aref h i) 8) (aref h (1+ i))) 2047)))
+               (setf (aref v i) (- 255 (floor bit 8)) (aref v (1+ i)) (ash 1 (mod bit 8)))))
+    v))
 
-(defun filter-matches-bloom-p (f bloom)
-  (and (or (null (filter-addresses f))
-           (some (lambda (a) (bloom-has-p bloom (integer->octets a 20))) (filter-addresses f)))
-       (every (lambda (set) (or (null set) (some (lambda (topic) (bloom-has-p bloom topic)) set)))
-              (filter-topics f))))
+(defun bloom-bits-p (bits bloom offset)
+  "Whether the 256 octets of BLOOM from OFFSET have every bit of BITS (BLOOM-BITS)."
+  (declare (type (simple-array fixnum (6)) bits) (type octets bloom) (type fixnum offset))
+  (invariant (<= 0 offset (- (length bloom) 256)) "bloom outside its octets")
+  (loop for i from 0 below 6 by 2
+        always (logtest (aref bits (1+ i)) (aref bloom (+ offset (aref bits i))))))
+
+(defun filter-bloom-bits (f)
+  "F's addresses and topics as BLOOM-BITS, computed once: (addresses . topics), each NIL
+\(any) or a list of alternatives, the topics one entry per position."
+  (or (filter-bloom f)
+      (setf (filter-bloom f)
+            (cons (mapcar (lambda (a) (bloom-bits (integer->octets a 20))) (filter-addresses f))
+                  (mapcar (lambda (set) (mapcar #'bloom-bits set)) (filter-topics f))))))
+
+(defun filter-matches-bloom-p (f bloom &optional (offset 0))
+  "Whether the bloom at OFFSET in BLOOM may hold a log F matches."
+  (destructuring-bind (addresses . topics) (filter-bloom-bits f)
+    (and (or (null addresses) (some (lambda (bits) (bloom-bits-p bits bloom offset)) addresses))
+         (every (lambda (set) (or (null set) (some (lambda (bits) (bloom-bits-p bits bloom offset)) set)))
+                topics))))
 
 (defun log-matches-p (f log)
   (and (or (null (filter-addresses f)) (member (r:event-log-address log) (filter-addresses f)))
@@ -103,18 +120,18 @@ reth's limits and messages (100,000 blocks per query, 20,000 logs per response).
                           (and topic (member topic set :test #'octets=)))))))
 
 (defun filter-logs-in-block (f b)
-  "The rendered logs of cached block B that match F."
+  "The rendered logs of cached block B that match F (JSON-RAW texts, written once per log)."
   (let ((out '()) (log-index 0))
     (loop for rc across (cblock-receipts b)
           for i from 0
           do (dolist (log (r:receipt-logs rc))
                (when (log-matches-p f log)
-                 (push (log-json b i log-index i log) out))
+                 (push (rendered-log b i log-index log) out))
                (incf log-index)))
     (nreverse out)))
 
 (defun raw-header-bloom (raw)
-  "The logs bloom of raw block RAW, read without decoding the block."
+  "The offset of the logs bloom in raw block RAW, found without decoding the block."
   (multiple-value-bind (bs be) (rlp:rlp-item-bounds raw 0 (length raw))
     (declare (ignore be))
     (multiple-value-bind (hs he) (rlp:rlp-item-bounds raw bs (length raw))
@@ -124,7 +141,17 @@ reth's limits and messages (100,000 blocks per query, 20,000 logs per response).
           (let ((p is))
             (dotimes (i 6) (setf p (nth-value 1 (rlp:rlp-item-bounds raw p ie))))
             (multiple-value-bind (s e) (rlp:rlp-item-bounds raw p ie)
-              (subseq raw s e))))))))
+              (invariant (= (- e s) 256) "a header bloom is 256 octets")
+              s)))))))
+
+(defun block-may-match-p (f n)
+  "Whether block N's header bloom admits F (NIL when the backend lacks N): read from the
+decoded block when it is cached, else from the raw block."
+  (let ((b (cached-cblock n)))
+    (if b
+        (filter-matches-bloom-p f (clempo.headers:ethereum-header-logs-bloom (cblock-inner b)))
+        (let ((raw (chain:backend-block-raw chain:*backend* n)))
+          (and raw (filter-matches-bloom-p f raw (raw-header-bloom raw)))))))
 
 (defun logs-in-range (f from to)
   (when (< to from) (rpc-fail +invalid-params+ "invalid block range params"))
@@ -132,8 +159,7 @@ reth's limits and messages (100,000 blocks per query, 20,000 logs per response).
     (rpc-fail +invalid-params+ (format nil "query exceeds max block range ~D" *max-blocks-per-filter*)))
   (let ((logs '()) (count 0))
     (loop for n from from to to
-          for raw = (chain:backend-block-raw chain:*backend* n)
-          when (and raw (filter-matches-bloom-p f (raw-header-bloom raw)))
+          when (block-may-match-p f n)
             do (let ((found (filter-logs-in-block f (chain-block n))))
                  (incf count (length found))
                  (setf logs (nreconc found logs))

@@ -9,8 +9,9 @@ senders and receipts, which are filled in on first use.")
   (:export #:cblock #:chain-block #:cblock-number #:cblock-hash #:cblock-header #:cblock-raw
            #:cblock-txs #:cblock-tx-hashes #:cblock-size #:cblock-sender #:cblock-receipts
            #:cblock-tx-raw #:cblock-timestamp #:cblock-base-fee #:cblock-inner
-           #:make-cblock #:cblock-senders #:decoded-cblock
-           #:header-json #:block-json #:tx-json #:receipt-json #:receipt-jsons #:log-json
+           #:make-cblock #:cblock-senders #:decoded-cblock #:cached-cblock
+           #:header-json #:block-json #:rendered-block #:tx-json #:receipt-json #:receipt-jsons #:log-json
+           #:rendered-log
            #:block-logs #:q #:hex32 #:addr #:hexbytes #:effective-gas-price #:tx-to
            #:primitive-header-json #:primitive-tx-json #:primitive-block-json))
 
@@ -29,14 +30,17 @@ senders and receipts, which are filled in on first use.")
 ;;; Decoded blocks, cached per backend
 
 (defstruct cblock number raw hash header txs tx-hashes tx-bounds (senders nil) (receipt-cache nil) size
+  (rendered (make-array 2 :initial-element nil))   ; BLOCK-JSON as JSON-RAW: full, hashes only
+  (log-texts nil)                                  ; each log of the block as a JSON-RAW
   (lock (sb-thread:make-mutex :name "cblock")))
 
-(defvar *caches* (make-hash-table :test 'eq :weakness :key :synchronized t))
 (defparameter *cache-limit* 4096)
 
-(defun backend-cache (backend)
-  (or (gethash backend *caches*)
-      (setf (gethash backend *caches*) (make-hash-table :synchronized t))))
+(defun backend-cache (backend) (chain:backend-block-cache backend))
+
+(defun cached-cblock (n &optional (backend chain:*backend*))
+  "Block N if CHAIN-BLOCK already holds it decoded, else NIL."
+  (gethash n (backend-cache backend)))
 
 (defun decoded-cblock (block raw)
   "A cblock of the decoded BLOCK whose RLP octets are RAW (numbered by its header)."
@@ -139,6 +143,12 @@ senders and receipts, which are filled in on first use.")
                             (map 'simple-vector #'hex32 (cblock-tx-hashes b)))))
             (when (clempo.blocks:block-withdrawals-present-p blk)
               (list (cons "withdrawals" (withdrawals-json blk)))))))
+
+(defun rendered-block (b full)
+  "BLOCK-JSON of B as a JSON-RAW, written once per cached block (two threads may both write
+it the first time; they write the same text)."
+  (let ((i (if full 0 1)) (v (cblock-rendered b)))
+    (or (svref v i) (setf (svref v i) (json:raw-json (block-json b full))))))
 
 (defun withdrawals-json (blk)
   (map 'simple-vector
@@ -383,6 +393,16 @@ sender and effective gas price (a legacy or EIP-2930 gasPrice is the transaction
                 "transactionIndex" (q tx-index)
                 "logIndex" (q log-index)
                 "removed" :false))
+
+(defun rendered-log (b tx-index log-index log)
+  "LOG-JSON of the LOG-INDEXth log of cached block B (in transaction TX-INDEX) as a JSON-RAW,
+written once."
+  (let ((v (or (cblock-log-texts b)
+               (setf (cblock-log-texts b)
+                     (make-array (loop for rc across (cblock-receipts b) sum (length (r:receipt-logs rc)))
+                                 :initial-element nil)))))
+    (or (svref v log-index)
+        (setf (svref v log-index) (json:raw-json (log-json b tx-index log-index tx-index log))))))
 
 (defun create-address (sender nonce)
   (octets->integer (clempo.keccak:keccak256

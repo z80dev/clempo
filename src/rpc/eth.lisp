@@ -95,10 +95,10 @@ everything that needs no execution.")
 ;;; eth: blocks
 
 (defrpc "eth_getBlockByNumber" ((id block-number-or-tag) (full bool)) "block by number or tag"
-  (let ((b (resolve-block id))) (if b (block-json b full) :null)))
+  (let ((b (resolve-block id))) (if b (rendered-block b full) :null)))
 
 (defrpc "eth_getBlockByHash" ((hash hash) (full bool)) "block by hash"
-  (let ((b (resolve-block (list :hash hash)))) (if b (block-json b full) :null)))
+  (let ((b (resolve-block (list :hash hash)))) (if b (rendered-block b full) :null)))
 
 (defrpc "eth_getHeaderByNumber" ((id block-number-or-tag)) "header by number or tag"
   (let ((b (resolve-block id))) (if b (header-json (cblock-header b) (cblock-hash b)) :null)))
