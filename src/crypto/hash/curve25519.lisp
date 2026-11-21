@@ -1,52 +1,12 @@
 (defpackage #:clempo.x25519
-  (:use #:cl #:clempo.base)
+  (:use #:cl #:clempo.base #:clempo.field25519)
   (:export #:x25519 #:x25519-public-key))
 (defpackage #:clempo.ed25519
-  (:use #:cl #:clempo.base)
-  (:export #:ed25519-public-key #:ed25519-sign #:ed25519-verify))
+  (:use #:cl #:clempo.base #:clempo.field25519)
+  (:export #:ed25519-public-key #:ed25519-sign #:ed25519-verify #:ed25519-public-key-valid-p))
 (in-package #:clempo.x25519)
 
-(defconstant +p+ (- (ash 1 255) 19))
-
-(declaim (inline f+ f- reduce-product f* sq))
-(defun f+ (x y) (let ((sum (+ x y))) (if (< sum +p+) sum (- sum +p+))))
-(defun f- (x y) (let ((diff (- x y))) (if (minusp diff) (+ diff +p+) diff)))
-(defun reduce-product (x)
-  (let* ((r (+ (ldb (byte 255 0) x) (* 19 (ash x -255))))
-         (s (+ (ldb (byte 255 0) r) (* 19 (ash r -255)))))
-    (if (< s +p+) s (- s +p+))))
-(defun f* (x y) (reduce-product (* x y)))
-(defun sq (x) (f* x x))
-
-(defun squares (x n)
-  (dotimes (i n x) (setf x (sq x))))
-
-(defun pow2523 (x)
-  "Exponentiate to 2^252 - 3, extending runs of one-bits by squaring and multiplying."
-  (let* ((x2 (sq x)) (x9 (f* (squares x2 2) x)) (x11 (f* x9 x2))
-         (x5 (f* (sq x11) x9))                 ; x^(2^5 - 1)
-         (x10 (f* (squares x5 5) x5))
-         (x20 (f* (squares x10 10) x10))
-         (x40 (f* (squares x20 20) x20))
-         (x50 (f* (squares x40 10) x10))
-         (x100 (f* (squares x50 50) x50))
-         (x200 (f* (squares x100 100) x100))
-         (x250 (f* (squares x200 50) x50)))
-    (f* (squares x250 2) x)))
-
-(defun inverse (x) (f* (squares (pow2523 x) 3) (f* x (sq x))))
-
-(defun integer-le (data &optional (start 0) (end (length data)))
-  (declare (type octets data))
-  (loop with result = 0 for i from (1- end) downto start do
-    (setf result (logior (ash result 8) (aref data i))) finally (return result)))
-
-(defun octets-le (x &optional (n 32))
-  (let ((out (make-octets n)))
-    (dotimes (i n out) (setf (aref out i) (ldb (byte 8 (* i 8)) x)))))
-
-(defun clamped-scalar (bytes)
-  (logior (logand (integer-le bytes 0 32) (- (ash 1 254) 8)) (ash 1 254)))
+(defparameter *a24* (from-integer 121665))
 
 (defun x25519 (secret peer-public)
   "RFC 7748 raw shared coordinate. Callers must reject an all-zero shared secret."
@@ -54,54 +14,49 @@
   (check-type peer-public octets)
   (assert (= (length secret) (length peer-public) 32))
   (let ((scalar (clamped-scalar secret))
-        (u (mod (ldb (byte 255 0) (integer-le peer-public)) +p+)))
-    (let ((x2 1) (z2 0) (x3 u) (z3 1) (previous 0))
+        (u (from-integer (ldb (byte 255 0) (integer-le peer-public)))))
+    (let ((x2 +one+) (z2 +zero+) (x3 u) (z3 +one+) (previous 0))
       (loop for i from 254 downto 0 for bit = (ldb (byte 1 i) scalar) do
         (unless (= bit previous) (rotatef x2 x3) (rotatef z2 z3))
         (setf previous bit)
         (let* ((a (f+ x2 z2)) (aa (sq a)) (b (f- x2 z2)) (bb (sq b)) (e (f- aa bb))
                (c (f+ x3 z3)) (d (f- x3 z3)) (da (f* d a)) (cb (f* c b)))
           (setf x3 (sq (f+ da cb)) z3 (f* u (sq (f- da cb)))
-                x2 (f* aa bb) z2 (f* e (f+ aa (f* 121665 e))))))
+                x2 (f* aa bb) z2 (f* e (f+ aa (f* *a24* e))))))
       ;; Scalar clamping fixes the final bit to zero, hence the final swap is a no-op.
-      (octets-le (f* x2 (inverse z2))))))
+      (octets-le (to-integer (f* x2 (inverse z2)))))))
 
 (defparameter *base-u* (octets-le 9))
 (defun x25519-public-key (secret) (x25519 secret *base-u*))
 
 (in-package #:clempo.ed25519)
 
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (import '(clempo.x25519::f+ clempo.x25519::f- clempo.x25519::f* clempo.x25519::sq
-            clempo.x25519::inverse clempo.x25519::pow2523 clempo.x25519::+p+
-            clempo.x25519::octets-le clempo.x25519::integer-le clempo.x25519::clamped-scalar)))
-
-(defconstant +d+ 37095705934669439343138083508754565189542113879843219016388785533085940283555)
-(defconstant +2d+ 16295367250680780974490674513165176452449235426866156013048779062215315747161)
-(defconstant +sqrt-minus-one+ 19681161376707505956807079304988542015446066515923890162744021073123829784752)
+(defparameter *d* (from-integer 37095705934669439343138083508754565189542113879843219016388785533085940283555))
+(defparameter *2d* (f+ *d* *d*))
+(defparameter *sqrt-minus-one* (from-integer 19681161376707505956807079304988542015446066515923890162744021073123829784752))
 (defconstant +order+ (+ (ash 1 252) 27742317777372353535851937790883648493))
 
 (defstruct (point (:constructor point (x y z xy)))
-  (x 0 :type (integer 0) :read-only t)
-  (y 1 :type (integer 0) :read-only t)
-  (z 1 :type (integer 0) :read-only t)
-  (xy 0 :type (integer 0) :read-only t))
+  (x +zero+ :type field :read-only t)
+  (y +one+ :type field :read-only t)
+  (z +one+ :type field :read-only t)
+  (xy +zero+ :type field :read-only t))
 
 (defstruct (cached (:constructor %cached (ymx ypx z dxy)))
-  (ymx 1 :type (integer 0) :read-only t)
-  (ypx 1 :type (integer 0) :read-only t)
-  (z 1 :type (integer 0) :read-only t)
-  (dxy 0 :type (integer 0) :read-only t))
+  (ymx +one+ :type field :read-only t)
+  (ypx +one+ :type field :read-only t)
+  (z +one+ :type field :read-only t)
+  (dxy +zero+ :type field :read-only t))
 
-(defparameter *identity* (point 0 1 1 0))
+(defparameter *identity* (point +zero+ +one+ +one+ +zero+))
 (defparameter *base*
-  (let ((x 15112221349535400772501151409588531511454012693041857206046113283949847762202)
-        (y 46316835694926478169428394003475163141307993866256225615783033603165251855960))
-    (point x y 1 (f* x y))))
+  (let ((x (from-integer 15112221349535400772501151409588531511454012693041857206046113283949847762202))
+        (y (from-integer 46316835694926478169428394003475163141307993866256225615783033603165251855960)))
+    (point x y +one+ (f* x y))))
 
 (defun cache (p)
   (%cached (f- (point-y p) (point-x p)) (f+ (point-y p) (point-x p))
-           (point-z p) (f* +2d+ (point-xy p))))
+           (point-z p) (f* *2d* (point-xy p))))
 
 (defun add (p q affine)
   (declare #.clempo.base:*hot* (type point p) (type cached q))
@@ -115,44 +70,55 @@
 (defun double-point (p)
   (declare #.clempo.base:*hot* (type point p))
   (let* ((a (sq (point-x p))) (b (sq (point-y p))) (z (sq (point-z p)))
-         (c (f+ z z)) (d (f- 0 a)) (h (f- d b))
+         (c (f+ z z)) (d (f- +zero+ a)) (h (f- d b))
          (e (f- (sq (f+ (point-x p) (point-y p))) (f+ a b)))
          (g (f+ d b)) (f (f- g c)))
     (point (f* e f) (f* g h) (f* f g) (f* e h))))
 
 (defun negate (p)
-  (point (f- 0 (point-x p)) (point-y p) (point-z p) (f- 0 (point-xy p))))
+  (point (f- +zero+ (point-x p)) (point-y p) (point-z p) (f- +zero+ (point-xy p))))
 
-(defun to-affine (p)
-  (let* ((inv (inverse (point-z p))) (x (f* (point-x p) inv)) (y (f* (point-y p) inv)))
-    (point x y 1 (f* x y))))
+(defun to-affine (p &optional (inv (inverse (point-z p))))
+  (let ((x (f* (point-x p) inv)) (y (f* (point-y p) inv)))
+    (point x y +one+ (f* x y))))
 
 (defun encode-point (p)
   (let ((p (to-affine p)))
-    (octets-le (logior (ash (logand (point-x p) 1) 255) (point-y p)))))
+    (octets-le (logior (ash (logand (to-integer (point-x p)) 1) 255) (to-integer (point-y p))))))
 
 (defun decode-point (data &optional (start 0))
   ;; ZIP-215: the field coordinate may be noncanonical; the sign bit on x=0
   ;; does not invalidate the point. The original octets enter the challenge.
-  (let* ((n (integer-le data start (+ start 32))) (y (mod (ldb (byte 255 0) n) +p+))
-         (yy (sq y)) (u (f- yy 1)) (v (f+ 1 (f* +d+ yy)))
+  (let* ((n (integer-le data start (+ start 32))) (y (from-integer (ldb (byte 255 0) n)))
+         (yy (sq y)) (u (f- yy +one+)) (v (f+ +one+ (f* *d* yy)))
          (v3 (f* (sq v) v)) (v7 (f* v (sq v3)))
          (x (f* (f* u v3) (pow2523 (f* u v7))))
-         (check (f* v (sq x))))
-    (cond ((= check u))
-          ((= check (f- 0 u)) (setf x (f* x +sqrt-minus-one+)))
+         (check (to-integer (f* v (sq x))))
+         (u-value (to-integer u)))
+    (cond ((= check u-value))
+          ((= check (- +p+ u-value)) (setf x (f* x *sqrt-minus-one*)))
           (t (return-from decode-point nil)))
-    (unless (= (logand x 1) (ldb (byte 1 255) n)) (setf x (f- 0 x)))
-    (point x y 1 (f* x y))))
+    (unless (= (logand (to-integer x) 1) (ldb (byte 1 255) n)) (setf x (f- +zero+ x)))
+    (point x y +one+ (f* x y))))
+
+(defun ed25519-public-key-valid-p (data)
+  "True when DATA represents an Edwards point under ZIP-215 decoding."
+  (and (typep data 'octets) (= (length data) 32) (not (null (decode-point data)))))
 
 (defun base-multiples ()
   ;; A comb: precompute j*16^i*B, so fixed-base multiplication has no doubling.
-  (let ((table (make-array '(64 16))) (base *base*))
+  (let ((table (make-array '(64 16))) (base *base*)
+        (points (make-array 16)) (products (make-array 16)))
     (dotimes (i 64 table)
-      (let ((base-cache (cache base)) (p *identity*))
+      (let ((base-cache (cache base)) (p *identity*) (product +one+))
         (dotimes (j 16)
-          (setf (aref table i j) (cache (to-affine p)))
-          (setf p (add p base-cache nil))))
+          (setf (aref points j) p (aref products j) product)
+          (setf product (f* product (point-z p)) p (add p base-cache nil)))
+        ;; One inversion per row; the backwards sweep recovers each Z^-1.
+        (let ((inv (inverse product)))
+          (loop for j from 15 downto 0 for q = (aref points j) do
+            (setf (aref table i j) (cache (to-affine q (f* inv (aref products j))))
+                  inv (f* inv (point-z q))))))
       (dotimes (j 4) (setf base (double-point base))))))
 
 (defparameter *fixed-base* (base-multiples))
@@ -213,4 +179,5 @@
                      (p (add (base-mul s) (cache (multiply k (negate a))) nil)))
                 (setf p (add p (cache (negate r)) nil))
                 (dotimes (i 3) (setf p (double-point p)))
-                (and (zerop (point-x p)) (= (point-y p) (point-z p)))))))))))
+                (and (zerop (to-integer (point-x p)))
+                     (= (to-integer (point-y p)) (to-integer (point-z p))))))))))))

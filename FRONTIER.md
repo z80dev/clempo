@@ -63,6 +63,37 @@ Tempo Commonware lookup vectors. This demonstrates download, not live replay
 or finalization; R4 remains unscored. Public validator interoperability was not
 attempted because Tempo admits registered validator identities and addresses.
 
+Hash/25519 crypto (SBCL 2.6.8 release, Apple Silicon, single thread): on
+64 MiB, SHA-256 **2,684 MB/s** (25 ms, no consing), BLAKE3 **317 MB/s**
+(212 ms, no consing), ChaCha20 **257 MB/s** (261 ms, one result buffer).
+Ed25519 averaged **142 µs verify** and **62 µs sign** over 1,000 calls
+each with a 32-byte message, including GC. SHA-256 uses a four-round ARM
+SHA-256 VOP on Apple Silicon and a scalar SBCL core elsewhere; Ed25519
+uses unboxed radix-2^51 field limbs and a fixed-base table.
+
+```sh
+CLEMPO_BUILD=release sbcl --dynamic-space-size 8192 --noinform --non-interactive \
+  --load scripts/build.lisp --eval '(asdf:load-system "clempo-crypto-hash/tests")' \
+  --eval '(assert (clempo.base:run-tests))' \
+  --eval '(let ((a (clempo.base:make-octets (* 64 1024 1024))) (key (clempo.base:make-octets 32)) (nonce (clempo.base:make-octets 12)))
+            (time (clempo.sha2:sha256 a)) (time (clempo.blake3:blake3 a))
+            (time (clempo.chacha20poly1305:chacha20-xor key nonce a)))' \
+  --eval '(let* ((seed (clempo.base:hex->octets "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60"))
+                 (msg (clempo.base:make-octets 32)) (pk (clempo.ed25519:ed25519-public-key seed))
+                 (sig (clempo.ed25519:ed25519-sign seed msg)))
+            (assert (clempo.ed25519:ed25519-verify pk msg sig))
+            (time (dotimes (i 1000) (clempo.ed25519:ed25519-verify pk msg sig)))
+            (time (dotimes (i 1000) (clempo.ed25519:ed25519-sign seed msg))))'
+```
+
+Commonware 2026.10.1 interoperability: DKG transcript forks/resumes use
+keyed BLAKE3, and transcript noise uses the BLAKE3 XOF. Ed25519 decoding
+accepts noncanonical point encodings and verification checks the cofactored
+equation with canonical `S` (ZIP-215). CUPS uses RFC 8439 ChaCha20-Poly1305
+with empty AAD and an implicit, per-key 96-bit little-endian nonce counter
+starting at zero. The Lisp AEAD takes explicit nonces. The AES and 25519
+secret-key paths have not been hardened against timing or cache side channels.
+
 R1 codec optimization (2026-11-21): `defrlp` now generates bounded direct
 decoders and single-buffer writers; block decoding avoids a duplicate RLP
 tree and transfers newly allocated transaction envelopes without copying them
