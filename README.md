@@ -14,7 +14,7 @@ clempo is an independent implementation of the Tempo reference node, alongside o
 | R3e EVM | execution-spec-tests v5.4.0 state tests, Istanbul..Osaka | 61,903/61,903 | 61,903/61,903 |
 | R3p Precompiles | reference-oracle corpus of Tempo precompile calls, T0..T14 | 4,986/4,992 | 4,986/4,992 |
 | R4 Follow | live tip: executed, certified, RPC probed independently | yes: 88,831 blocks executed and certified; peak sampled lag 1 block for the Linux hour run | yes |
-| R5 RPC | recorded reference answers, separated by comparison mode | see the [RPC evidence](FRONTIER.md#evidence) for verdicts and coverage | see [goempo's frontier](https://github.com/gakonst/goempo/blob/main/FRONTIER.md) |
+| R5 RPC | recorded reference answers, separated by comparison mode | 14,697/14,697 value-identical cases; 156/156 reference methods served ([evidence](FRONTIER.md#evidence)) | see [goempo's frontier](https://github.com/gakonst/goempo/blob/main/FRONTIER.md) |
 | R6 Validator | Simplex and DKG; independent signers with Rust validators | seeded sims (4/5/7 validators, faults, reshares); devnet where clempo signers are required for quorum | seeded simulations and mixed-validator devnet |
 | R7 Speed | same-Mac whole-command wall seconds, matched APFS-cloned parents: Early / Busy (`239b52f`) / Recent (`c190f13`, cold-cache proxy) | 2.66–2.83 / 21.08–21.31 / 7.42–7.75 | 2.97–2.98 / 24.33–24.74 / 10.77–11.46 |
 | R7 RPC | requests/s vs Rust at 1/16/64 clients, pinned Linux run, identical answers | every load-table method ≥ 1.08× (eth_call 1.23–1.40×, eth_getLogs 3.9–5.3×) | eth_call 1.28×, eth_getLogs 2.01× (published) |

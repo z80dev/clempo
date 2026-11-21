@@ -29,18 +29,9 @@
          (let ((at (search "head " message :from-end t)))
            (and at (< (+ at 5) (length message)) (digit-char-p (char message (+ at 5))))))))
 
-(defun reference-timeout-p (response)
-  "The reference gave no answer: its database read transaction hit MDBX's timeout (-96000).
-Deep-history debug_intermediateRoots cases were recorded so under 16 recording threads;
-re-sent one at a time the reference answers them (taking 60-300 s each, see FRONTIER R5), so
-the error depends on the reference's load, not on the request."
-  (let ((message (clempo.json:jget* response "error" "message")))
-    (and (stringp message) (search "read transaction has been timed out (-96000)" message))))
-
 (defun case-compare-class (c)
   (let ((class (clempo.json:jget c "class")))
-    (cond ((reference-timeout-p (clempo.json:jget c "response")) "reference-timeout")
-          ((and (string= class "stable")
+    (cond ((and (string= class "stable")
                 (or (member (clempo.json:jget c "method") *head-dependent-methods* :test #'string=)
                     (mentions-head-p (clempo.json:jget c "response"))))
            "live")
@@ -104,19 +95,16 @@ eth_capabilities answer recorded at the reference's head, compared at clempo's."
 (defun case-category (c)
   "How case C is graded: \"value\" (the recorded answer compared exactly, or a \"verified\"
 proof checked against the reference's recorded root and values), \"shape\" (it follows the
-head or the moment: same keys, types and error code), \"node\" (it depends on the
-reference node itself: compared by shape, never counted toward R5), or
-\"reference-timeout\"."
+head or the moment: same keys, types and error code), or \"node\" (it depends on the
+reference node itself: compared by shape, never counted toward R5)."
   (let ((class (case-compare-class c)))
     (cond ((member class '("stable" "verified") :test #'string=) "value")
           ((string= class "node") "node")
-          ((string= class "reference-timeout") class)
           (t "shape"))))
 
 (defun case-matches (c status response)
-  "A reference-timeout case matches an answer with a result: the reference recorded none to
-compare with. A \"headRelative\" case is value-checked after HEAD-RELATIVE. Witness
-answers compare by value, their map orders aside (WITNESS-EQUAL)."
+  "A \"headRelative\" case is value-checked after HEAD-RELATIVE. Witness answers compare by
+value, their map orders aside (WITNESS-EQUAL)."
   (and (eql status (clempo.json:jget c "status"))
        (let ((class (case-compare-class c)))
          (cond ((member (clempo.json:jget c "method") *witness-methods* :test #'string=)
@@ -131,8 +119,6 @@ answers compare by value, their map orders aside (WITNESS-EQUAL)."
                 (and (equal "consensus_event" (clempo.json:jget response "method"))
                      (equal "finalized" (clempo.json:jget* response "params" "result" "type"))
                      (json-shape-equal (clempo.json:jget c "response") response)))
-               ((string= class "reference-timeout")
-                (and (clempo.json:jobject-p response) (assoc "result" (cdr response) :test #'string=) t))
                (t (json-shape-equal (clempo.json:jget c "response") response))))))
 
 (defmacro with-clempo-server ((url-var server &key url upstream) &body body)
@@ -315,8 +301,7 @@ at least one value case whose every case matches, CATEGORIES an alist category -
 (identical . total)."
   (let ((table (make-hash-table :test 'equal))
         (known (reference-methods))
-        (categories (list (list "value" 0 0) (list "shape" 0 0) (list "node" 0 0)
-                          (list "reference-timeout" 0 0))))
+        (categories (list (list "value" 0 0) (list "shape" 0 0) (list "node" 0 0))))
     (dolist (r results)
       (let* ((c (first r)) (ok (fourth r))
              (category (assoc (case-category c) categories :test #'string=))
