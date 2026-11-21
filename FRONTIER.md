@@ -163,3 +163,14 @@ at 61.807 ms. Pairing/MSM measurements include byte decoding and subgroup
 checks. APIs, fixture/setup provenance, representation measurements and
 side-channel limitations are documented in `tests/crypto/ec/README.md`.
 These crypto-vector results alone do not score the Tempo precompile oracle.
+
+Incremental trie hashing: on the same seeded 1M-key release benchmark,
+reusable RLP and Keccak buffers cut first-root allocation from 808.8 MB to
+65.3 MB (92% less). The serial first root took 0.906 s wall / 0.587 s CPU;
+four subtree workers returned the identical root in 0.210 s wall /
+0.588 s CPU. After changing one value, cached paths gave the same new root
+at both worker counts (39 µs and 11 µs CPU respectively; both intentionally
+serial). Inserts took 0.637 s and 0.695 s in those runs. See
+`tests/trie/benchmark.lisp` for the command and thread argument.
+This is a trie-only measurement; replay has not reached the requested
+9,890,000–9,909,999 execution benchmark.

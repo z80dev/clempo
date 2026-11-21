@@ -1,8 +1,11 @@
 ;;; Run from the checkout root:
-;;; CLEMPO_BUILD=release sbcl --dynamic-space-size 8192 --non-interactive --load scripts/build.lisp --eval '(asdf:load-system "clempo-trie/tests")' --load tests/trie/benchmark.lisp --eval '(clempo.trie.tests::benchmark-trie)'
+;;; CLEMPO_BUILD=release sbcl --dynamic-space-size 8192 --non-interactive \
+;;;   --load scripts/build.lisp --eval '(asdf:load-system "clempo-trie/tests")' \
+;;;   --load src/node/hash-workers.lisp --load tests/trie/benchmark.lisp \
+;;;   --eval '(clempo.trie.tests::benchmark-trie 1000000 4)'
 (in-package #:clempo.trie.tests)
 
-(defun benchmark-trie (&optional (count 1000000))
+(defun benchmark-trie (&optional (count 1000000) (threads 1))
   "Measure a raw in-memory trie with independent seeded 32-byte keys and
 32-byte values. Key and value construction is outside timing."
   (let* ((clempo.io:*entropy* (clempo.io:make-seeded-entropy 4217))
@@ -17,8 +20,14 @@
       (time (dotimes (i count) (trie-put trie (svref keys i) value)))
       (format t "~:D inserts/s~%"
               (round (* count internal-time-units-per-second) (- (get-internal-real-time) start))))
-    (format t "First root~%")
-    (format t "~A~%" (octets->hex (time (trie-root trie)) :prefix t))
-    (trie-put trie (svref keys 0) updated)
-    (format t "Root after one update~%")
-    (format t "~A~%" (octets->hex (time (trie-root trie)) :prefix t))))
+    (clempo.node.hash-workers:call-with-root-workers
+     (lambda (mapper)
+       (call-with-trie-hashing
+        (lambda ()
+          (format t "First root (~D threads)~%" threads)
+          (format t "~A~%" (octets->hex (time (trie-root trie)) :prefix t))
+          (trie-put trie (svref keys 0) updated)
+          (format t "Root after one update~%")
+          (format t "~A~%" (octets->hex (time (trie-root trie)) :prefix t)))
+        :parallel-map mapper))
+     :threads threads)))

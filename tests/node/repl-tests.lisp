@@ -31,3 +31,24 @@
                         (is (string= "COMMON-LISP-USER> 42" (read-line s)))
                         (is (string= ":OK" (read-line s))))))
       (repl:stop-repl repl))))
+
+(deftest root-hashing-worker-pool ()
+  (let ((serial (clempo.trie:make-trie))
+        (parallel (clempo.trie:make-trie))
+        (value (fill (make-octets 32) 7)))
+    (dotimes (i 4096)
+      (let ((key (integer->octets i 2)))
+        (clempo.trie:trie-put serial key value)
+        (clempo.trie:trie-put parallel key value)))
+    (clempo.node.hash-workers:call-with-root-workers
+     (lambda (mapper)
+       (is-equalp (clempo.trie:trie-root serial)
+                  (clempo.trie:call-with-trie-hashing
+                   (lambda () (clempo.trie:trie-root parallel)) :parallel-map mapper))
+       ;; An error must return to the submitter without killing its worker.
+       (signals error (funcall mapper (lambda (i) (when (= i 2) (error "test error")))
+                                       '(1 2 3)))
+       (let ((result (make-array 3)))
+         (funcall mapper (lambda (i) (setf (aref result i) (* i i))) '(0 1 2))
+         (is-equalp #(0 1 4) result)))
+     :threads 4)))

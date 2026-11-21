@@ -3,7 +3,7 @@
   :depends-on ("sb-bsd-sockets" "sb-posix" "clempo-sync" "clempo-rpc"
                "clempo-store" "clempo-tempo-executor")
   :serial t
-  :components ((:file "repl") (:file "node")))
+  :components ((:file "repl") (:file "hash-workers") (:file "node")))
 
 (defsystem "clempo-node/tests"
   :depends-on ("clempo-node")

@@ -27,6 +27,10 @@ standalone SBCL executable with `scripts/build-node.sh` (default output:
 `build/clempo`). `CLEMPO_HEAP` sets the heap size in MiB for the build or source
 launcher.
 
+Large dirty trie roots hash independent subtrees on four workers by default.
+Use `--root-workers 1` to select serial hashing. Small updates use the serial
+path with cached hashes, regardless of worker count.
+
 ## Local Lisp REPL
 
 The REPL is off by default. Create a private authentication file and enable it

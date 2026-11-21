@@ -7,4 +7,5 @@ mkdir -p "$(dirname "$CLEMPO_NODE_OUTPUT")"
 exec sbcl --dynamic-space-size "${CLEMPO_HEAP:-16384}" --noinform --non-interactive \
   --no-userinit --no-sysinit --load "$root/scripts/build.lisp" \
   --eval '(asdf:load-system "clempo-node")' \
+  --eval '(clempo.chainspec:load-chainspec :mainnet)' \
   --eval '(sb-ext:save-lisp-and-die (clempo.io:getenv "CLEMPO_NODE_OUTPUT") :executable t :save-runtime-options t :toplevel (function clempo.node:main))'

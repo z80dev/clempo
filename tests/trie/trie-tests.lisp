@@ -163,3 +163,42 @@
                    (is valid)
                    (is= expected (if value (clempo.rlp:rlp-decode-integer
                                            (clempo.rlp:rlp-decode value)) 0))))))))
+
+(deftest reused-scratch-and-parallel-subtrees ()
+  (let* ((store (make-memory-store))
+         (persisted (make-trie :store store))
+         (ephemeral (make-trie))
+         (prefix (make-octets 0))
+         (large (fill (make-octets 1000) #x5a))
+         (small (octets-of 9))
+         (jobs-run 0))
+    (flet ((populate (trie)
+             ;; An oversized branch value must use a separate exact buffer.
+             (trie-put trie prefix large)
+             (dotimes (branch 16)
+               (trie-put trie (octets-of (ash branch 4)) small)
+               (trie-put trie (octets-of (1+ (ash branch 4))) large))))
+      (populate persisted)
+      (populate ephemeral))
+    (let ((root (trie-root persisted)))
+      (is-equalp root
+                 (call-with-trie-hashing
+                  (lambda () (trie-root ephemeral))
+                  :parallel-threshold 0
+                  :parallel-map (lambda (fn jobs)
+                                  (incf jobs-run (length jobs))
+                                  (mapc fn (reverse jobs)))))
+      (is= 16 jobs-run)
+      (is-equalp (list large t)
+                 (multiple-value-list (verify-proof root prefix (trie-proof ephemeral prefix))))))
+  (let ((secure (make-secure-trie))
+        (a (octets-of #x10)) (b (octets-of #x20)))
+    (call-with-trie-hashing
+     (lambda ()
+       (trie-put secure a a)
+       (trie-put secure b b)
+       (is-equalp a (trie-get secure a))
+       (is-equalp b (trie-get secure b))
+       (is-equalp (list a t)
+                  (multiple-value-list
+                   (verify-proof (trie-root secure) a (trie-proof secure a) :secure t)))))))

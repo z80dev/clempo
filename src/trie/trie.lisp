@@ -1,11 +1,12 @@
 (defpackage #:clempo.trie
   (:use #:cl #:clempo.base)
-  (:import-from #:clempo.keccak #:keccak256)
+  (:import-from #:clempo.keccak #:keccak256 #:keccak256-into #:make-keccak)
   (:import-from #:clempo.rlp #:rlp-encode #:rlp-encoded-length #:rlp-encode-into
                             #:rlp-item-bounds #:rlp-decode #:rlp-decode-integer #:rlp-error)
   (:export #:trie #:make-trie #:make-secure-trie #:trie-clone
            #:trie-get #:trie-put #:trie-delete #:trie-root #:ordered-trie-root
            #:trie-proof #:verify-proof #:node-store-get #:node-store-put
+           #:call-with-trie-hashing
            #:trie-node-error #:encode-account #:decode-account
            #:+empty-trie-root+ #:+empty-code-hash+))
 
@@ -14,6 +15,37 @@
 (define-constant +empty-trie-root+ (keccak256 (rlp-encode 0)))
 (defparameter *empty-bytes* (make-octets 0))
 (define-constant +empty-code-hash+ (keccak256 (make-octets 0)))
+
+;;; The largest state branch is a 3-byte list header, sixteen 33-byte child
+;;; references, and a 1-byte empty value. Larger arbitrary values still work.
+(defstruct hash-workspace
+  (node-bytes (make-octets 544) :type octets)
+  (key-bytes (make-octets 32) :type octets)
+  (keccak (make-keccak)))
+
+(defvar *hash-workspace* nil)
+(defvar *parallel-map* nil)
+(defvar *parallel-threshold* 512)
+
+(defun call-with-trie-hashing (function &key (parallel-map *parallel-map*)
+                                             (parallel-threshold *parallel-threshold*))
+  "Call FUNCTION with reusable hashing workspace for a sequence of trie operations.
+For a large dirty root without a node store, PARALLEL-MAP, if supplied, receives
+(job-function jobs-list). It must invoke every job and join them before returning.
+Each job hashes an independent subtree; its return value is ignored. Serialized
+and parallel calls produce the same root."
+  (check-type parallel-map (or null function))
+  (check-type parallel-threshold (integer 0 *))
+  (let ((*hash-workspace* (or *hash-workspace* (make-hash-workspace)))
+        (*parallel-map* parallel-map)
+        (*parallel-threshold* parallel-threshold))
+    (funcall function)))
+
+(declaim (inline hash-octets))
+(defun hash-octets (bytes end)
+  (declare #.clempo.base:*hot* (type octets bytes) (type fixnum end))
+  (keccak256-into bytes 0 end (make-octets 32) 0
+                  (when *hash-workspace* (hash-workspace-keccak *hash-workspace*))))
 
 ;;; Immutable paths use Ethereum's hex-prefix representation directly. The
 ;;; first nibble is flags (leaf, odd length), not part of the key.
@@ -87,7 +119,8 @@
   (store nil :read-only t)
   (secure-p nil :read-only t)
   (owner (cons nil nil))
-  root-hash)
+  root-hash
+  (dirty-updates 0 :type fixnum))
 
 (defgeneric node-store-get (store hash)
   (:documentation "Read immutable encoded node bytes by HASH, or return NIL if absent."))
@@ -119,11 +152,18 @@ immutable octet vectors; callers must not mutate them."
 writes copy only shared paths. Do not edit a handle concurrently."
   (let ((copy (%make-trie (trie-root-node trie) (trie-store trie) (trie-secure-p trie))))
     (setf (trie-owner trie) (cons nil nil)
-          (trie-root-hash copy) (trie-root-hash trie))
+          (trie-root-hash copy) (trie-root-hash trie)
+          (trie-dirty-updates copy) (trie-dirty-updates trie))
     copy))
 
 (defun trie-key (trie key)
-  (if (trie-secure-p trie) (keccak256 key) key))
+  (cond ((not (trie-secure-p trie)) key)
+        ((and *hash-workspace* (null (trie-store trie)))
+         ;; In-memory traversal cannot invoke a node-store method that reenters
+         ;; the trie while this scratch key is still being read.
+         (keccak256-into key 0 (length key) (hash-workspace-key-bytes *hash-workspace*) 0
+                         (hash-workspace-keccak *hash-workspace*)))
+        (t (keccak256 key))))
 
 (defun new-leaf (owner key at end value)
   (declare #.clempo.base:*hot* (type octets key) (type fixnum at end))
@@ -264,23 +304,30 @@ writes copy only shared paths. Do not edit a handle concurrently."
 (defun write-ref (ref bytes pos)
   (declare #.clempo.base:*hot* (type (or null octets) ref) (type octets bytes) (type fixnum pos))
   (cond ((null ref) (setf (aref bytes pos) #x80) (1+ pos))
-        ((= (length ref) 32) (rlp-encode-into ref bytes pos))
+        ((= (length ref) 32)
+         (setf (aref bytes pos) #xa0)
+         (replace bytes ref :start1 (1+ pos))
+         (+ pos 33))
         (t (replace bytes ref :start1 pos) (+ pos (length ref)))))
 
-(defun rlp-list-buffer (payload)
-  "Allocate the finished node RLP and write its list header."
-  (declare #.clempo.base:*hot* (type fixnum payload))
-  (if (<= payload 55)
-      (let ((bytes (make-octets (1+ payload))))
+(defun rlp-list-buffer (payload &optional scratch)
+  "Write the list header; return bytes, payload offset and total encoded length.
+Short inline nodes and persisted or proof nodes need their own exact arrays."
+  (declare #.clempo.base:*hot* (type fixnum payload) (type (or null octets) scratch))
+  (let* ((width (if (<= payload 55) 0 (ceiling (integer-length payload) 8)))
+         (start (1+ width))
+         (end (+ start payload))
+         (bytes (if (and scratch (<= 32 end (length scratch))) scratch (make-octets end))))
+    (declare (type fixnum width start end) (type octets bytes))
+    (if (zerop width)
         (setf (aref bytes 0) (+ #xc0 payload))
-        (values bytes 1))
-      (let* ((width (ceiling (integer-length payload) 8))
-             (start (1+ width))
-             (bytes (make-octets (+ start payload))))
-        (setf (aref bytes 0) (+ #xf7 width))
-        (loop for i fixnum from 1 below start
-              do (setf (aref bytes i) (ldb (byte 8 (ash (- width i) 3)) payload)))
-        (values bytes start))))
+        (progn
+          (setf (aref bytes 0) (+ #xf7 width))
+          (loop for i fixnum from 1 below start
+                do (setf (aref bytes i) (ldb (byte 8 (ash (- width i) 3)) payload)))))
+    (values bytes start end)))
+
+(declaim (ftype (function (t t &optional (or null octets)) (values octets fixnum &optional)) encode-node))
 
 (defun node-reference (node store)
   (declare #.clempo.base:*hot*)
@@ -288,12 +335,14 @@ writes copy only shared paths. Do not edit a handle concurrently."
     (null nil)
     (stored-node (stored-node-hash node))
     (t (or (node-ref node)
-           (let* ((bytes (encode-node node store))
-                  (ref (if (< (length bytes) 32) bytes (keccak256 bytes))))
-             (when (and store (not (eq ref bytes))) (node-store-put store ref bytes))
-             (setf (node-ref node) ref))))))
+           (multiple-value-bind (bytes end)
+               (encode-node node store (when (and *hash-workspace* (null store))
+                                         (hash-workspace-node-bytes *hash-workspace*)))
+             (let ((ref (if (< end 32) bytes (hash-octets bytes end))))
+               (when (and store (>= end 32)) (node-store-put store ref bytes))
+               (setf (node-ref node) ref)))))))
 
-(defun encode-node (node store)
+(defun encode-node (node store &optional scratch)
   (declare #.clempo.base:*hot*)
   (etypecase node
     (short-node
@@ -301,24 +350,25 @@ writes copy only shared paths. Do not edit a handle concurrently."
             (item (short-node-item node))
             (leaf-p (leaf-path-p path))
             (ref (unless leaf-p (node-reference item store))))
-       (multiple-value-bind (out pos)
+       (multiple-value-bind (out pos end)
            (rlp-list-buffer (+ (the fixnum (rlp-encoded-length path))
-                               (if leaf-p (the fixnum (rlp-encoded-length item)) (ref-length ref))))
+                               (if leaf-p (the fixnum (rlp-encoded-length item)) (ref-length ref)))
+                            scratch)
          (let ((p (rlp-encode-into path out pos)))
            (if leaf-p (rlp-encode-into item out p) (write-ref ref out p)))
-         out)))
+         (values out end))))
     (branch-node
      (let* ((children (branch-node-children node))
             (value (or (branch-node-value node) *empty-bytes*))
             (payload (rlp-encoded-length value)))
        (declare (type fixnum payload))
        (dotimes (i 16) (incf payload (ref-length (node-reference (svref children i) store))))
-       (multiple-value-bind (out pos) (rlp-list-buffer payload)
+       (multiple-value-bind (out pos end) (rlp-list-buffer payload scratch)
          (declare (type fixnum pos))
          (dotimes (i 16)
            (setf pos (write-ref (node-reference (svref children i) store) out pos)))
          (rlp-encode-into value out pos)
-         out)))))
+         (values out end))))))
 
 (defun decode-node-at (bytes at limit)
   (multiple-value-bind (pos end list-p) (rlp-item-bounds bytes at limit)
@@ -425,7 +475,9 @@ writes copy only shared paths. Do not edit a handle concurrently."
     (multiple-value-bind (node changed)
         (if value (insert-node root owner key 0 end value store)
             (delete-node root owner key 0 end store))
-      (when changed (setf (trie-root-node trie) node (trie-root-hash trie) nil))
+      (when changed
+        (setf (trie-root-node trie) node (trie-root-hash trie) nil)
+        (incf (trie-dirty-updates trie)))
       changed)))
 
 (defun trie-put (trie key value)
@@ -440,17 +492,41 @@ writes copy only shared paths. Do not edit a handle concurrently."
   (check-type key octets)
   (update-trie trie key nil))
 
+(defun prehash-root-children (node)
+  ;; An extension may lead to the first branch. Every child of that branch
+  ;; owns disjoint mutable nodes; no job writes the branch's own cached ref.
+  (loop while (and (short-node-p node) (not (leaf-path-p (short-node-path node))))
+        do (setf node (short-node-item node)))
+  (when (branch-node-p node)
+    (let ((jobs (loop for child across (branch-node-children node)
+                      when (and (node-p child) (not (node-ref child))) collect child)))
+      (when (cdr jobs)
+        (funcall *parallel-map*
+                 (lambda (child)
+                   (call-with-trie-hashing (lambda () (node-reference child nil)) :parallel-map nil))
+                 jobs)))))
+
+(defun compute-root (trie node)
+  (let ((store (trie-store trie)))
+    (when (and *parallel-map* (null store) (>= (trie-dirty-updates trie) *parallel-threshold*))
+      (prehash-root-children node))
+    (let ((ref (node-reference node store)))
+      (if (= (length ref) 32) ref
+          (let ((hash (hash-octets ref (length ref))))
+            (when store (node-store-put store hash ref))
+            hash)))))
+
 (defun trie-root (trie)
   "Return the canonical 32-byte root; with a store, persist dirty hashed nodes."
   (or (trie-root-hash trie)
-      (let* ((store (trie-store trie))
-             (ref (node-reference (trie-root-node trie) store)))
-        (setf (trie-root-hash trie)
-              (cond ((null ref) +empty-trie-root+)
-                    ((= (length ref) 32) ref)
-                    (t (let ((hash (keccak256 ref)))
-                         (when store (node-store-put store hash ref))
-                         hash)))))))
+      (let* ((node (trie-root-node trie))
+             (hash (typecase node
+                     (null +empty-trie-root+)
+                     (stored-node (stored-node-hash node))
+                     (t (if *hash-workspace*
+                            (compute-root trie node)
+                            (call-with-trie-hashing (lambda () (compute-root trie node))))))))
+        (setf (trie-dirty-updates trie) 0 (trie-root-hash trie) hash))))
 
 (defun trie-proof (trie key)
   "Return the RLP octets in eth_getProof order (encode each as 0x hex for RPC).
@@ -498,7 +574,14 @@ a malformed, incomplete or trailing proof returns NIL, NIL."
   (check-type balance (unsigned-byte 256))
   (check-type storage-root (simple-array (unsigned-byte 8) (32)))
   (check-type code-hash (simple-array (unsigned-byte 8) (32)))
-  (rlp-encode (list nonce balance storage-root code-hash)))
+  (multiple-value-bind (out pos)
+      (rlp-list-buffer (+ 66 (the fixnum (rlp-encoded-length nonce))
+                             (the fixnum (rlp-encoded-length balance))))
+    (setf pos (rlp-encode-into nonce out pos)
+          pos (rlp-encode-into balance out pos)
+          pos (write-ref storage-root out pos))
+    (write-ref code-hash out pos)
+    out))
 
 (defun decode-account (bytes)
   "Return (values nonce balance storage-root code-hash) from account RLP."

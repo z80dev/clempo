@@ -5,6 +5,7 @@
                     (#:backend #:clempo.rpc.chain) (#:server #:clempo.rpcserver)
                     (#:archive #:clempo.archive) (#:store #:clempo.store)
                     (#:executor #:clempo.executor) (#:blocks #:clempo.blocks)
+                    (#:trie #:clempo.trie) (#:workers #:clempo.node.hash-workers)
                     (#:headers #:clempo.headers) (#:repl #:clempo.node.repl))
   (:export #:run-node #:main #:*node-backend*))
 
@@ -130,15 +131,23 @@
   (format *error-output* "~&~?~%" fmt args)
   (force-output *error-output*))
 
+(defun follow-with-root-workers (threads follower &rest options)
+  (workers:call-with-root-workers
+   (lambda (mapper)
+     (trie:call-with-trie-hashing (lambda () (apply #'follow:follow-live follower options))
+                                  :parallel-map mapper))
+   :threads threads))
+
 (defun run-node (datadir &key (upstream (rpc:local-rpc-url))
                            (archive-dir (archive:archive-dir))
                            (rpc-port 8545) (bind "127.0.0.1")
                            certify (cert-rpc rpc:+mainnet-rpc+)
                            repl-port repl-token-file (checkpoint-interval 0)
-                           (batch-size 32) once seconds)
+                           (batch-size 32) (root-workers 4) once seconds)
   "Open a checked mainnet replay datadir, follow it with execution, and serve committed state.
 Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
   (check-type rpc-port (unsigned-byte 16))
+  (check-type root-workers (integer 1 16))
   (when (and once seconds) (error "Choose --once or --seconds"))
   (unless (eq (null repl-port) (null repl-token-file))
     (error "--repl-port and --repl-token-file must be supplied together"))
@@ -147,7 +156,8 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
          (tip (follow:rpc-head :latest :url upstream))
          (repl-token (when repl-token-file (token-file-secret repl-token-file))))
     (reject-healed-datadir dir)
-    (let* ((datastore (store:open-store dir :interval checkpoint-interval :log #'log-node))
+    (let* ((datastore (trie:call-with-trie-hashing
+                       (lambda () (store:open-store dir :interval checkpoint-interval :log #'log-node))))
            (rpc-server nil)
            (repl-server nil))
       (unwind-protect
@@ -179,8 +189,8 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
                                       :configure (lambda (fn)
                                                    (let ((*node-backend* node)) (funcall fn)))))
                (log-node "node: Lisp REPL on 127.0.0.1:~D (token required)" (repl:repl-port repl-server)))
-             (let* ((last (follow:follow-live
-                           follower :tip initial-target :once once :seconds seconds
+             (let* ((last (follow-with-root-workers
+                           root-workers follower :tip initial-target :once once :seconds seconds
                            :on-poll
                            (lambda (follow remote)
                              (let* ((local (follow:follower-head follow))
@@ -215,7 +225,7 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
   (format t "Usage: clempo --datadir DIR [--upstream URL] [--archive DIR]~%
               [--rpc-port N] [--bind IP] [--certify] [--cert-rpc URL]~%
               [--repl-port N --repl-token-file FILE] [--once | --seconds N]~%
-              [--batch N] [--checkpoint-interval N]~%"))
+              [--batch N] [--checkpoint-interval N] [--root-workers N]~%"))
 
 (defun node-options (words)
   (loop with options = nil
@@ -229,6 +239,7 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
                                                   ("--bind" :bind) ("--cert-rpc" :cert-rpc)
                                                   ("--repl-port" :repl-port t) ("--repl-token-file" :repl-token-file)
                                                   ("--seconds" :seconds t) ("--batch" :batch-size t)
+                                                  ("--root-workers" :root-workers t)
                                                   ("--checkpoint-interval" :checkpoint-interval t))
                                          :test #'string=))
                            (value (pop words)))
