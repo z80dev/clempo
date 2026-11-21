@@ -289,3 +289,11 @@ The heaviest sample improved about 3.5× in median and p95 (mean root consing
 9.64 MB/block); the recent workload never reaches the parallel threshold.
 Timings are wall-clock, including scheduling and any GC in the measured root
 call. This is not the full busy-range replay benchmark or an R4/R7 score.
+
+Pool integration (partial): `clempo.txpool` compiles strictly and its tests report
+14 passed, 0 failed, 31 explicitly skipped pending executor T7 fee-slot handling,
+T6 keychain handling, and relaxed future-nonce validation. The skips were authorized
+to publish the pool interface without claiming T13 admission acceptance. Passing
+cases include actual pre-T1 nonce-lane admission, fork-gated liquidity, malformed
+grant rejection, cardinality checks and unavailable-state refusal. Fixture funding
+and cached fee metadata use TIP-20's packed-layout balance mapping at slot 9.
