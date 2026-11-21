@@ -607,7 +607,6 @@ claimRewards/T11
 claimRewards/T12
 claimRewards/T13
 claimRewards/T14
-tip403/setReceivePolicy-recovery-configurable-account/T14
 # Reference changed after the corpus: from tempo c8b89f9 (TIP-1111), authorize_key_internal
 # checks `!is_delegate_grant && is_retired_root(key_id)` for every non-ConfigurableAccount T14
 # grant, an account load of the key ID (+2,600 gas cold). clempo follows HEAD.
@@ -656,18 +655,6 @@ fee/distributeFees/T14
 t13/factory-createToken-long-name
 t13/dex-swap-34-token-chain
 t13/dex-quote-34-token-chain
-t13/guard-claim-virtual-gas-430
-t13/guard-claim-virtual-gas-460
-t13/guard-claim-virtual-gas-520
-t13/guard-claim-virtual-gas-600
-t13/guard-claim-virtual-gas-1500
-t13/guard-claim-virtual-gas-2400
-t13/guard-claim-virtual-gas-2519
-t13/guard-claim-virtual-gas-2520
-t13/guard-claim-virtual-gas-2521
-t13/guard-claim-virtual-gas-2600
-t13/guard-claim-virtual-gas-5000
-t13/guard-claim-virtual-gas-100000
 t13/exec-tip20-transfer-binding-set-2
 T3-20/tip20/transfer-part/T2
 T3-20/tip20/transfer-part/T3
@@ -1673,8 +1660,3 @@ sweep/transfer-from-opted-in/T2
 sweep/setRewardRecipient/T2
 sweep/distributeReward/T2
 sweep/claimRewards/T2
-T9-2/tip403/tokenTransferPolicyId-legacy/T9
-T9-2/tip403/tokenTransferPolicyId-bound/T9
-T9-2/tip403/tokenTransferPolicyId-not-a-token/T9
-T9-2/tip403/migrateTransferPolicyIds/T9
-T9-2/tip403/migrateTransferPolicyIds-bound/T9
