@@ -193,7 +193,8 @@ so)."
 (defun deploy-markers-in-world (world env)
   "APPLY-PRE-EXECUTION-CHANGES's markers written into WORLD (an overlay block: no database)."
   (dolist (address (fork-marker-addresses (block-env-spec env)))
-    (when (zerop (untracked (world) (state:code-size world address)))
+    ;; By code hash, as block.rs does: its account read loads no code.
+    (when (octets= (untracked (world) (state:get-code-hash world address)) state:+empty-code-hash+)
       (state:set-code world address (octets-of #xef))))
   (state:finalize-tx world))
 

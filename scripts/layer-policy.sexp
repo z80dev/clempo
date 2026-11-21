@@ -170,6 +170,13 @@
    ("RLP-LIST-BUFFER" 1 "Consumes the finite node element sequence.")
    ("TRIE-NODE-AT" 1 "Consumes key nibbles on descent or terminates at a leaf/mismatch.")
    ("WALK-KEY" 1 "Consumes key nibbles on descent or terminates at a leaf/mismatch."))
+  ("src/trie/witness.lisp"
+   ("APPLY-UPDATES" 1 "Each round reveals the requested blinded nodes, which are finite; stops when none is requested.")
+   ("RECORD-PROOF" 1 "Consumes key nibbles on descent or terminates at a leaf/mismatch.")
+   ("REMOVE-CASCADE" 1 "Climbs the finite frame stack toward the root.")
+   ("REVEAL-PROOF" 1 "Consumes key nibbles on descent or terminates at a leaf/mismatch.")
+   ("SEEK" 1 "Consumes key nibbles on descent or terminates at a leaf/mismatch.")
+   ("UPDATE-PASS" 2 "Pops the finite sorted key list."))
   ("src/types/blocks.lisp" ("DECODE-BLOCK" 2 "Each decoded transaction or ommer advances the cursor within its bounded RLP list."))
   ("src/types/signatures.lisp" ("WEBAUTHN-CLIENT-DATA" 7 "Token, whitespace, string and container scans advance within the bounded input."))
   ("src/validator/keys-age.lisp"
@@ -204,7 +211,6 @@
    ("CLOSE-INDEX" 3 "Clears temporary sets while merging independent values by key.")
    ("SLOT-CHANGES" 1 "Orders slot changes by key before encoding.")
    ("SLOT-READS" 1 "Orders the read keys before encoding."))
-  ("src/rpc/calls.lisp" ("EXECUTION-WITNESS" 1 "Canonicalizes witness output after collecting keyed entries."))
   ("src/rpc/defrpc.lisp" ("METHOD-NAMES" 1 "Sorts the method names before returning them."))
   ("src/sim/run.lisp" ("SCENARIO-NAMES" 1 "Sorts names before exposing them."))
   ("src/state/root.lisp"

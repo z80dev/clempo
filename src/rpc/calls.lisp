@@ -1116,42 +1116,64 @@ the tracer that finds the opcode."
     (:object (serde:skip-value src) (serde:serde-fail-here src "invalid type: map, expected enum ExecutionWitnessMode"))
     (t (serde:peek src) (incf (serde:src-pos src)) (serde:serde-fail-here src "expected value"))))
 
+(defstruct (recorded (:constructor make-recorded ()))
+  (loaded nil) (exists nil) (slots '()) (slot-set (make-hash-table)))
+
 (defclass recording-backend ()
   ((db :initarg :db :reader recording-db)
-   (accounts :initform (make-hash-table) :reader recorded-accounts) ; address -> slot table
-   (order :initform '() :accessor recorded-order))
-  (:documentation "A state backend over a state database that records every account and slot
-read from it: what reth's CacheDB holds after executing a block."))
+   (accounts :initform (make-hash-table) :reader recorded-accounts) ; address -> recorded
+   (order :initform '() :accessor recorded-order)                  ; loaded addresses, newest first
+   (codes :initform '() :accessor recorded-codes))                 ; code hashes read, newest first
+  (:documentation "A state backend over a state database that records what reth's CacheDB
+holds after executing a block: every account loaded, every slot read except those of an
+account loaded as absent (CacheDB answers them zero without caching), every code read by
+hash."))
 
-(defun record-read (b address &optional (slot nil slot-p))
-  (let ((slots (or (gethash address (recorded-accounts b))
-                   (progn (push address (recorded-order b))
-                          (setf (gethash address (recorded-accounts b)) (make-hash-table))))))
-    (when slot-p (setf (gethash slot slots) t))))
+(defun recorded-entry (b address)
+  (or (gethash address (recorded-accounts b))
+      (setf (gethash address (recorded-accounts b)) (make-recorded))))
+
+(defun record-slot (entry slot)
+  (unless (gethash slot (recorded-slot-set entry))
+    (setf (gethash slot (recorded-slot-set entry)) t)
+    (push slot (recorded-slots entry))))
 
 (defmethod state:backend-account ((b recording-backend) address)
-  (record-read b address)
-  (state:backend-account (recording-db b) address))
+  (multiple-value-bind (found nonce balance code-hash) (state:backend-account (recording-db b) address)
+    (let ((e (recorded-entry b address)))
+      (unless (recorded-loaded e)
+        (setf (recorded-loaded e) t (recorded-exists e) found)
+        (push address (recorded-order b))))
+    (values found nonce balance code-hash)))
 
 (defmethod state:backend-storage ((b recording-backend) address slot)
-  (record-read b address slot)
+  (let ((e (recorded-entry b address)))
+    (unless (and (recorded-loaded e) (not (recorded-exists e)))
+      (record-slot e slot)))
   (state:backend-storage (recording-db b) address slot))
 
 (defmethod state:backend-code ((b recording-backend) code-hash)
+  (unless (or (octets= code-hash trie:+empty-code-hash+)
+              (member code-hash (recorded-codes b) :test #'octets=))
+    (push code-hash (recorded-codes b)))
   (state:backend-code (recording-db b) code-hash))
 
 (defmethod state:backend-storage-empty-p ((b recording-backend) address)
-  (record-read b address)
   (state:backend-storage-empty-p (recording-db b) address))
 
 (defun execution-witness (b mode)
-  "reth ExecutionWitnessRecord: block B executed on its parent's state with every account and
-slot it loads recorded; the parent trie's proof nodes of those keys (state), the code of the
-loaded accounts (codes: every loaded account's, the empty code included, in legacy MODE; the
-non-empty ones sorted in canonical mode), the keys themselves (addresses, then each account's
-slots) and the headers from the lowest one BLOCKHASH read (else the parent's) to the parent.
-reth's witness also holds the nodes its sparse trie needs to apply the block's changes; the
-recorded cases compare by shape."
+  "reth ExecutionWitnessRecord (crates/evm/evm/src/witness.rs): block B executed on its
+parent's state, then
+ state    the nodes of reth's TrieWitness (CLEMPO.TRIE:TRIE-WITNESS) for the loaded accounts
+          and slots with their values after the block;
+ codes    legacy MODE: the empty code, every code read by hash and every code the block
+          deployed; canonical: the non-empty codes read, sorted;
+ keys     each loaded account's address followed by its slots (slots of an account loaded as
+          absent are never cached, unless the block writes them);
+ headers  from the lowest block BLOCKHASH read (else the parent) to the parent.
+reth draws state, codes and keys from hash maps with a random hasher: their order differs
+from one call to the next. clempo answers in load order (state and codes sorted when
+canonical); rpcdiff compares them as sets (keys grouped by account)."
   (let ((n (cblock-number b)))
     (when (zerop n) (header-not-found (list :hash (make-octets 32))))
     (clempo.rpc.tries:with-trie-state (db (1- n))
@@ -1165,28 +1187,61 @@ recorded cases compare by shape."
         (dotimes (i (length (cblock-txs b)))
           (replay-tx ctx b i))
         (executor:finish-call-block ctx)
-        (let ((nodes (make-hash-table :test 'equalp)) (state '()) (codes '()) (keys '()))
-          (flet ((add (proof) (dolist (node proof)
-                                (unless (gethash node nodes)
-                                  (setf (gethash node nodes) t)
-                                  (push node state)))))
-            (dolist (address (reverse (recorded-order recorder)))
-              (add (store:db-account-proof db address))
-              (push (integer->octets address 20) keys)
-              (let ((a (store:db-account db address)))
-                (when (and a (or (eq mode :legacy)
-                                 (not (octets= (store:account-code-hash a) trie:+empty-code-hash+))))
-                  (pushnew (store:db-code db (store:account-code-hash a)) codes :test #'equalp)))
-              (loop for slot being the hash-keys of (gethash address (recorded-accounts recorder))
-                    do (add (store:db-storage-proof db address slot))
-                       (push (integer->octets slot 32) keys))))
-          (json:jobject "state" (map 'simple-vector #'hexbytes (nreverse state))
-                        "codes" (map 'simple-vector #'hexbytes (sort codes #'octets-before-p))
-                        "keys" (map 'simple-vector #'hexbytes (nreverse keys))
-                        "headers" (coerce (loop for k from lowest below n
-                                                for header = (cblock-header (chain-block k))
-                                                collect (hexbytes (or (h:header-raw header) (h:encode-header header))))
-                                          'simple-vector)))))))
+        (let ((changes (make-hash-table)) (deployed '()))
+          ;; Committing the block's output caches every changed account and slot.
+          (dolist (c (state:drain-changes (executor:call-block-world ctx)))
+            (let* ((address (state:account-change-address c)) (e (recorded-entry recorder address)))
+              (setf (gethash address changes) c)
+              (unless (recorded-loaded e)
+                (setf (recorded-loaded e) t (recorded-exists e) (and (store:db-account db address) t))
+                (push address (recorded-order recorder)))
+              (loop for (slot) in (state:account-change-storage c) do (record-slot e slot))
+              (let ((code (state:account-change-code c)))
+                (when (and code (plusp (length code)))
+                  (pushnew code deployed :test #'equalp)))))
+          (let* ((addresses (reverse (recorded-order recorder)))
+                 (accounts
+                   (loop for address in addresses
+                         for e = (gethash address (recorded-accounts recorder))
+                         for c = (gethash address changes)
+                         for pre = (store:db-account db address)
+                         collect (list (clempo.keccak:keccak256 (integer->octets address 20))
+                                       (if c
+                                           (or (state:account-change-deleted-p c)
+                                               (and (zerop (state:account-change-nonce c))
+                                                    (zerop (state:account-change-balance c))
+                                                    (octets= (state:account-change-code-hash c) trie:+empty-code-hash+)))
+                                           (or (null pre)
+                                               (and (zerop (store:account-nonce pre))
+                                                    (zerop (store:account-balance pre))
+                                                    (octets= (store:account-code-hash pre) trie:+empty-code-hash+))))
+                                       (store:db-storage-trie db address)
+                                       (loop for slot in (reverse (recorded-slots e))
+                                             for written = (and c (assoc slot (state:account-change-storage c)))
+                                             collect (cons (clempo.keccak:keccak256 (integer->octets slot 32))
+                                                           (zerop (cond (written (cdr written))
+                                                                        ((and c (or (state:account-change-deleted-p c)
+                                                                                    (state:account-change-storage-wiped-p c)))
+                                                                         0)
+                                                                        (t (state:backend-storage db address slot)))))))))
+                 (read-codes (mapcar (lambda (h) (store:db-code db h)) (reverse (recorded-codes recorder))))
+                 (codes (if (eq mode :canonical)
+                            (sort (copy-list read-codes) #'octets-before-p)
+                            (sort (remove-duplicates (append (list (make-octets 0)) read-codes deployed)
+                                                     :test #'equalp)
+                                  #'octets-before-p))))
+            (json:jobject "state" (map 'simple-vector #'hexbytes
+                                       (trie:trie-witness (store:db-account-trie db) accounts :mode mode))
+                          "codes" (map 'simple-vector #'hexbytes codes)
+                          "keys" (coerce (loop for address in addresses
+                                               collect (hexbytes (integer->octets address 20))
+                                               append (loop for slot in (reverse (recorded-slots (gethash address (recorded-accounts recorder))))
+                                                            collect (hexbytes (integer->octets slot 32))))
+                                         'simple-vector)
+                          "headers" (coerce (loop for k from lowest below n
+                                                  for header = (cblock-header (chain-block k))
+                                                  collect (hexbytes (or (h:header-raw header) (h:encode-header header))))
+                                            'simple-vector))))))))
 
 (defun octets-before-p (a b)
   "Byte-wise lexicographic order (alloy Bytes' Ord)."

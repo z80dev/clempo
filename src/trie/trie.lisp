@@ -5,7 +5,7 @@
                             #:rlp-item-bounds #:rlp-decode #:rlp-decode-integer #:rlp-error)
   (:export #:trie #:make-trie #:make-secure-trie #:trie-clone
            #:trie-get #:trie-put #:trie-delete #:trie-root #:ordered-trie-root
-           #:trie-proof #:verify-proof #:trie-node-at #:node-store-get #:node-store-put
+           #:trie-proof #:verify-proof #:trie-node-at #:trie-witness #:node-store-get #:node-store-put
            #:node-store-write-through-p #:trie-map-memory-nodes
            #:call-with-trie-hashing #:trie-from-items
            #:trie-node-error #:encode-account #:decode-account

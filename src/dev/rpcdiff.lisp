@@ -64,6 +64,30 @@ matches only an empty array."
         ((numberp a) (numberp b))
         (t (eq a b))))
 
+(defparameter *witness-methods* '("debug_executionWitness" "debug_executionWitnessByBlockHash")
+  "Methods answering an ExecutionWitness; compared by WITNESS-EQUAL whatever their class.")
+
+(defun witness-canonical (result)
+  "An ExecutionWitness with the reference's hash-map orders taken out: state and codes sorted,
+keys grouped as address -> sorted slots (reth draws all three from maps with a random hasher,
+so two calls answer the same block in different orders); headers keep their order."
+  (flet ((sorted (field) (sort (coerce (clempo.json:jget result field) 'list) #'string<)))
+    (let ((groups '()))
+      (loop for k across (clempo.json:jget result "keys")
+            do (if (= (length k) 42)
+                   (push (list k) groups)
+                   (push k (cdr (first groups)))))
+      (list (sorted "state") (sorted "codes")
+            (sort (mapcar (lambda (g) (cons (car g) (sort (cdr g) #'string<))) groups) #'string< :key #'car)
+            (coerce (clempo.json:jget result "headers") 'list)))))
+
+(defun witness-equal (a b)
+  "Two debug_executionWitness answers: equal values (WITNESS-CANONICAL), or equal errors."
+  (let ((ra (clempo.json:jget a "result")) (rb (clempo.json:jget b "result")))
+    (if (and (clempo.json:jobject-p ra) (clempo.json:jobject-p rb))
+        (equal (witness-canonical ra) (witness-canonical rb))
+        (clempo.json:json-equal a b))))
+
 (defun head-relative (want got)
   "WANT with every string equal to its result.head number or hash replaced by GOT's: an
 eth_capabilities answer recorded at the reference's head, compared at clempo's."
@@ -91,10 +115,13 @@ reference node itself: compared by shape, never counted toward R5), or
 
 (defun case-matches (c status response)
   "A reference-timeout case matches an answer with a result: the reference recorded none to
-compare with. A \"headRelative\" case is value-checked after HEAD-RELATIVE."
+compare with. A \"headRelative\" case is value-checked after HEAD-RELATIVE. Witness
+answers compare by value, their map orders aside (WITNESS-EQUAL)."
   (and (eql status (clempo.json:jget c "status"))
        (let ((class (case-compare-class c)))
-         (cond ((string= class "stable")
+         (cond ((member (clempo.json:jget c "method") *witness-methods* :test #'string=)
+                (witness-equal (clempo.json:jget c "response") response))
+               ((string= class "stable")
                 (clempo.json:json-equal (if (and (eq :true (clempo.json:jget c "headRelative"))
                                                  (clempo.json:jobject-p response))
                                             (head-relative (clempo.json:jget c "response") response)
