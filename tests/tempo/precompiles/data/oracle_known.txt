@@ -684,7 +684,6 @@ T8-8/dex/createPair-book-index/T7
 T8-8/dex/createPair-book-index/T8
 T8-11/dex/bookIndexForKey/T7
 T8-11/dex/bookIndexForKey/T8
-T10-1/zone-factory/unknown-selector/T10
 T8-8/createPair/T7
 T8-8/createPair/T8
 T8-8/place-creates-pair/T7
