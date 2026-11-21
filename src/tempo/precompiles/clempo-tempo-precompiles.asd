@@ -21,4 +21,5 @@
   :serial t
   :components ((:file "oracle")
                (:file "precompiles-tests")
-               (:file "validator-tests")))
+               (:file "validator-tests")
+               (:file "tip20-tests")))

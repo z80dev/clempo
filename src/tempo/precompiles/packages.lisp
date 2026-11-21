@@ -100,7 +100,7 @@ rewards, permits, memos, transfer policies, virtual addresses.")
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
   (:shadowing-import-from #:clempo.contract #:read #:write #:delete)
   (:documentation "ReceivePolicyGuard (receive-policy-guard.lisp): TIP-1028 blocked receipts.")
-  (:export #:receive-policy-guard #:balance-of))
+  (:export #:receive-policy-guard #:balance-of #:store-blocked))
 
 (defpackage #:clempo.fee-manager
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
