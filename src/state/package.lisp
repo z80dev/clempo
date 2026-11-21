@@ -23,7 +23,7 @@ writes them down.")
    ;; accounts
    #:account #:account-address #:account-nonce #:account-balance #:account-exists
    #:account-touched #:account-created #:account-destructed
-   #:world #:make-world #:world-backend #:world-refund #:world-logs
+   #:world #:make-world #:world-backend #:world-refund #:world-logs #:world-observer
    #:get-account #:account-code #:account-code-hash #:account-empty-p #:account-dead-p
    #:account-exists-p #:account-alive-p
    #:get-balance #:set-balance #:add-balance #:sub-balance

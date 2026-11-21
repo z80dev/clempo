@@ -42,7 +42,8 @@
   (refund 0 :type integer)
   (logs '() :type list)
   (tx-accounts '() :type list)
-  (block-accounts '() :type list))
+  (block-accounts '() :type list)
+  (observer nil :type (or null function)))
 
 (defun make-world (backend)
   "A world state over BACKEND, empty of changes."
@@ -57,23 +58,28 @@
 
 (declaim (ftype (function (world integer) (values account &optional)) get-account))
 (defun get-account (world address)
-  "The account object for ADDRESS, loaded from the backend on first use."
+  "The account object for ADDRESS, loaded from the backend on first use. The world's
+OBSERVER, when set, is called as (observer account nil nil) on every access."
   (declare #.*hot* (type world world))
-  (let ((accounts (world-accounts world)))
-    (or (gethash address accounts)
-        (setf (gethash address accounts)
-              (let ((a (%make-account address)))
-                (multiple-value-bind (found nonce balance code-hash)
-                    (backend-account (world-backend world) address)
-                  (when found
-                    (setf (account-exists a) t
-                          (account-in-backend a) t
-                          (account-nonce a) nonce
-                          (account-balance a) balance
-                          (account-code-hash a) (if (octets= code-hash +empty-code-hash+)
-                                                    +empty-code-hash+
-                                                    code-hash))))
-                a)))))
+  (let* ((accounts (world-accounts world))
+         (account
+           (or (gethash address accounts)
+               (setf (gethash address accounts)
+                     (let ((a (%make-account address)))
+                       (multiple-value-bind (found nonce balance code-hash)
+                           (backend-account (world-backend world) address)
+                         (when found
+                           (setf (account-exists a) t
+                                 (account-in-backend a) t
+                                 (account-nonce a) nonce
+                                 (account-balance a) balance
+                                 (account-code-hash a) (if (octets= code-hash +empty-code-hash+)
+                                                           +empty-code-hash+
+                                                           code-hash))))
+                       a))))
+         (observer (world-observer world)))
+    (when observer (funcall observer account nil nil))
+    account))
 
 (defun account-code (world account)
   (declare (type account account))
@@ -218,7 +224,15 @@ already scheduled."
   (or table-or-nil (make-hash-table)))
 
 (defun account-storage-original (world account slot)
-  "The value of SLOT at the start of the running transaction."
+  "The value of SLOT at the start of the running transaction. Calls the world's OBSERVER
+as (observer account slot original): every storage read and write goes through here."
+  (declare #.*hot* (type account account))
+  (let ((v (%storage-original world account slot))
+        (observer (world-observer world)))
+    (when observer (funcall observer account slot v))
+    v))
+
+(defun %storage-original (world account slot)
   (declare #.*hot* (type account account))
   (let ((orig (or (account-original account)
                   (setf (account-original account) (make-hash-table)))))

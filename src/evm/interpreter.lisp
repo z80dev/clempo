@@ -30,8 +30,8 @@
 
 (defmacro define-interpreter (name &key traced)
   `(defun ,name (frame)
-     ,(format nil "Run FRAME's code~:[~; calling TRACE-STEP before each op~]. Returns
-\(values status output); FRAME-GAS holds the gas left (0 after an exceptional halt)."
+     ,(format nil "Run FRAME's code~:[~; calling TRACE-STEP and TRACE-STEP-END around each op~].
+Returns (values status output); FRAME-GAS holds the gas left (0 after an exceptional halt)."
               traced)
      (declare #.*hot* (type frame frame) (sb-ext:muffle-conditions sb-ext:compiler-note))
      (let* ((code (frame-code frame))
@@ -48,12 +48,16 @@
             (gp (spec-gas spec))
             (fork (spec-fork spec))
             (block *block*)
+            (step-pc 0)
             ,@(when traced '((tracer *tracer*))))
-       (declare (type octets code) (type fixnum code-len sp pc fork) (type gas gas)
+       (declare (type octets code) (type fixnum code-len sp pc fork step-pc) (type gas gas)
                 (type simple-bit-vector jumpdests) (type simple-vector pushes stack)
                 (type gas-params gp) (type spec spec) (type block-env block)
-                (ignorable jumpdests pushes world block))
+                (ignorable jumpdests pushes world block step-pc))
        (macrolet ((current-fork () 'fork)
+                  (when-tracing (&body body)
+                    (declare (ignorable body))
+                    ,(if traced '(cons 'progn body) nil))
                   (push-word (x) `(progn (setf (svref stack sp) ,x) (incf sp)))
                   (charge (n)
                     `(let ((c ,n))
@@ -63,14 +67,16 @@
                   (sync-gas () '(setf (frame-gas frame) gas))
                   (reload-gas () '(setf gas (frame-gas frame)))
                   (halt (status &optional (output '+empty-code+))
-                    `(return-from run
-                       (values ,status
-                               (progn
-                                 (setf (frame-gas frame)
-                                       ,(cond ((member status +success-statuses+) 'gas)
-                                              ((keywordp status) 0)
-                                              (t `(if (member ,status +success-statuses+) gas 0))))
-                                 ,output))))
+                    `(let ((st ,status) (out ,output))
+                       (setf (frame-gas frame)
+                             ,(cond ((member status +success-statuses+) 'gas)
+                                    ((keywordp status) 0)
+                                    (t `(if (member st +success-statuses+) gas 0))))
+                       ,@',(when traced
+                             '((trace-step-end tracer frame step-pc
+                                (if (< step-pc code-len) (aref code step-pc) 0)
+                                (frame-gas frame) sp stack st)))
+                       (return-from run (values st out))))
                   (mem-ensure (offset size)
                     `(unless (eql ,size 0)
                        (let ((end (mem-end ,offset ,size)))
@@ -83,7 +89,8 @@
              (let ((op (if (< pc code-len) (aref code pc) 0)))
                (declare (type (unsigned-byte 8) op))
                ,@(when traced
-                   '((trace-step tracer frame pc op gas (frame-depth frame) sp stack)))
+                   '((setf step-pc pc)
+                     (trace-step tracer frame pc op gas sp stack)))
                (case op
                  ,@(loop for info across *op-table* when info collect (op-clause info))
                  (t
@@ -95,7 +102,9 @@
                       (when status (halt status (or output +empty-code+)))
                       (setf sp new-sp)
                       (reload-gas)
-                      (incf pc))))))))))))
+                      (incf pc)))))
+               ,@(when traced
+                   '((trace-step-end tracer frame step-pc op gas sp stack nil))))))))))
 
 (define-interpreter interpret)
 (define-interpreter interpret-traced :traced t)

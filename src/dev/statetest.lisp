@@ -131,12 +131,50 @@ description of the first difference."
 
 (defstruct st-result name fork index ok reason)
 
+;;; With -trace, every case runs under a tracer that checks the hook protocol: frames
+;;; nest, every TRACE-STEP is closed by its TRACE-STEP-END, and nothing is left open. This
+;;; exercises the traced interpreter variant against the same expectations.
+
+(defvar *trace-check* nil)
+
+(defclass checking-tracer ()
+  ((frames :initform '() :accessor ct-frames)
+   (steps :initform '() :accessor ct-steps)
+   (count :initform 0 :accessor ct-count)
+   (problem :initform nil :accessor ct-problem)))
+
+(defun ct-fail (tr fmt &rest args)
+  (unless (ct-problem tr) (setf (ct-problem tr) (apply #'format nil fmt args))))
+
+(defmethod clempo.evm:trace-call-start ((tr checking-tracer) frame)
+  (unless (= (clempo.evm:frame-depth frame) (length (ct-frames tr)))
+    (ct-fail tr "call-start at depth ~D with ~D open frames" (clempo.evm:frame-depth frame)
+             (length (ct-frames tr))))
+  (push frame (ct-frames tr)))
+
+(defmethod clempo.evm:trace-call-end ((tr checking-tracer) frame status gas-left output)
+  (declare (ignore status gas-left output))
+  (unless (eq frame (pop (ct-frames tr))) (ct-fail tr "call-end of a frame that is not open")))
+
+(defmethod clempo.evm:trace-step ((tr checking-tracer) frame pc op gas sp stack)
+  (declare (ignore op gas sp stack))
+  (unless (eq frame (first (ct-frames tr))) (ct-fail tr "step outside its frame"))
+  (incf (ct-count tr))
+  (push (cons frame pc) (ct-steps tr)))
+
+(defmethod clempo.evm:trace-step-end ((tr checking-tracer) frame pc op gas sp stack status)
+  (declare (ignore op gas sp stack status))
+  (let ((open (pop (ct-steps tr))))
+    (unless (and open (eq (car open) frame) (= (cdr open) pc))
+      (ct-fail tr "step-end at pc ~D does not close the open step ~S" pc (cdr open)))))
+
 (defun run-post-entry (pre tx env config fork-name fork post)
   "Run one post entry; returns NIL on success or a reason string."
   (let* ((backend (build-backend pre))
          (world (clempo.state:make-world backend))
          (clempo.evm:*spec* (fixture-spec fork-name fork config))
          (clempo.evm:*block* (fixture-block env clempo.evm:*spec* config))
+         (clempo.evm:*tracer* (and *trace-check* (make-instance 'checking-tracer)))
          (etx (fixture-tx tx (j post "indexes")))
          (expect-invalid (j post "expectException"))
          (result nil)
@@ -144,6 +182,11 @@ description of the first difference."
     (handler-case
         (setf result (clempo.evm:apply-transaction (make-instance 'clempo.evm:ethereum-handler) world etx))
       (clempo.evm:invalid-transaction (c) (setf invalid (clempo.evm:invalid-transaction-reason c))))
+    (let ((tr clempo.evm:*tracer*))
+      (when tr
+        (when (or (ct-frames tr) (ct-steps tr))
+          (ct-fail tr "~D frames and ~D steps left open" (length (ct-frames tr)) (length (ct-steps tr))))
+        (when (ct-problem tr) (return-from run-post-entry (format nil "tracer: ~A" (ct-problem tr))))))
     (cond ((and expect-invalid (not invalid))
            (return-from run-post-entry (format nil "expected ~A, tx was valid" expect-invalid)))
           ((and invalid (not expect-invalid))
@@ -192,13 +235,14 @@ description of the first difference."
           ((pathname-name p) (list p))
           (t (sort (directory (merge-pathnames "**/*.json" p)) #'string< :key #'namestring)))))
 
-(defun run-statetests (files &key fork-filter (threads 12) (on-result nil))
+(defun run-statetests (files &key fork-filter (threads 12) (on-result nil) trace-check)
   "Run FILES on THREADS workers; returns all ST-RESULTs."
   (let ((queue (copy-list files))
         (lock (sb-thread:make-mutex :name "statetest"))
         (all '()))
     (flet ((worker ()
              (let ((clempo.evm::*analysis-cache* (make-hash-table :test 'eq :weakness :key))
+                   (*trace-check* trace-check)
                    (clempo.evm::*stacks* (make-array 1026 :initial-element nil)))
                (loop
                  (let ((file (sb-thread:with-mutex (lock) (pop queue))))
@@ -224,7 +268,7 @@ description of the first difference."
     by-fork))
 
 (defcommand "statetest" (args)
-  "run EEST state tests: statetest [dir-or-file] [-fork Osaka] [-threads N] [-v]"
+  "run EEST state tests: statetest [dir-or-file] [-fork Osaka] [-threads N] [-trace] [-v]"
   (let* ((target (or (first (arg args :rest)) (namestring *statetest-dir*)))
          (fork-filter (let ((f (arg args :fork))) (and f (or (clempo.evm:parse-fork f)
                                                              (error "unknown fork ~A" f)))))
@@ -233,6 +277,7 @@ description of the first difference."
          (start (get-internal-real-time))
          (results (run-statetests files :fork-filter fork-filter
                                         :threads (arg-int args :threads 12)
+                                        :trace-check (arg-flag args :trace)
                                         :on-result (lambda (file rs)
                                                      (declare (ignore file))
                                                      (dolist (r rs)

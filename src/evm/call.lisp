@@ -41,42 +41,45 @@ status is :stop or :return."
   (let* ((world *world*)
          (tracer *tracer*)
          (cp (checkpoint world))
-         (target-account (get-account world target)))
-    (when tracer (trace-call-start tracer kind caller target value input gas depth))
+         (target-account (get-account world target))
+         (precompile (and (not disable-precompiles)
+                          (find-precompile (spec-precompiles *spec*) code-address)))
+         (frame (%make-frame :kind kind :address target :code-address code-address
+                             :caller caller :value value :input input :gas gas :depth depth
+                             :static-p static-p :account target-account
+                             :code (cond (precompile +empty-code+)
+                                         (code-p code)
+                                         (t (get-code world code-address))))))
+    (when tracer (trace-call-start tracer frame))
     (touch-account world target-account)
     (when (and (eq kind :call) (/= value 0))
       (transfer world caller target-account value))
     (multiple-value-bind (status gas-left output)
-        (let ((precompile (and (not disable-precompiles)
-                               (find-precompile (spec-precompiles *spec*) code-address)))
-              (frame (%make-frame :address target :code-address code-address :caller caller
-                                  :value value :input input :gas gas :depth depth
-                                  :static-p static-p :account target-account)))
-          (if precompile
-              (multiple-value-bind (status output)
-                  (funcall (precompile-fn precompile) frame)
-                (values status (if (member status +success-statuses+) (frame-gas frame) 0) output))
-              (let ((code (if code-p code (get-code world code-address))))
-                (if (zerop (length code))
-                    (values :stop gas +empty-code+)
-                    (progn (setf (frame-code frame) code)
-                           (run-code-frame frame))))))
+        (cond (precompile
+               (multiple-value-bind (status output) (funcall (precompile-fn precompile) frame)
+                 (values status (if (member status +success-statuses+) (frame-gas frame) 0)
+                         output)))
+              ((zerop (length (frame-code frame))) (values :stop gas +empty-code+))
+              (t (run-code-frame frame)))
       (unless (success-p status) (rollback world cp))
-      (when tracer (trace-call-end tracer status gas-left output depth))
+      (when tracer (trace-call-end tracer frame status gas-left output))
       (values status gas-left output))))
 
-(defun create-message (caller address value initcode gas depth)
+(defun create-message (caller address value initcode gas depth &optional (kind :create))
   "Create a contract at ADDRESS by running INITCODE (the caller already bumped its nonce
-and checked collision). Returns (values status gas-left output); output is the revert
-data on :revert, empty otherwise."
+and checked collision). KIND is :create or :create2. Returns (values status gas-left
+output); output is the revert data on :revert, empty otherwise."
   (declare (type gas gas) (type fixnum depth))
   (let* ((world *world*)
          (spec *spec*)
          (gp (spec-gas spec))
          (tracer *tracer*)
          (cp (checkpoint world))
-         (account (get-account world address)))
-    (when tracer (trace-call-start tracer :create caller address value initcode gas depth))
+         (account (get-account world address))
+         (frame (%make-frame :kind kind :address address :code-address address :caller caller
+                             :value value :input +empty-code+ :gas gas :depth depth
+                             :code initcode :account account)))
+    (when tracer (trace-call-start tracer frame))
     (mark-created world account)
     (set-nonce world account 1)
     (touch-account world account)
@@ -84,9 +87,7 @@ data on :revert, empty otherwise."
     (multiple-value-bind (status gas-left output)
         (if (zerop (length initcode))
             (values :stop gas +empty-code+)
-            (run-code-frame (%make-frame :address address :code-address address :caller caller
-                                         :value value :input +empty-code+ :gas gas :depth depth
-                                         :code initcode :account account)))
+            (run-code-frame frame))
       (declare (type gas gas-left))
       (multiple-value-bind (status gas-left output)
           (if (success-p status)
@@ -97,10 +98,10 @@ data on :revert, empty otherwise."
                       ((> (length output) (gas-params-max-code-size gp))
                        (values :code-too-large 0 +empty-code+))
                       (t (set-code world account output)
-                         (values :return (- gas-left deposit) +empty-code+))))
+                         (values :return (- gas-left deposit) output))))
               (values status gas-left (if (eq status :revert) output +empty-code+)))
         (unless (success-p status) (rollback world cp))
-        (when tracer (trace-call-end tracer status gas-left output depth))
+        (when tracer (trace-call-end tracer frame status gas-left output))
         (values status gas-left output)))))
 
 (defun collision-p (world account)
@@ -150,6 +151,7 @@ data on :revert, empty otherwise."
           (return-from op-call 0))
         (let ((input (memory-slice frame in-offset in-size))
               (self (frame-address frame)))
+          (setf (frame-gas frame) gas)    ; what the step left, seen by tracers
           (multiple-value-bind (status gas-left output)
               (multiple-value-bind (caller target value)
                   (ecase kind
@@ -203,8 +205,9 @@ for an exceptional halt."
         (when (collision-p world (get-account world address))
           (setf (frame-gas frame) gas)
           (return-from op-create 0))
+        (setf (frame-gas frame) gas)
         (multiple-value-bind (status gas-left output)
-            (create-message self address value initcode child-gas (1+ depth))
+            (create-message self address value initcode child-gas (1+ depth) kind)
           (declare (type gas gas-left))
           (setf (frame-gas frame) (+ gas gas-left))
           (cond ((success-p status) address)
@@ -228,6 +231,7 @@ for an exceptional halt."
     (decf gas cost)
     (when (or (< gas 0) (frame-static-p frame)) (return-from op-selfdestruct nil))
     (setf (frame-gas frame) gas)
+    (when *tracer* (trace-selfdestruct *tracer* frame beneficiary balance))
     (cond ((fork>= :cancun)
            (transfer world account (get-account world beneficiary) balance)
            (when (created-p account)

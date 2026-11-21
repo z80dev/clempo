@@ -185,21 +185,38 @@ host write (see the SSTORE op)."
 (defvar *block* (make-block-env) "The running BLOCK-ENV.")
 (defvar *tx-env* (make-tx-env) "The running TX-ENV.")
 
-;;; Tracing. *TRACER* NIL selects the interpreter compiled without hooks.
+;;; Tracing. *TRACER* NIL selects the interpreter compiled without hooks. A tracer
+;;; specialises any of these generic functions; the defaults do nothing. Frames are
+;;; CLEMPO.EVM:FRAME objects: FRAME-KIND (:call :callcode :delegatecall :staticcall
+;;; :create :create2), FRAME-CALLER, FRAME-ADDRESS, FRAME-CODE-ADDRESS, FRAME-VALUE,
+;;; FRAME-INPUT (empty for creations), FRAME-CODE (the initcode for creations; empty for
+;;; precompiles), FRAME-GAS, FRAME-DEPTH, FRAME-MEMORY and
+;;; FRAME-MEM-SIZE, FRAME-RETURN-DATA. When a frame starts a message (TRACE-CALL-START of
+;;; the child), the parent's FRAME-GAS already holds what is left after the call or create
+;;; step charged everything, including the gas given to the child.
 
 (defvar *tracer* nil "A tracer object, or NIL for no tracing (no overhead).")
 
-(defgeneric trace-step (tracer frame pc op gas depth sp stack)
-  (:documentation "Called before each opcode with the gas left before it.")
-  (:method (tracer frame pc op gas depth sp stack)
-    (declare (ignore tracer frame pc op gas depth sp stack))))
+(defmacro define-trace-hook (name (&rest args) doc)
+  `(defgeneric ,name (tracer ,@args)
+     (:documentation ,doc)
+     (:method (tracer ,@args) (declare (ignore tracer ,@args)))))
 
-(defgeneric trace-call-start (tracer kind from to value input gas depth)
-  (:documentation "A message call or creation begins.")
-  (:method (tracer kind from to value input gas depth)
-    (declare (ignore tracer kind from to value input gas depth))))
-
-(defgeneric trace-call-end (tracer status gas-left output depth)
-  (:documentation "The innermost message call or creation ends.")
-  (:method (tracer status gas-left output depth)
-    (declare (ignore tracer status gas-left output depth))))
+(define-trace-hook trace-tx-start (world tx)
+  "A transaction passed validation and is about to buy gas.")
+(define-trace-hook trace-tx-end (world tx result)
+  "The transaction finished and WORLD is finalized; RESULT is its TX-RESULT.")
+(define-trace-hook trace-call-start (frame)
+  "FRAME, a message call or creation, starts with FRAME-GAS gas; precompiles and calls to
+accounts without code are frames too.")
+(define-trace-hook trace-call-end (frame status gas-left output)
+  "FRAME ended with STATUS (:stop :return :revert or an exceptional halt keyword).")
+(define-trace-hook trace-step (frame pc op gas sp stack)
+  "Before the opcode OP at PC; GAS is the gas left, the stack is STACK[0..SP).")
+(define-trace-hook trace-step-end (frame pc op gas sp stack status)
+  "After OP ran: GAS and the stack as it left them; STATUS is NIL when execution goes
+on, else the frame's halting status (gas is then what the frame ends with).")
+(define-trace-hook trace-log (frame log)
+  "FRAME emitted the CLEMPO.STATE:LOG-ENTRY LOG.")
+(define-trace-hook trace-selfdestruct (frame beneficiary balance)
+  "FRAME's account self-destructed (or, from Cancun, sent BALANCE away) to BENEFICIARY.")

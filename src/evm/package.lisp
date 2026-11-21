@@ -19,13 +19,14 @@ Context lives in special variables: *WORLD* *SPEC* *BLOCK* *TX-ENV* *TRACER*.")
    #:tx-env #:make-tx-env #:tx-env-origin #:tx-env-gas-price #:tx-env-blob-hashes
    #:*world* #:*spec* #:*block* #:*tx-env* #:*tracer*
    ;; tracing
-   #:trace-step #:trace-call-start #:trace-call-end
+   #:trace-tx-start #:trace-tx-end #:trace-call-start #:trace-call-end #:trace-step
+   #:trace-step-end #:trace-log #:trace-selfdestruct
    ;; opcodes
    #:defop #:op-info #:op-info-name #:op-info-opcode #:op-info-gas #:op-info-since #:ops-since
    ;; frames and execution
    #:frame #:frame-code #:frame-address #:frame-code-address #:frame-caller #:frame-value
    #:frame-input #:frame-gas #:frame-depth #:frame-static-p #:frame-memory #:frame-mem-size
-   #:frame-return-data #:frame-account
+   #:frame-return-data #:frame-account #:frame-kind
    #:run-frame #:call-message #:create-message #:create-address #:create2-address
    #:success-p #:collision-p
    ;; precompiles

@@ -53,7 +53,8 @@
   (memory (make-octets 0) :type octets)
   (mem-size 0 :type fixnum)
   (return-data +empty-code+ :type octets)
-  (account nil))
+  (account nil)
+  (kind :call :type keyword))
 
 ;;; Memory: MEMORY is a buffer at least MEM-SIZE long; MEM-SIZE is the active size in
 ;;; bytes, a multiple of 32.
