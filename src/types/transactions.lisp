@@ -2,6 +2,7 @@
   (:use #:cl #:clempo.base)
   (:import-from #:clempo.rlp #:rlp-decode #:rlp-encode #:rlp-decode-integer)
   (:export #:transaction #:decode-transaction #:encode-transaction
+           #:transaction-encoded-length #:encode-transaction-into #:transaction-unique-identifier
            #:transaction-hash #:transaction-signing-hash #:transaction-sender
            #:transaction-fee-payer #:transaction-key-id
            #:transaction-key-authorization-signer #:transaction-type #:transaction-fields))
@@ -118,8 +119,8 @@
           (field-integer (third entry) 8)
           (validate-field (fourth entry) :bytes)))))))
 
-(defun decode-transaction (raw)
-  "Decode an EIP-2718 envelope, not the RLP string wrapper used in blocks."
+(defun decode-transaction (raw &key (copy-raw t))
+  "Decode an EIP-2718 envelope. COPY-RAW NIL transfers ownership of RAW to the result."
   (invariant (and (typep raw 'octets) (plusp (length raw))) "Empty transaction")
   (let* ((type (if (>= (aref raw 0) #xc0) 0 (aref raw 0)))
          (layout (cdr (assoc type *layouts*)))
@@ -151,36 +152,66 @@
                     "Invalid transaction validity window")))
       (t (invariant (<= (field-integer (nth (- (length fields) 3) fields) 1) 1)
                     "Invalid transaction parity")))
-    (%make-transaction type fields (copy-octets raw))))
+    (%make-transaction type fields (if copy-raw (copy-octets raw) raw))))
 
 (defun encode-envelope (type fields)
-  (let ((encoded (rlp-encode fields)))
-    (if (zerop type) encoded (octets-concat (octets-of type) encoded))))
+  (let* ((prefix (if (zerop type) 0 1))
+         (out (make-octets (+ prefix (clempo.rlp:rlp-encoded-length fields)))))
+    (when (plusp prefix) (setf (aref out 0) type))
+    (clempo.rlp:rlp-encode-into fields out prefix)
+    out))
+
+(defun transaction-encoded-length (tx)
+  (+ (if (zerop (transaction-type tx)) 0 1)
+     (clempo.rlp:rlp-encoded-length (transaction-fields tx))))
+
+(defun encode-transaction-into (tx out position)
+  "Write the reconstructed EIP-2718 envelope into OUT; return the ending position."
+  (declare (type octets out) (type fixnum position))
+  (unless (zerop (transaction-type tx))
+    (setf (aref out position) (transaction-type tx))
+    (incf position))
+  (clempo.rlp:rlp-encode-into (transaction-fields tx) out position))
 
 (defun encode-transaction (tx)
   "Reconstruct the envelope from its fields; never reuse the original bytes."
-  (encode-envelope (transaction-type tx) (transaction-fields tx)))
+  (let ((out (make-octets (transaction-encoded-length tx))))
+    (encode-transaction-into tx out 0)
+    out))
 
 (defun transaction-hash (tx)
   (clempo.keccak:keccak256 (transaction-raw tx)))
 
+(defun transaction-signing-fields (tx)
+  (let ((type (transaction-type tx)) (fields (transaction-fields tx)))
+    (cond
+      ((zerop type)
+       (let ((v (field-integer (nth 6 fields) 8)))
+         (append (subseq fields 0 6)
+                 (when (>= v 35) (list (floor (- v 35) 2) 0 0)))))
+      ((= type #x76)
+       (let ((result (butlast fields)))
+         (if (listp (nth 11 fields))
+             (setf (nth 10 result) (make-octets 0)
+                   (nth 11 result) (octets-of 0))
+             (setf (nth 11 result) (make-octets 0)))
+         result))
+      (t (butlast fields 3)))))
+
 (defun transaction-signing-hash (tx)
-  (let* ((type (transaction-type tx)) (fields (transaction-fields tx))
-         (unsigned
-           (cond
-             ((zerop type)
-              (let ((v (field-integer (nth 6 fields) 8)))
-                (append (subseq fields 0 6)
-                        (when (>= v 35) (list (floor (- v 35) 2) 0 0)))))
-             ((= type #x76)
-              (let ((result (butlast fields)))
-                (if (listp (nth 11 fields))
-                    (setf (nth 10 result) (make-octets 0)
-                          (nth 11 result) (octets-of 0))
-                    (setf (nth 11 result) (make-octets 0)))
-                result))
-             (t (butlast fields 3)))))
-    (clempo.keccak:keccak256 (encode-envelope type unsigned))))
+  (clempo.keccak:keccak256 (encode-envelope (transaction-type tx) (transaction-signing-fields tx))))
+
+(defun transaction-unique-identifier (tx sender)
+  "Sender-scoped replay ID: Keccak(signing envelope || 20-byte sender).
+Unlike the received transaction hash, signatures do not affect this identifier."
+  (let* ((fields (transaction-signing-fields tx))
+         (prefix (if (zerop (transaction-type tx)) 0 1))
+         (size (+ prefix (clempo.rlp:rlp-encoded-length fields)))
+         (out (make-octets (+ size 20))))
+    (when (plusp prefix) (setf (aref out 0) (transaction-type tx)))
+    (clempo.rlp:rlp-encode-into fields out prefix)
+    (dotimes (i 20) (setf (aref out (+ size i)) (ldb (byte 8 (* 8 (- 19 i))) sender)))
+    (clempo.keccak:keccak256 out)))
 
 (defun recover-ecdsa (hash v r s)
   (let ((pub (clempo.secp256k1:ecrecover hash r s v)))

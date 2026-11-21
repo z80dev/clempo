@@ -92,3 +92,29 @@
     (is (null (transaction-valid-before tx)))
     (is (null (transaction-valid-after tx)))
     (is (consp (transaction-calls tx)))))
+
+(deftest transaction-direct-writer ()
+  (dolist (fixture *rpc-transactions*)
+    (let* ((raw (hex->octets (second fixture)))
+           (tx (decode-transaction raw))
+           (out (make-octets (+ 10 (transaction-encoded-length tx)))))
+      (is= (length raw) (transaction-encoded-length tx))
+      (is= (+ 5 (length raw)) (encode-transaction-into tx out 5))
+      (is-equalp raw (subseq out 5 (+ 5 (length raw)))))))
+
+(deftest sender-scoped-transaction-identifiers ()
+  (let ((fixtures (clempo.json:parse-json
+                   (clempo.io:read-file-string
+                    (asdf:system-relative-pathname "clempo-types"
+                     "../../tests/types/data/signature-mainnet-moderato.json")))))
+    (loop for fixture across fixtures
+          for label = (clempo.json:jget fixture "label")
+          for tx-fixture = (find label *rpc-transactions* :key #'first :test #'string=)
+          when tx-fixture
+            do (let* ((tx (decode-transaction (hex->octets (second tx-fixture))))
+                      (sender (hex->integer (clempo.json:jget fixture "sender")))
+                      (expected (clempo.keccak:keccak256
+                                 (octets-concat (hex->octets (clempo.json:jget fixture "preimage"))
+                                                (integer->octets sender 20)))))
+                 (is-equalp expected (transaction-unique-identifier tx sender))
+                 (is (not (octets= expected (transaction-unique-identifier tx (logxor 1 sender)))))))))

@@ -62,3 +62,13 @@ The cold gate passed 116 tests, including reference Snappy, RLPx, SAKE/CUPS and
 Tempo Commonware lookup vectors. This demonstrates download, not live replay
 or finalization; R4 remains unscored. Public validator interoperability was not
 attempted because Tempo admits registered validator identities and addresses.
+
+R1 codec optimization (2026-11-21): `defrlp` now generates bounded direct
+decoders and single-buffer writers; block decoding avoids a duplicate RLP
+tree and transfers newly allocated transaction envelopes without copying them
+again. The same 64,000-block check-build benchmark now takes 0.228 s wall /
+0.228035 s CPU versus 0.320 s / 0.320180 s: **1.40x faster**. Allocation falls
+from 593,425,824 to 393,454,144 bytes (**33.7% less**, about 6.15 KB/block).
+R1 remains 640/640 mainnet and 33/33 moderato. The shared body verifier also
+checks ommer hashes and withdrawal presence/roots; sender-scoped transaction
+identifiers hash the signing envelope plus the sender for pool replay checks.

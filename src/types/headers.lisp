@@ -12,6 +12,7 @@
            #:ethereum-header-parent-beacon-block-root #:ethereum-header-requests-hash
            #:ethereum-header-block-access-list-hash #:ethereum-header-slot-number
            #:header #:make-header #:decode-header #:encode-header #:header-from-items #:header-to-items
+           #:header-encoded-length #:header-encode-into
            #:header-general-gas-limit #:header-shared-gas-limit #:header-timestamp-millis-part
            #:header-inner #:header-consensus-context #:header-raw #:header-hash #:header-timestamp-millis
            #:header-extra-data #:header-state-root #:header-parent-hash #:header-number #:header-timestamp

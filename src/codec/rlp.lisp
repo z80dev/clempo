@@ -4,7 +4,7 @@
 items; integers encode as minimal big-endian strings.")
   (:export #:rlp-encode #:rlp-encode-into #:rlp-encoded-length
            #:rlp-decode #:rlp-decode-integer #:rlp-item-bounds
-           #:rlp-error #:rlp-raw #:make-rlp-raw #:rlp-raw-octets))
+           #:rlp-error #:rlp-raw #:make-rlp-raw #:rlp-raw-octets #:header-length #:write-header))
 
 (in-package #:clempo.rlp)
 
