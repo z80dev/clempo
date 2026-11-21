@@ -314,7 +314,7 @@ bad record with valid ones after it signals STORE-CORRUPT-LOG."
   (let ((policy (store-sync-policy store)))
     (cond ((eq policy :block) t)
           ((eq (first policy) :group) (>= (store-unsynced store) (second policy)))
-          (t (>= (- (get-internal-real-time) (store-synced-at store))
+          (t (>= (- (clempo.io:monotonic-ticks) (store-synced-at store))
                  (* (second policy) (/ internal-time-units-per-second 1000)))))))
 
 (defun open-wal (store path)
@@ -448,7 +448,7 @@ its RAM and never reach DIR."
   (sink-flush (store-wal-sink store))
   (sync-stream (store-wal-stream store))
   (setf (store-unsynced store) 0
-        (store-synced-at store) (get-internal-real-time)
+        (store-synced-at store) (clempo.io:monotonic-ticks)
         (store-durable-number store) (store-logged-number store)))
 
 (defun flush-db (store)
@@ -459,7 +459,7 @@ its RAM and never reach DIR."
     (start-wal store)
     (setf (store-logged-number store) (db-number db)
           (store-durable-number store) (db-number db)
-          (store-synced-at store) (get-internal-real-time)
+          (store-synced-at store) (clempo.io:monotonic-ticks)
           (store-unsynced store) 0)
     (db-number db)))
 
