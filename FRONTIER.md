@@ -204,10 +204,10 @@ verified all 91 real mainnet finalization certificates through block
 50,062,027, with zero sampled tip lag. Raw blocks came from the private
 node; certificates came from `https://rpc.tempo.xyz`. Separately, `bin/clempo`
 reopened a verified replay datadir at block 4, executed through a pinned
-canonical block 8, and served the committed hash, state root, and a pathUSD
-balance that matched the Rust RPC. The standalone image and authenticated
-loopback REPL were tested. These are independent checks; the one-hour
-executed-and-certified live run still depends on R3 reaching the tip.
+canonical block 8, and served its hash and state root over HTTP, matching
+the Rust RPC. Tempo's constant native-balance response also matched.
+The standalone image and authenticated loopback REPL were tested.
+The one-hour executed-and-certified live run still depends on R3 reaching the tip.
 
 Crypto EC (2026-11-21): secp256k1 recovery/signing/ECDH, EIP-7951 P256,
 BN254 EIP-196/197, all seven BLS EIP-2537 operations, RFC9380, commonware
@@ -233,3 +233,24 @@ serial). Inserts took 0.637 s and 0.695 s in those runs. See
 `tests/trie/benchmark.lisp` for the command and thread argument.
 This is a trie-only measurement; replay has not reached the requested
 9,890,000–9,909,999 execution benchmark.
+
+Mainnet-scale **synthetic state-root benchmark** (`tests/trie/state-benchmark.lisp`):
+356,056 accounts and 10,666,802 slots, sized from the live reference's
+`HashedAccounts` and `HashedStorages` table counts. Real `prestateTracer`
+dirty-set cardinalities drive synthetic values and keys in `clempo.store`.
+Setup took 51.77 s; the live state retained 3.31 GB Lisp heap after a full GC
+(6.36 GB peak process RSS, including setup and speculative benchmark undo).
+Serial and four-worker runs matched every root on the same 832 block updates.
+Only dirty account/storage trie flush and hashing are timed; block execution,
+flat writes, commits and disk I/O are excluded.
+
+| Workload (four repeats) | Dirty blocks / total | Peak dirty slots | Serial dirty median / p95 | Four-worker dirty median / p95 |
+|---|---:|---:|---:|---:|
+| Recent mainnet | 160 / 512 | 21 | 108 / 239 µs | 91 / 183 µs |
+| Evenly spaced busy-range sample | 20 / 256 | 596 | 0.400 / 17.449 ms | 0.369 / 2.394 ms |
+| 16 highest-gas busy-range blocks | 64 / 64 | 29,020 | 173 / 409 ms | 49.7 / 116 ms |
+
+The heaviest sample improved about 3.5× in median and p95 (mean root consing
+9.64 MB/block); the recent workload never reaches the parallel threshold.
+Timings are wall-clock, including scheduling and any GC in the measured root
+call. This is not the full busy-range replay benchmark or an R4/R7 score.
