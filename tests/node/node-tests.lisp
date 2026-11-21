@@ -243,6 +243,119 @@ those requests fail, as during an upstream outage."
                    (is= 4 (hash-table-count (clempo.node::node-followed-blocks again))))
               (close (clempo.node::node-hash-log again)))))))))
 
+;;; Folds and merges, small: every few blocks the open entries fold into a segment and due
+;;; segments merge, through the same functions the node runs at each archive chunk.
+
+(define-condition simulated-crash (error) ((step :initarg :step :reader crash-step)))
+
+(defun fake-tx-hash (n j) (clempo.keccak:keccak256 (integer->octets (+ (* 1000 n) j) 8)))
+
+(defun log-followed (node block n)
+  "Log block N and two transactions of it, as the follower does."
+  (let ((out (clempo.node::node-hash-log node)))
+    (dotimes (j 2)
+      (let ((value (logior (ash n 20) j)))
+        (write-byte 1 out) (write-sequence (fake-tx-hash n j) out)
+        (write-sequence (integer->octets value 8) out)
+        (clempo.node::note-hash node 1 (fake-tx-hash n j) value))))
+  (clempo.node::log-block-hashes node block n))
+
+(defun index-hits (node kind hash value)
+  "How many places hold HASH -> VALUE: the in-memory table plus every segment."
+  (+ (if (eql value (gethash hash (if (zerop kind)
+                                       (clempo.node::node-followed-blocks node)
+                                       (clempo.node::node-followed-txs node))))
+         1 0)
+     (loop for (nil blocks txs) in (clempo.node::node-segments node)
+           sum (count value (clempo.rpc.chain:index-lookup (if (zerop kind) blocks txs)
+                                                           (clempo.rpc.chain:hash-prefix hash))))))
+
+(defun every-hash-once-p (node blocks head)
+  (loop for n from 1 to head
+        always (and (= 1 (index-hits node 0 (blocks:block-hash (svref blocks (1- n))) n))
+                    (loop for j below 2 always (= 1 (index-hits node 1 (fake-tx-hash n j)
+                                                                (logior (ash n 20) j)))))))
+
+(defun files-match-segments-p (node dir)
+  "DIR holds followed.log and exactly the open segments' files."
+  (let ((names (mapcar #'file-namestring (directory (merge-pathnames "*.*" dir))))
+        (want (cons "followed.log"
+                    (loop for (to nil nil from) in (clempo.node::node-segments node)
+                          append (loop for kind in '(:blocks :txs)
+                                       collect (file-namestring (clempo.node::segment-path dir from to kind)))))))
+    (and (= (length names) (length want)) (subsetp want names :test #'string=))))
+
+(defun open-followed (dir head)
+  (let ((node (make-instance 'clempo.node::node-backend :archive-dir dir :head 20000)))
+    (clempo.node::open-hash-log node dir head)
+    node))
+
+(defun drive-followed (node blocks from to on-logged)
+  "Log blocks FROM..TO, folding every 4 blocks and merging what is due."
+  (loop for n from from to to
+        do (log-followed node (svref blocks (1- n)) n)
+           (funcall on-logged n)
+           (when (zerop (mod n 4))
+             (clempo.node::fold-followed node n)
+             (clempo.node::merge-segments node))))
+
+(deftest followed-index-survives-a-crash-at-every-fold-step ()
+  ;; Stop the node at the Kth durable step of folding and merging, for every K: a reopen
+  ;; finds every logged hash exactly once, and following on to the end keeps that true
+  ;; and leaves no stray files.
+  (let* ((total 24)
+         (blocks (map 'vector #'blocks:decode-block (synthetic-chain total)))
+         (seen '()))
+    (loop for crash-at from 1
+          for crashed = nil
+          do (with-temp-dirs (index)
+               (let ((node (open-followed index 0)) (head 0) (count 0))
+                 (handler-case
+                     (let ((clempo.node::*fold-step-hook*
+                             (lambda (step)
+                               (when (= (incf count) crash-at) (error 'simulated-crash :step step)))))
+                       (drive-followed node blocks 1 total (lambda (n) (setf head n))))
+                   (simulated-crash (c) (setf crashed (crash-step c)) (pushnew crashed seen)))
+                 (close (clempo.node::node-hash-log node))
+                 (let ((again (open-followed index head)))
+                   (unwind-protect
+                        (progn
+                          (is (every-hash-once-p again blocks head) "crash ~D at ~S" crash-at crashed)
+                          (drive-followed again blocks (1+ head) total (lambda (n) n))
+                          (is (every-hash-once-p again blocks total) "crash ~D at ~S, then on" crash-at crashed)
+                          (is (files-match-segments-p again index))
+                          (is (null (clempo.node::due-merge (clempo.node::node-segments again)))))
+                     (clempo.node::close-hash-log again)))))
+          until (null crashed))
+    (is (null (set-difference '(:fold-txs-written :fold-blocks-written :fold-log-written
+                                :fold-log-renamed :merge-txs-written :merge-blocks-written
+                                :merge-input-deleted)
+                              seen)))))
+
+(deftest followed-segments-merge-in-the-background ()
+  ;; 16 folds through the background merger leave one segment per set bit of the fold
+  ;; count, not 16; the merged segments resolve every hash once and survive a restart.
+  (let* ((total 64)
+         (blocks (map 'vector #'blocks:decode-block (synthetic-chain total))))
+    (with-temp-dirs (index)
+      (let ((node (open-followed index 0)))
+        (loop for n from 1 to total
+              do (log-followed node (svref blocks (1- n)) n)
+                 (when (and (zerop (mod n 4)) (clempo.node::fold-followed node n))
+                   (clempo.node::start-segment-merge node)))
+        (sb-thread:join-thread (clempo.node::node-merger node))
+        (let ((segments (clempo.node::node-segments node)))
+          (is (null (clempo.node::due-merge segments)))
+          (is (<= (length segments) 2) "~D segments" (length segments))
+          (is= '(0 . 64) (cons (fourth (car (last segments))) (first (first segments)))))
+        (is (every-hash-once-p node blocks total))
+        (clempo.node::close-hash-log node)
+        (let ((again (open-followed index total)))
+          (unwind-protect
+               (progn (is (every-hash-once-p again blocks total))
+                      (is (files-match-segments-p again index)))
+            (clempo.node::close-hash-log again)))))))
+
 (deftest hash-index-seeded-from-a-complete-chunk ()
   (let ((chain (synthetic-chain archive-chunk)))
     (with-temp-dirs (archive index)

@@ -285,6 +285,7 @@
   ("src/validator/network.lisp" "SPAWN-LOCKED" 1 "CALL-WITH-VALIDATOR-NETWORK" "Network shutdown joins tracked workers; link cleanup joins its writer.")
   ("src/node/node.lisp" "START-FORWARDER" 1 "STOP-FORWARDER" "Node shutdown joins the relay worker.")
   ("src/node/node.lisp" "START-JIT-WORKER" 1 "STOP-JIT-WORKER" "Node shutdown retires and joins its JIT worker.")
+  ("src/node/node.lisp" "START-SEGMENT-MERGE" 1 "CLOSE-HASH-LOG" "Node shutdown stops and joins the followed segment merger.")
   ("src/node/repl.lisp" "ACCEPT-CLIENT" 1 "STOP-REPL" "REPL shutdown joins tracked client sessions.")
   ("src/node/repl.lisp" "START-REPL" 1 "STOP-REPL" "REPL shutdown joins its acceptor.")
   ("src/node/workers.lisp" "CALL-WITH-WORKERS" 1 "CALL-WITH-WORKERS" "The scoped worker group joins during unwind.")

@@ -64,7 +64,11 @@
    (hash-log :initform nil :accessor node-hash-log)
    (index-dir :initform nil :accessor node-index-dir)
    (folded-to :initform -1 :accessor node-folded-to)
-   (segments :initform '() :accessor node-segments)   ; (to blocks-index . txs-index), newest first
+   (segments :initform '() :accessor node-segments)   ; (to blocks-index txs-index from), newest first
+   (segment-lock :initform (sb-thread:make-mutex :name "followed segments") :reader node-segment-lock)
+   (merger :initform nil :accessor node-merger)        ; the segment merge thread, joined on close
+   (merging :initform nil :accessor node-merging)      ; true while the merger has work
+   (merges-stopped :initform nil :accessor node-merges-stopped)
    (followed-blocks :initform (make-hash-table :test 'equalp :synchronized t) :reader node-followed-blocks)
    (followed-txs :initform (make-hash-table :test 'equalp :synchronized t) :reader node-followed-txs)
    (started :initform (clempo.io:now-seconds) :reader node-started)))
@@ -76,9 +80,23 @@
 ;;; then that chunk's entries fold into a sorted segment pair followed-FROM-TO-{txs,blocks}.idx
 ;;; in the same format, and the log is rewritten without them. RAM holds at most one chunk
 ;;; of entries. Each segment file is written whole and renamed into place, txs before
-;;; blocks, and a segment counts only once its blocks file exists, so a crash at any point
+;;; blocks, and a segment counts only once both files exist, so a crash at any point
 ;;; leaves either the old log (still loaded) or the segment (whose entries the log loader
 ;;; then skips).
+;;;
+;;; Segments merge in the background, tiered like a binary counter: two adjacent segments
+;;; merge when the older spans no more blocks than the newer, so N folded chunks leave
+;;; about log2 N segments. A merge writes the covering segment FROM-TO (txs, then blocks)
+;;; before deleting its two inputs (blocks, then txs). The loader keeps only complete
+;;; segments that no other complete segment covers and deletes everything else (inputs a
+;;; crash left behind, half-written pairs, temporaries), so every hash sits in exactly one
+;;; segment whatever step a crash interrupts.
+
+(defvar *fold-step-hook* nil
+  "When non-NIL, called with a keyword after each durable step of a fold or a segment merge;
+the crash tests signal from it to stop the node there.")
+
+(defun fold-step (step) (when *fold-step-hook* (funcall *fold-step-hook* step)))
 
 (define-constant +hash-record+ 41)
 
@@ -101,18 +119,31 @@
 (defun segment-path (dir from to kind)
   (format nil "~Afollowed-~12,'0D-~12,'0D-~(~A~).idx" (namestring dir) from to kind))
 
+(defun segment-range (path)
+  "(from . to) of the followed segment file PATH."
+  (let ((name (pathname-name path)))
+    (cons (parse-integer name :start 9 :end 21) (parse-integer name :start 22 :end 34))))
+
 (defun load-segments (node dir)
-  "Open every complete followed segment in DIR; returns the last block they cover, or -1."
-  (let ((segments '()))
-    (dolist (path (directory (merge-pathnames "followed-*-blocks.idx" dir)))
-      (let* ((name (pathname-name path))
-             (from (parse-integer name :start 9 :end 21))
-             (to (parse-integer name :start 22 :end 34)))
-        (push (list* to (backend:open-index path)
-                     (backend:open-index (segment-path dir from to :txs)))
-              segments)))
-    (setf (node-segments node) (sort segments #'> :key #'first))
-    (if segments (first (first (node-segments node))) -1)))
+  "Open every complete followed segment in DIR that no other covers, deleting the rest;
+returns the last block they cover, or -1."
+  (dolist (path (directory (merge-pathnames "followed*.tmp" dir))) (delete-file path))
+  (let* ((complete (loop for path in (directory (merge-pathnames "followed-*-blocks.idx" dir))
+                         for (from . to) = (segment-range path)
+                         when (probe-file (segment-path dir from to :txs)) collect (cons from to)))
+         (kept (remove-if (lambda (r)
+                            (find-if (lambda (o) (and (not (eq o r)) (<= (car o) (car r))
+                                                      (<= (cdr r) (cdr o))))
+                                     complete))
+                          complete)))
+    (dolist (path (directory (merge-pathnames "followed-*.idx" dir)))
+      (unless (member (segment-range path) kept :test #'equal) (delete-file path)))
+    (setf (node-segments node)
+          (sort (loop for (from . to) in kept
+                      collect (list to (backend:open-index (segment-path dir from to :blocks))
+                                    (backend:open-index (segment-path dir from to :txs)) from))
+                #'> :key #'first))
+    (if kept (first (first (node-segments node))) -1)))
 
 (defun open-hash-log (node dir head)
   "Open DIR's followed segments, load followed.log entries past them up to HEAD (a crash may
@@ -159,10 +190,12 @@ log and from memory."
         (multiple-value-bind (bkeys bvalues bhashes) (take (node-followed-blocks node) 0)
           (when (zerop (length bkeys)) (return-from fold-followed nil))
           (backend:write-index (segment-path dir from through :txs) through tkeys tvalues)
+          (fold-step :fold-txs-written)
           (backend:write-index (segment-path dir from through :blocks) through bkeys bvalues)
-          (push (list* through (backend:open-index (segment-path dir from through :blocks))
-                       (backend:open-index (segment-path dir from through :txs)))
-                (node-segments node))
+          (fold-step :fold-blocks-written)
+          (let ((segment (list through (backend:open-index (segment-path dir from through :blocks))
+                               (backend:open-index (segment-path dir from through :txs)) from)))
+            (sb-thread:with-mutex ((node-segment-lock node)) (push segment (node-segments node))))
           (setf (node-folded-to node) through)
           (dolist (h thashes) (remhash h (node-followed-txs node)))
           (dolist (h bhashes) (remhash h (node-followed-blocks node)))
@@ -174,7 +207,9 @@ log and from memory."
                                      :if-exists :supersede)
               (write-hash-records out 0 (node-followed-blocks node))
               (write-hash-records out 1 (node-followed-txs node)))
+            (fold-step :fold-log-written)
             (rename-file tmp path)
+            (fold-step :fold-log-renamed)
             (setf (node-hash-log node)
                   (open path :direction :output :element-type '(unsigned-byte 8)
                              :if-exists :append :if-does-not-exist :create)))
@@ -194,7 +229,70 @@ log and from memory."
               do (put 1 (transactions:transaction-hash tx) (logior (ash number 20) j))))
       (finish-output out)
       (when (zerop (mod (1+ number) archive:+chunk-blocks+))
-        (fold-followed node number)))))
+        (when (fold-followed node number) (start-segment-merge node))))))
+
+(defun segment-span (segment) (- (first segment) (fourth segment) -1))
+
+(defun due-merge (segments)
+  "The newest adjacent (newer . older) pair whose older segment spans no more blocks."
+  (loop for (newer older) on segments
+        while older
+        when (<= (segment-span older) (segment-span newer)) return (cons newer older)))
+
+(defun next-merge (node &optional idle-when-done)
+  "The due pair to merge next, or NIL when none is due or merging stopped; then, when
+IDLE-WHEN-DONE, marks the merger idle in the same critical section, so a fold that lands
+after this either sees the merger idle and starts another or is picked up by this one."
+  (sb-thread:with-mutex ((node-segment-lock node))
+    (or (and (not (node-merges-stopped node)) (due-merge (node-segments node)))
+        (progn (when idle-when-done (setf (node-merging node) nil)) nil))))
+
+(defun merge-pair (node pair)
+  "Merge the adjacent segments PAIR (newer . older) into one and delete them."
+  (let ((dir (node-index-dir node)))
+    (destructuring-bind ((to blocks-b txs-b from-b) . (to-a blocks-a txs-a from)) pair
+      (backend:merge-indexes (segment-path dir from to :txs) to txs-a txs-b)
+      (fold-step :merge-txs-written)
+      (backend:merge-indexes (segment-path dir from to :blocks) to blocks-a blocks-b)
+      (fold-step :merge-blocks-written)
+      (let ((merged (list to (backend:open-index (segment-path dir from to :blocks))
+                          (backend:open-index (segment-path dir from to :txs)) from)))
+        (sb-thread:with-mutex ((node-segment-lock node))
+          (setf (node-segments node)
+                (loop for s in (node-segments node)
+                      unless (eq s (cdr pair)) collect (if (eq s (car pair)) merged s)))))
+      (loop for (f . l) in (list (cons from to-a) (cons from-b to))
+            do (dolist (kind '(:blocks :txs))
+                 (delete-file (segment-path dir f l kind))
+                 (fold-step :merge-input-deleted)))
+      (log-node "node: merged followed segments ~D..~D and ~D..~D" from to-a from-b to))))
+
+(defun merge-segments (node &optional idle-when-done)
+  "Merge due segment pairs until none is due or merging stops."
+  (loop for pair = (next-merge node idle-when-done)
+        while pair do (merge-pair node pair)))
+
+(defun start-segment-merge (node)
+  "Start the background merger unless it is already working."
+  (sb-thread:with-mutex ((node-segment-lock node))
+    (when (and (not (node-merging node)) (not (node-merges-stopped node))
+               (due-merge (node-segments node)))
+      (when (node-merger node) (sb-thread:join-thread (node-merger node) :default nil))
+      (setf (node-merging node) t
+            (node-merger node)
+            (sb-thread:make-thread
+             (lambda ()
+               (handler-case (merge-segments node t)
+                 (error (e)
+                   (log-node "node: merging followed segments failed: ~A" e)
+                   (sb-thread:with-mutex ((node-segment-lock node)) (setf (node-merging node) nil)))))
+             :name "followed segment merge")))))
+
+(defun close-hash-log (node)
+  "Stop merging after the merge in progress, join the merger and close the log."
+  (sb-thread:with-mutex ((node-segment-lock node)) (setf (node-merges-stopped node) t))
+  (when (node-merger node) (sb-thread:join-thread (node-merger node) :default nil))
+  (when (node-hash-log node) (close (node-hash-log node))))
 
 (defun segment-block-number (node hash)
   (loop for (to blocks) in (node-segments node)
@@ -204,7 +302,7 @@ log and from memory."
                    do (return-from segment-block-number n))))
 
 (defun segment-tx-location (node hash)
-  (loop for (to blocks . txs) in (node-segments node)
+  (loop for (to blocks txs) in (node-segments node)
         do (loop for v in (backend:index-lookup txs (backend:hash-prefix hash))
                  for n = (ash v -20) for j = (ldb (byte 20 0) v)
                  for raw = (backend:backend-block-raw node n)
@@ -790,7 +888,7 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
          (lambda () (when rpc-server (server:stop-server rpc-server)))
          (lambda () (when metrics-server (metrics:stop-metrics-server metrics-server)))
          (lambda () (when forwarder (stop-forwarder forwarder)))
-         (lambda () (when (and node-ref (node-hash-log node-ref)) (close (node-hash-log node-ref))))
+         (lambda () (when (and node-ref (node-hash-log node-ref)) (close-hash-log node-ref)))
          (lambda () (when jit-worker (stop-jit-worker jit-worker)))
          (lambda () (when history-writer
                       (history:history-flush history-writer :db (store:store-db datastore))))

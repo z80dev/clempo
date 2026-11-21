@@ -23,7 +23,7 @@ each block's receipts checked against its header's receipts root before they are
            #:block-hash-of-raw #:scan-block-hashes #:block-parts
            #:receipts-store-get #:receipts-store-put #:missing-receipts
            #:archive-backend-receipts #:archive-backend-upstream
-           #:write-index #:open-index #:index-lookup #:hash-prefix))
+           #:write-index #:open-index #:index-lookup #:hash-prefix #:merge-indexes))
 
 (in-package #:clempo.rpc.chain)
 
@@ -369,6 +369,29 @@ checked against the file's length, so a lookup reads only inside the mapping."
         (loop for i of-type fixnum from lo below (aref offsets (1+ b))
               while (= prefix (u64 (+ base (* 16 i))))
               collect (u64 (+ base 8 (* 16 i))))))))
+
+(defun merge-indexes (path covered a b)
+  "Write PATH covering COVERED with every entry of the open indexes A and B (either may be
+NIL). Both are sorted by key, so a linear merge hands WRITE-INDEX already-sorted input."
+  (flet ((entries (index)
+           (if (null index)
+               (values 0 0 (sb-sys:int-sap 0))
+               (values (aref (hindex-offsets index) +buckets+)
+                       (+ +index-header+ (* 8 (1+ +buckets+))) (hindex-sap index))))
+         (u64 (sap pos)
+           (let ((n 0)) (dotimes (i 8 n) (setf n (logior (ash n 8) (sb-sys:sap-ref-8 sap (+ pos i))))))))
+    (multiple-value-bind (na basea sapa) (entries a)
+      (multiple-value-bind (nb baseb sapb) (entries b)
+        (let ((keys (make-array (+ na nb) :element-type '(unsigned-byte 64)))
+              (vals (make-array (+ na nb) :element-type '(unsigned-byte 64)))
+              (i 0) (j 0))
+          (dotimes (p (+ na nb))
+            (let ((ka (and (< i na) (u64 sapa (+ basea (* 16 i)))))
+                  (kb (and (< j nb) (u64 sapb (+ baseb (* 16 j))))))
+              (if (and ka (or (null kb) (<= ka kb)))
+                  (setf (aref keys p) ka (aref vals p) (u64 sapa (+ basea 8 (* 16 i))) i (1+ i))
+                  (setf (aref keys p) kb (aref vals p) (u64 sapb (+ baseb 8 (* 16 j))) j (1+ j)))))
+          (write-index path covered keys vals))))))
 
 ;;; Receipts store: per archive chunk, an append-only file of records
 ;;;   u64 block | u32 length | RLP list of receipt envelopes
