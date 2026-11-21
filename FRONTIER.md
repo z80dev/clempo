@@ -5,7 +5,7 @@
 | R0 Gate | scaffold: base, io, keccak, RLP, JSON, http, JSON-RPC client, layer check | - | 2026-11-20 |
 | R1 Decode | mainnet 640/640 (T0..T13), moderato 33/33 | 1edd52f | 2026-11-21 |
 | R2 Genesis | yes: matching state roots and block hashes on mainnet and Moderato | `ec20b6b` | 2026-11-21 |
-| R3 Replay | 6,500,000 (every block 1..6,500,000 from genesis matches gas, receipts root, bloom and state root, state on disk, no heals; through T1/T1A and T1B; run continuing toward the tip) | `a475482` | 2026-11-21 |
+| R3 Replay | 14,695,803 (every block 1..14,695,803 from genesis matches gas, receipts root, bloom and state root, state on disk, no heals; through T1/T1A, T1B, T1C and T2; run continuing toward the tip) | `d1d277e` | 2026-11-21 |
 | R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `750c66b` | 2026-11-21 |
 | R3p Precompiles | 4,986/4,992 (goempo's frontier; every Tempo precompile T0..T14; the 6 differences are T14 keychain grants where clempo follows tempo c8b89f9, newer than the corpus: +2,600 gas root-retirement probe) | `fd2d4cf` | 2026-11-21 |
 | R4 Follow | - | | |
