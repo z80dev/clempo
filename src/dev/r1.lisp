@@ -150,3 +150,24 @@
          (passed (loop for result in results sum (clempo.json:jget result "passed")))
          (total (loop for result in results sum (clempo.json:jget result "sampled"))))
     (clempo.json:jobject "score" (format nil "~D/~D" passed total) "chains" (coerce results 'vector))))
+
+(defcommand "bench-types" (args)
+  "measure R1 decode/re-encode CPU, wall time and allocation [-chain mainnet] [-repeat 100]"
+  (let* ((path (r1-cache-path (arg args :chain "mainnet")))
+         (repeats (arg-int args :repeat 100))
+         (raws (with-open-file (in path)
+                 (loop for line = (read-line in nil) while line
+                       collect (hex->octets (clempo.json:jget (clempo.json:parse-json line) "raw"))))))
+    (invariant (plusp repeats) "repeat count must be positive")
+    (let ((cpu (get-internal-run-time)) (wall (get-internal-real-time))
+          (bytes (sb-ext:get-bytes-consed)))
+      (dotimes (i repeats)
+        (dolist (raw raws) (clempo.blocks:encode-block (clempo.blocks:decode-block raw))))
+      (let ((cpu-seconds (float (/ (- (get-internal-run-time) cpu) internal-time-units-per-second) 1d0))
+            (wall-seconds (float (/ (- (get-internal-real-time) wall) internal-time-units-per-second) 1d0))
+            (allocated (- (sb-ext:get-bytes-consed) bytes)))
+        (write-line
+         (clempo.json:to-json-string
+          (clempo.json:jobject "blocks" (* repeats (length raws)) "cpuSeconds" cpu-seconds
+                               "wallSeconds" wall-seconds "bytesConsed" allocated))))))
+  0)

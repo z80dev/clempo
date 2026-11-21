@@ -4,10 +4,10 @@
   :depends-on ("clempo-base" "clempo-crypto" "clempo-codec" "clempo-trie")
   :serial t
   :components ((:file "defrlp") (:file "headers") (:file "signatures")
-               (:file "transactions") (:file "receipts") (:file "blocks")))
+               (:file "transactions") (:file "payments") (:file "receipts") (:file "blocks")))
 
 (defsystem "clempo-types/tests"
   :depends-on ("clempo-types" "clempo-io")
   :pathname "../../tests/types/"
   :serial t
-  :components ((:file "signatures") (:file "transactions") (:file "blocks")))
+  :components ((:file "signatures") (:file "transactions") (:file "payments") (:file "blocks")))

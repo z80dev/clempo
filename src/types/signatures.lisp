@@ -1,7 +1,21 @@
 (defpackage #:clempo.signatures
   (:use #:cl #:clempo.base)
-  (:export #:recover-signature #:signature-kind #:key-authorization-signer
-           #:authorization-signer #:signature-error))
+  (:export #:recover-signature #:signature-kind #:signature-inner-kind
+           #:key-authorization-signer #:authorization-signer #:signature-error
+           #:parse-key-authorization #:key-authorization
+           #:key-authorization-chain-id #:key-authorization-key-type
+           #:key-authorization-key-id #:key-authorization-expiry
+           #:key-authorization-limits #:key-authorization-allowed-calls
+           #:key-authorization-witness #:key-authorization-is-admin
+           #:key-authorization-account #:key-authorization-limit-count
+           #:key-authorization-call-scope-count #:key-authorization-selector-count
+           #:key-authorization-recipient-count
+           #:key-authorization-limit #:key-authorization-limit-token
+           #:key-authorization-limit-amount #:key-authorization-limit-period
+           #:key-authorization-call-scope #:key-authorization-call-scope-target
+           #:key-authorization-call-scope-selector-rules
+           #:key-authorization-selector-rule #:key-authorization-selector-rule-selector
+           #:key-authorization-selector-rule-recipients))
 
 (in-package #:clempo.signatures)
 
@@ -12,22 +26,34 @@
 (defun reject-signature (reason)
   (error 'signature-error :reason reason))
 
+(defun signature-shape (signature start)
+  "Return outer and primitive kinds without copying a keychain's inner payload."
+  (let ((n (- (length signature) start)))
+    (cond ((= n 65) (values :secp256k1 :secp256k1))
+          ((< n 2) (reject-signature "missing signature payload"))
+          (t (case (aref signature start)
+               (1 (unless (= n 130) (reject-signature "P256 length"))
+                  (values :p256 :p256))
+               (2 (unless (<= 129 n 2049) (reject-signature "WebAuthn length"))
+                  (values :webauthn :webauthn))
+               ((3 4)
+                (unless (> n 21) (reject-signature "keychain length"))
+                (unless (zerop start) (reject-signature "nested keychain"))
+                (multiple-value-bind (outer inner) (signature-shape signature (+ start 21))
+                  (declare (ignore outer))
+                  (values (if (= (aref signature start) 3) :keychain-v1 :keychain-v2)
+                          inner)))
+               (otherwise (reject-signature "unknown signature type")))))))
+
 (defun signature-kind (signature)
   "Validate the wire shape and identify the outer scheme. 65 bytes always means secp256k1."
   (unless (typep signature 'octets) (reject-signature "expected octets"))
-  (let ((n (length signature)))
-    (cond ((= n 65) :secp256k1)
-          ((< n 2) (reject-signature "missing signature payload"))
-          (t (case (aref signature 0)
-               (1 (unless (= n 130) (reject-signature "P256 length")) :p256)
-               (2 (unless (<= 129 n 2049) (reject-signature "WebAuthn length")) :webauthn)
-               ((3 4)
-                (unless (> n 21) (reject-signature "keychain length"))
-                (let ((inner (signature-kind (subseq signature 21))))
-                  (when (member inner '(:keychain-v1 :keychain-v2))
-                    (reject-signature "nested keychain")))
-                (if (= (aref signature 0) 3) :keychain-v1 :keychain-v2))
-               (otherwise (reject-signature "unknown signature type")))))))
+  (nth-value 0 (signature-shape signature 0)))
+
+(defun signature-inner-kind (signature)
+  "Validate the same wire shape as SIGNATURE-KIND and return its primitive scheme."
+  (unless (typep signature 'octets) (reject-signature "expected octets"))
+  (nth-value 1 (signature-shape signature 0)))
 
 (defun base64url-hash (hash)
   (let ((out (make-string 43))
@@ -248,6 +274,115 @@ Keychain authorization in on-chain state and fork-version gating remain the call
                                 (reject-signature "invalid admin marker")) 1)))
                 (8 (if (absent-option-p value) value (wire-address value)))))))
       (trim-absent-options fields 3))))
+
+;;; Parsed executor view. All scalar wire values, including selectors, witnesses
+;;; and addresses, are integers. Read-only slots and defensive list accessors
+;;; prevent callers or later mutation of the decoded RLP from changing the view.
+(defstruct (key-authorization-limit (:constructor %make-key-authorization-limit))
+  (token 0 :read-only t) (amount 0 :read-only t) (period 0 :read-only t))
+
+(defstruct (key-authorization-selector-rule
+             (:constructor %make-key-authorization-selector-rule)
+             (:conc-name %key-authorization-selector-rule-))
+  (selector 0 :read-only t) (recipients nil :read-only t))
+
+(defun key-authorization-selector-rule-selector (rule)
+  (%key-authorization-selector-rule-selector rule))
+
+(defun key-authorization-selector-rule-recipients (rule)
+  (%key-authorization-selector-rule-recipients rule))
+
+(defstruct (key-authorization-call-scope
+             (:constructor %make-key-authorization-call-scope)
+             (:conc-name %key-authorization-call-scope-))
+  (target 0 :read-only t) (selector-rules nil :read-only t))
+
+(defun key-authorization-call-scope-target (scope)
+  (%key-authorization-call-scope-target scope))
+
+(defun key-authorization-call-scope-selector-rules (scope)
+  (%key-authorization-call-scope-selector-rules scope))
+
+(defstruct (key-authorization (:constructor %make-key-authorization)
+                              (:conc-name %key-authorization-))
+  (chain-id 0 :read-only t) (key-type 0 :read-only t) (key-id 0 :read-only t)
+  (expiry nil :read-only t) (limits nil :read-only t)
+  (allowed-calls nil :read-only t) (witness nil :read-only t)
+  (is-admin nil :read-only t) (account nil :read-only t)
+  (limit-count 0 :read-only t) (call-scope-count 0 :read-only t)
+  (selector-count 0 :read-only t) (recipient-count 0 :read-only t))
+
+(macrolet ((readers (&rest slots)
+             `(progn ,@(loop for slot in slots
+                             for public = (intern (format nil "KEY-AUTHORIZATION-~A" slot))
+                             for private = (intern (format nil "%KEY-AUTHORIZATION-~A" slot))
+                             collect `(defun ,public (view) (,private view))))))
+  (readers chain-id key-type key-id expiry witness is-admin account
+           limit-count call-scope-count selector-count recipient-count))
+
+(defun key-authorization-limits (view)
+  (%key-authorization-limits view))
+
+(defun key-authorization-allowed-calls (view)
+  (%key-authorization-allowed-calls view))
+
+(defun parse-key-authorization (key-auth)
+  "Parse decoded SignedKeyAuthorization (authorization signature), without recovery.
+Uses the signing normalization and rejects keychain approval signatures.
+KEY-TYPE is 0/1/2 (secp256k1/P256/WebAuthn). EXPIRY, WITNESS and
+ACCOUNT are NIL when absent; integer zero is a present witness/account.
+LIMITS and ALLOWED-CALLS are :ABSENT when unrestricted, NIL when explicitly
+empty, otherwise borrowed read-only lists of immutable records. A limit PERIOD
+of zero means one-time. Empty selector rules allow any selector; empty recipients
+allow any recipient. Do not mutate returned lists. IS-ADMIN is a boolean.
+Counts are zero for absent lists; reading them or lists does not allocate.
+This validates shape only, not signatures, chain/fork policy or state."
+  (unless (and (listp key-auth) (= (length key-auth) 2))
+    (reject-signature "key authorization shape"))
+  (let ((fields (key-authorization-fields (first key-auth)))
+        (selector-count 0) (recipient-count 0))
+    (when (member (signature-kind (second key-auth)) '(:keychain-v1 :keychain-v2))
+      (reject-signature "keychain cannot authorize a key"))
+    (labels ((option (i)
+               (let ((value (nth i fields)))
+                 (if (or (>= i (length fields)) (absent-option-p value))
+                     :absent value)))
+             (scalar (i)
+               (let ((value (option i))) (unless (eq value :absent) value)))
+             (address (value) (octets->integer value)))
+      (let* ((limits (option 4))
+             (calls (option 5))
+             (parsed-limits
+               (if (eq limits :absent) :absent
+                   (mapcar (lambda (limit)
+                             (%make-key-authorization-limit
+                              :token (address (first limit)) :amount (second limit)
+                              :period (or (third limit) 0))) limits)))
+             (parsed-calls
+               (if (eq calls :absent) :absent
+                   (mapcar
+                    (lambda (scope)
+                      (%make-key-authorization-call-scope
+                       :target (address (first scope))
+                       :selector-rules
+                       (mapcar (lambda (rule)
+                                 (incf selector-count)
+                                 (incf recipient-count (length (second rule)))
+                                 (%make-key-authorization-selector-rule
+                                  :selector (octets->integer (first rule))
+                                  :recipients (mapcar #'address (second rule))))
+                               (second scope))))
+                    calls))))
+        (%make-key-authorization
+         :chain-id (first fields) :key-type (second fields)
+         :key-id (address (third fields)) :expiry (scalar 3)
+         :limits parsed-limits :allowed-calls parsed-calls
+         :witness (let ((value (scalar 6))) (and value (octets->integer value)))
+         :is-admin (not (null (scalar 7)))
+         :account (let ((value (scalar 8))) (and value (address value)))
+         :limit-count (if (eq limits :absent) 0 (length limits))
+         :call-scope-count (if (eq calls :absent) 0 (length calls))
+         :selector-count selector-count :recipient-count recipient-count)))))
 
 (defun key-authorization-signer (key-auth)
   "Recover a SignedKeyAuthorization decoded as (authorization signature)."
