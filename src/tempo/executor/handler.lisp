@@ -253,6 +253,16 @@ non-creditable for the rest of the transaction (NonCreditableSlots)."
                    (fee-collected fee) (block-env-beneficiary (ctx-env ctx)) (ctx-skip-liquidity-check ctx)))
         (contract:precompile-condition (c)
           (state:rollback evm:*world* cp)
+          (when (and (typep c 'contract:precompile-revert)
+                     (eq (contract:precompile-revert-name c) 'clempo.fee-manager::insufficient-liquidity))
+            (let ((validator-token
+                    (handler-case (with-protocol-storage (:static t)
+                                    (clempo.fee-manager:validator-token (block-env-beneficiary (ctx-env ctx))))
+                      (contract:precompile-condition () nil))))
+              (error 'insufficient-amm-liquidity
+                     :tx-index *tx-index* :required (fee-collected fee)
+                     :user-token (and validator-token (fee-token fee)) :validator-token validator-token
+                     :reason (format nil "fee collection failed: ~A" c))))
           (invalid "fee collection failed: ~A" c)))))
   (when (and (forks:spec>= :t7) (not (zerop (fee-collected fee))))
     (let* ((token (fee-token fee)) (payer (fee-payer fee))
@@ -469,6 +479,9 @@ WORLD, when given, is an empty clempo.state world over DB to reuse (STATE:RESET-
     (when db-block (store:db-begin-block db))
     (with-block-context (ctx)
       (when (and block (blocks:block-withdrawals block)) (invalid "withdrawals are not permitted"))
+      ;; parent-state checks, before any system call writes
+      (check-proposer-beneficiary db env)
+      (check-boundary-outcome env)
       (apply-history-and-beacon-calls ctx :parent-beacon-block-root (block-env-parent-beacon-block-root env))
       (apply-pre-execution-changes db env block)
       (apply-zone-factory ctx))

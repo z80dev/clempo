@@ -290,3 +290,48 @@ end-of-block committee call. Returns the drained changes."
           (setf (aref d depth) #xc0)
           (check d)))
       (is (< 8000 cases)))))
+
+;;; A T15-genesis reference devnet (data/README.md, t15-devnet-*): blocks carry a proposer,
+;;; so from T14 the beneficiary must be the proposer's ValidatorConfigV2 fee recipient, and
+;;; from T15 the boundary block 59's DKG outcome must be the one V2 in its parent state implies.
+
+(deftest t15-devnet-proposer-and-boundary-checks ()
+  (let* ((chain (clempo.chainspec:load-chainspec (system-fixture "t15-devnet-genesis.json")))
+         (*chain* chain)
+         (text (clempo.io:read-file-string (system-fixture "t15-devnet-blocks.txt")))
+         (blocks (coerce (loop for start = 0 then (1+ end)
+                               for end = (or (position #\Newline text :start start) (length text))
+                               for line = (string-trim '(#\Space #\Return) (subseq text start end))
+                               unless (string= line "") collect (blocks:decode-block (hex->octets line))
+                               while (< end (length text)))
+                         'vector))
+         (db (genesis-db :chain chain))
+         (result (replay-blocks db 1 58 :chain chain :block-fn (lambda (n) (aref blocks (1- n)))))
+         (boundary (aref blocks 58)))
+    (is= 58 (replay-result-matched-through result))
+    (flet ((begin (mutate)
+             (let ((env (clempo.executor::header-block-env (blocks:block-header boundary) :chain chain)))
+               (funcall mutate env)
+               (unwind-protect (progn (clempo.executor:begin-block db env :block boundary) :ok)
+                 (store:db-revert-block db)))))
+      (is (eq :ok (begin #'identity)))
+      (is (clempo.executor::block-env-proposer
+           (clempo.executor::header-block-env (blocks:block-header boundary) :chain chain)))
+      ;; a beneficiary other than the proposer's fee recipient
+      (signals invalid-transaction
+               (begin (lambda (env) (incf (clempo.executor::block-env-beneficiary env)))))
+      ;; a proposer V2 does not know
+      (signals invalid-transaction
+               (begin (lambda (env) (setf (clempo.executor::block-env-proposer env) (integer->octets 7 32)))))
+      ;; trailing bytes after the outcome (the committee call alone would accept them)
+      (signals invalid-transaction
+               (begin (lambda (env) (setf (clempo.executor::block-env-extra-data env)
+                                          (octets-concat (clempo.executor::block-env-extra-data env) (octets-of 0))))))
+      ;; the full-DKG flag (the outcome's last byte) flipped
+      (signals invalid-transaction
+               (begin (lambda (env)
+                        (let ((extra (copy-seq (clempo.executor::block-env-extra-data env))))
+                          (setf (aref extra (1- (length extra))) (- 1 (aref extra (1- (length extra)))))
+                          (setf (clempo.executor::block-env-extra-data env) extra))))))
+    (is (null (replay-result-stopped (replay-blocks db 59 60 :chain chain
+                                                    :block-fn (lambda (n) (aref blocks (1- n)))))))))

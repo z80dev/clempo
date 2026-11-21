@@ -19,8 +19,9 @@
 (defun key-address (key) (clempo.secp256k1:pubkey->address (clempo.secp256k1:private->public key)))
 
 (defun secp-signature (key hash)
+  "r || s || v, v = 27/28 as the reference re-encodes it (see clempo.signatures:canonical-signature)."
   (multiple-value-bind (r s recid) (clempo.secp256k1:sign hash key)
-    (octets-concat (integer->octets r 32) (integer->octets s 32) (octets-of recid))))
+    (octets-concat (integer->octets r 32) (integer->octets s 32) (octets-of (+ 27 recid)))))
 
 (defun owners-of (&rest keys)
   (sort (mapcar (lambda (k) (list (key-address k) 1)) keys) #'< :key #'first))
@@ -127,9 +128,7 @@
                                            (lambda (hash) (configurable-approval d 7 0 2 (list +owner-1+ +owner-2+) hash))
                                            :sponsor-key k0)
                        "derived-first-use-sponsored" vectors)
-        ;; 5. a0 grants the derived account as an access key (key type 3) ... (the reference
-        ;; currently refuses this grant: "admin-signed key authorization account mismatch")
-        (handler-case (progn
+        ;; 5. a0 grants the derived account as an access key (key type 3) ...
         (let* ((fields (list 1337 3 (integer->octets d 20)))
                (grant (list fields (secp-signature k0 (clempo.keccak:keccak256 (clempo.rlp:rlp-encode fields))))))
           (send-and-wait url (aa-transaction url a0 (list (list +path-usd+ (funcall transfer a3 1)))
@@ -145,16 +144,27 @@
                                                (clempo.keccak:keccak256
                                                 (octets-concat (octets-of 4) hash (integer->octets a0 20)))))))
                        "keychain-v2-configurable-key" vectors))
-          (clempo.jsonrpc:rpc-error (c) (log-line (format nil "key type 3 grant refused: ~A" c)))))
-      ;; 7. a1 asks the upgraded account isValidSignature: its 0xef marker runs the shim
-      (let* ((hash (clempo.keccak:keccak256 (string->octets "devnet message")))
-             (sig (configurable-approval a4 (upgrade-salt a4) 1 1 (list +owner-1+) hash)))
-        (send-and-wait url (aa-transaction url a1
-                                           (list (list a4 (clempo.abi:abi-encode-call
-                                                           (clempo.abi:abi-selector "isValidSignature(bytes32,bytes)")
-                                                           '((:bytes-n 32) :bytes) (list (octets->integer hash) sig))))
-                                           (funcall primitive k1))
-                       "is-valid-signature-shim" vectors))
+      ;; 7. a1 asks the upgraded account isValidSignature: its 0xef marker runs the shim, for
+      ;; its owner's approval and for a stranger's (both included; the receipts and roots
+      ;; replay the two branches)
+      (let ((hash (clempo.keccak:keccak256 (string->octets "devnet message"))))
+        (loop for (label signer) in `(("is-valid-signature-shim" ,+owner-1+)
+                                      ("is-valid-signature-shim-stranger" ,+owner-2+))
+              for call = (clempo.abi:abi-encode-call
+                          (clempo.abi:abi-selector "isValidSignature(bytes32,bytes)")
+                          '((:bytes-n 32) :bytes)
+                          (list (octets->integer hash)
+                                (configurable-approval a4 (upgrade-salt a4) 1 1 (list signer) hash)))
+              do (log-line (format nil "~A eth_call: ~A" label
+                                   (handler-case
+                                       (devnet-rpc url "eth_call"
+                                                   (clempo.json:jobject "from" (quantity-hex a1)
+                                                                        "to" (quantity-hex a4)
+                                                                        "data" (octets->hex call :prefix t))
+                                                   "latest")
+                                     (clempo.jsonrpc:rpc-error (c) (format nil "error ~A" c)))))
+                 (send-and-wait url (aa-transaction url a1 (list (list a4 call)) (funcall primitive k1))
+                                label vectors)))
       (with-open-file (s out :direction :output :if-exists :supersede)
         (write-line (clempo.json:to-json-string (coerce (reverse (car vectors)) 'vector)) s))
       (length (car vectors)))))

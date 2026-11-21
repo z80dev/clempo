@@ -36,6 +36,29 @@ measured **417 MB/s** for Keccak-256 on 64 MiB (0.161 s wall) and **62.396 µs
 CPU / 62.452 µs wall** per ecrecover with caller-owned output and scratch
 ([command](docs/BENCH.md#native-curve-kernels)). These use the portable crypto paths.
 
+T14/T15 reference devnet (2026-11-21): `scripts/devnet/devnet.sh --root NET provision
+--tempo ~/dev/tempo/target/release/tempo --hardfork t15 --base-port 24000` (tempo
+568b4fb4, chain 1337, every fork through T15 from genesis, epoch length 60), then
+`bin/clempo-dev devnet-t14-send -rpc http://127.0.0.1:24004 -out V.json`: the Rust node
+accepted and sealed all 7 transactions clempo built (upgradeAccount; an owner-quorum send
+from the upgraded account; a sponsored 2-of-2 derived account's first use; a key-type-3
+grant of that account as an access key; a V2 keychain send through it; isValidSignature on
+the upgraded account's 0xef marker for its owner, eth_call `0x1626ba7e`, and for a
+stranger, `0xffffffff`) and refused the retired root. `bin/clempo-dev devnet-replay` then
+matched gas used, receipts root, logs bloom and state root for every block, 801/801 at
+the last run, with the T14 beneficiary and T15 boundary-outcome checks on. The earlier
+key-type-3 refusal ("admin-signed key authorization account mismatch") was a clempo
+signing-hash bug: the reference hashes its re-encoding, where a secp256k1 parity nested in
+the key authorization (or a Tempo authorization) reads 27/28; clempo hashed the received
+octets. The shim run exposed an interpreter bug (an extra opcode that halts lost the gas
+it charged, 4,808 here). `bin/clempo-dev devnet-rpc-diff -rpc URL -genesis
+NET/network/genesis.json` replays the devnet in-process and sends 17 simulation
+requests (eth_estimateGas, eth_call, eth_simulateV1 with configurableAccountSimulation
+mock witnesses, keyId overrides, and keyAuthorization with keyAuthorizationSimulation) to
+both nodes at the same block: 17/17 identical results or error code and message, after
+mapping the commitment-mismatch error. R3p stays 4,986/4,992 (SignatureVerifier 318/318)
+with the verifier on clempo.signatures' configurable-signature code.
+
 R6 sim (b680aaf): `CLEMPO_BUILD=release bin/clempo-dev score -rung R6 -json` (or
 `bin/clempo-dev sim -scenario r6-4`) runs src/sim/scenarios.lisp: clempo.simplex voters
 (commonware 2026.10.1 voter, Random V1 elector) and one clempo.dkg manager per node, driven

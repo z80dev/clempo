@@ -37,7 +37,6 @@
 (define-constant +account-domain+ (string->octets "tempo:configurable-account:account"))
 (define-constant +config-domain+ (string->octets "tempo:configurable-account:config"))
 (define-constant +upgrade-domain+ (string->octets "tempo:configurable-account:upgrade"))
-(define-constant +signature-domain+ (string->octets "tempo:configurable-account:signature"))
 (define-constant +account-code-hash+ (clempo.keccak:keccak256-integer (octets-of #xef))
   "CONFIGURABLE_ACCOUNT_CODE_HASH: keccak256(0xef), the protocol-installed marker.")
 
@@ -122,23 +121,12 @@
                  (integer->octets (config-version config) 8) (owner-set-octets config)))
 
 (defun derivation-gas (config) (keccak-gas (length (account-preimage config))))
-(defun commitment-preimage-length (config)
-  (+ (length +config-domain+) 32 8 2 (* 21 (length (config-owners config)))))
 
 (defun config-account-address (config)
   (ldb (byte 160 0) (clempo.keccak:keccak256-integer (account-preimage config))))
 
-(defun config-commitment-of (config)
-  "keccak256 of the commitment preimage, without gas."
-  (clempo.keccak:keccak256-integer (commitment-preimage config)))
-
 (defun config-owner-weight (config owner)
   (second (assoc owner (config-owners config))))
-
-(defun configurable-account-digest (inner-digest account version)
-  (clempo.keccak:keccak256-integer
-   (octets-concat +signature-domain+ (integer->octets inner-digest 32)
-                  (integer->octets account 20) (integer->octets version 8))))
 
 (defun abi-owners (owners) (mapcar (lambda (o) (list (first o) (second o))) owners))
 

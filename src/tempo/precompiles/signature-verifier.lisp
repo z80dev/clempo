@@ -72,111 +72,17 @@
         (handler-case (values (clempo.signatures:recover-signature data (integer->octets hash 32)))
           (clempo.signatures:signature-error () nil)))))
 
-;;; Configurable account signatures (configurable_account/mod.rs).
-
-(defstruct (ca-signature (:constructor make-ca-signature (account config signatures)))
-  account config signatures)
-
-(defun rlp-address (item)
-  (unless (and (typep item 'octets) (= (length item) 20)) (malformed))
-  (octets->integer item))
-
-(defun rlp-int (item bytes)
-  (handler-case (clempo.rlp:rlp-decode-integer item :max-bytes bytes)
-    (error () (malformed))))
+;;; Configurable account signatures: clempo.signatures' CONFIGURABLE-SIGNATURE, with its
+;;; decoding (a failure is InvalidFormat), gas, commitment check and owner quorum (a failure
+;;; is InvalidSignature).
 
 (defun parse-configurable (data start)
   "decode_exact::<ConfigurableAccountSignature>(DATA[START..]) and its shape checks."
-  (let ((item (handler-case (clempo.rlp:rlp-decode data :start start)
-                (error () (malformed)))))
-    (unless (and (listp item) (= (length item) 3)) (malformed))
-    (destructuring-bind (account config signatures) item
-      (unless (and (listp config) (= (length config) 4) (listp signatures)) (malformed))
-      (destructuring-bind (salt version threshold owners) config
-        (unless (and (typep salt 'octets) (= (length salt) 32) (listp owners)) (malformed))
-        (let* ((account (rlp-address account))
-               (config (clempo.configurable-account::make-config
-                        (octets->integer salt) (rlp-int version 8) (rlp-int threshold 1)
-                        (mapcar (lambda (o)
-                                  (unless (and (listp o) (= (length o) 2)) (malformed))
-                                  (list (rlp-address (first o)) (rlp-int (second o) 1)))
-                                owners)))
-               (signatures (mapcar (lambda (s)
-                                     (unless (typep s 'octets) (malformed))
-                                     (parse-primitive s))
-                                   signatures)))
-          (when (or (zerop account)
-                    (clempo.configurable-account::config-error config account)
-                    (null signatures)
-                    (> (length signatures) clempo.configurable-account::+max-signatures+)
-                    (some (lambda (s) (> (length (cdr s)) (1+ +max-webauthn-signature-length+)))
-                          signatures))
-            (malformed))
-          (make-ca-signature account config signatures))))))
-
-(defun minimal-octets (n)
-  (if (zerop n) (make-octets 0) (integer->octets n (ceiling (integer-length n) 8))))
-
-(defun witness-octets (sig)
-  "alloy_rlp::encode(account) ++ config.encode()."
-  (let ((config (ca-signature-config sig)))
-    (octets-concat
-     (clempo.rlp:rlp-encode (integer->octets (ca-signature-account sig) 20))
-     (clempo.rlp:rlp-encode
-      (list (integer->octets (clempo.configurable-account::config-salt config) 32)
-            (minimal-octets (clempo.configurable-account::config-version config))
-            (minimal-octets (clempo.configurable-account::config-threshold config))
-            (mapcar (lambda (o) (list (integer->octets (first o) 20) (minimal-octets (second o))))
-                    (clempo.configurable-account::config-owners config)))))))
-
-(defun ca-verification-gas (sig)
-  (let ((witness (witness-octets sig)))
-    (+ (reduce #'+ (ca-signature-signatures sig) :key #'primitive-verification-gas)
-       (* 4 (tokens-in-calldata witness))
-       (keccak-gas (clempo.configurable-account::commitment-preimage-length (ca-signature-config sig)))
-       (keccak-gas (+ (length clempo.configurable-account::+signature-domain+) 32 20 8)))))
-
-(defun commitment-valid-p (sig stored)
-  "validate_account_commitment."
-  (let* ((config (ca-signature-config sig))
-         (actual (clempo.configurable-account::config-commitment-of config)))
-    (and (/= actual 0)
-         (or (zerop stored) (= stored actual))
-         (or (/= stored 0)
-             (and (zerop (clempo.configurable-account::config-version config))
-                  (= (clempo.configurable-account::config-account-address config)
-                     (ca-signature-account sig)))))))
-
-(defun approvals-valid-p (sig inner-digest)
-  "verify_approvals and the weight accumulator."
-  (let* ((config (ca-signature-config sig))
-         (threshold (clempo.configurable-account::config-threshold config))
-         (digest (clempo.configurable-account::configurable-account-digest
-                  inner-digest (ca-signature-account sig)
-                  (clempo.configurable-account::config-version config)))
-         (signatures (ca-signature-signatures sig))
-         (count 0) (weight 0) (min-weight nil) (previous nil))
-    (when (zerop threshold) (return-from approvals-valid-p nil))
-    (loop for (approval . more) on signatures
-          do (let* ((owner (or (recover-primitive-signer approval digest)
-                               (return-from approvals-valid-p nil)))
-                    (owner-weight (or (clempo.configurable-account::config-owner-weight config owner)
-                                      (return-from approvals-valid-p nil))))
-               (when (and (plusp count) (>= weight threshold)) (return-from approvals-valid-p nil))
-               (when (zerop owner-weight) (return-from approvals-valid-p nil))
-               (incf count)
-               (when (> count clempo.configurable-account::+max-signatures+)
-                 (return-from approvals-valid-p nil))
-               (when (and previous (>= previous owner)) (return-from approvals-valid-p nil))
-               (setf previous owner)
-               (incf weight owner-weight)
-               (setf min-weight (if min-weight (min min-weight owner-weight) owner-weight))
-               (when (and (>= weight threshold) more) (return-from approvals-valid-p nil))))
-    (and (plusp count) (>= weight threshold)
-         (not (and min-weight (>= weight (+ threshold min-weight)))))))
+  (handler-case (clempo.signatures:parse-configurable-signature data start)
+    (clempo.signatures:signature-error () (malformed))))
 
 ;;; TempoSignature::from_bytes: (:primitive sig), (:keychain account inner version) with
-;;; INNER a primitive (kind . octets) or a CA-SIGNATURE, or (:configurable ca-signature).
+;;; INNER a primitive (kind . octets) or a clempo.signatures CONFIGURABLE-SIGNATURE, or (:configurable signature).
 
 (defun parse-account-signature (data start)
   (let ((n (- (length data) start)))
@@ -193,10 +99,10 @@
       (let ((version (if (= (aref data 0) 3) :v1 :v2)))
         (when (< (length data) 21) (malformed))
         (let ((inner (parse-account-signature data 21)))
-          (when (and (eq version :v1) (ca-signature-p inner)) (malformed))
+          (when (and (eq version :v1) (clempo.signatures:configurable-signature-p inner)) (malformed))
           (list :keychain (octets->integer data :start 1 :end 21) inner version)))
       (let ((sig (parse-account-signature data 0)))
-        (if (ca-signature-p sig) (list :configurable sig) (list :primitive sig)))))
+        (if (clempo.signatures:configurable-signature-p sig) (list :configurable sig) (list :primitive sig)))))
 
 (defun parse-or-invalid-format (data)
   (handler-case (parse-tempo-signature data)
@@ -237,7 +143,7 @@ primitive signature). Signals precompile-revert InvalidFormat / InvalidSignature
   "(values account key-id signature-type) of a V2 keychain signature over a primitive."
   (unless (eq (first parsed) :keychain) (revert 'invalid-format))
   (destructuring-bind (account inner version) (rest parsed)
-    (when (or (eq version :v1) (ca-signature-p inner)) (revert 'invalid-format))
+    (when (or (eq version :v1) (clempo.signatures:configurable-signature-p inner)) (revert 'invalid-format))
     (values account (recover-checked (keychain-signing-hash hash account) inner)
             (primitive-type inner))))
 
@@ -252,16 +158,15 @@ primitive signature). Signals precompile-revert InvalidFormat / InvalidSignature
          commitment)))
 
 (defun verify-configurable-signature-against (account hash sig commitment code-valid)
-  (deduct-gas (+ (ca-verification-gas sig)
-                 (if (zerop commitment)
-                     (clempo.configurable-account::derivation-gas (ca-signature-config sig))
-                     0)))
-  (when (or (/= (ca-signature-account sig) account)
+  (deduct-gas (+ (clempo.signatures:configurable-verification-gas sig)
+                 (if (zerop commitment) (clempo.signatures:configurable-derivation-gas sig) 0)))
+  (when (or (/= (clempo.signatures:configurable-signature-account sig) account)
             (not (clempo.configurable-account:valid-account-p account))
             (not code-valid)
-            (not (commitment-valid-p sig commitment)))
+            (clempo.signatures:configurable-commitment-error sig commitment))
     (return-from verify-configurable-signature-against nil))
-  (unless (approvals-valid-p sig hash) (revert 'invalid-signature))
+  (handler-case (clempo.signatures:verify-configurable-approvals sig (integer->octets hash 32))
+    (clempo.signatures:signature-error () (revert 'invalid-signature)))
   t)
 
 (defun verify-configurable-account (account hash signature)
@@ -273,15 +178,15 @@ configurable account signature of ACCOUNT over HASH against current state."
 
 (defun verify-keychain (account hash signature)
   (let ((parsed (parse-or-invalid-format signature)))
-    (when (and (spec>= :t14) (eq (first parsed) :keychain) (ca-signature-p (third parsed)))
+    (when (and (spec>= :t14) (eq (first parsed) :keychain) (clempo.signatures:configurable-signature-p (third parsed)))
       (destructuring-bind (user delegate version) (rest parsed)
         (declare (ignore version))
         (when (/= user account) (return-from verify-keychain nil))
         (let ((commitment (verify-configurable-signature
-                           (ca-signature-account delegate) (keychain-signing-hash hash account)
+                           (clempo.signatures:configurable-signature-account delegate) (keychain-signing-hash hash account)
                            delegate)))
           (unless commitment (return-from verify-keychain nil))
-          (let ((key (active-key account (ca-signature-account delegate) nil)))
+          (let ((key (active-key account (clempo.signatures:configurable-signature-account delegate) nil)))
             (return-from verify-keychain
               (and key
                    (clempo.keychain::accepts-signature-type-p

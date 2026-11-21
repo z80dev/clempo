@@ -252,6 +252,76 @@ gas. An undecodable outcome or a failed call makes the block invalid."
                                  +system-call-gas-limit+)
           (fail-tx 'invalid-transaction nil "current committee system call failed"))))))
 
+;;; Block checks against ValidatorConfigV2 in the parent state (block.rs
+;;; apply_pre_execution_changes, check_boundary_outcome). Both run before any system call
+;;; changes the block's state, and read untracked and unjournaled, as the reference reads
+;;; the backing database (or a read-only storage context).
+
+(defun parent-validator-config (env reader)
+  "READER's value on V2 as of the parent of ENV's block, or NIL when V2 was not initialized
+by then (common.rs proposer_fee_recipient, dkg_ceremony_config)."
+  (unwind-protect
+       (untracked (evm:*world*)
+         (with-protocol-storage (:static t)
+           (when (and (clempo.validator-config-v2:is-initialized)
+                      (<= (clempo.validator-config-v2:get-initialized-at-height)
+                          (max 0 (1- (block-env-number env)))))
+             (funcall reader))))
+    ;; reads only: drop the warmth and journal they opened
+    (state:discard-tx evm:*world*)))
+
+(defun check-proposer-beneficiary (db env)
+  "From T14, a block with a proposer pays fees to that proposer's ValidatorConfigV2 fee
+recipient in the parent state (DB, before the block writes): the beneficiary must equal it,
+and a proposer without a V2 entry is invalid."
+  (let ((proposer (block-env-proposer env)))
+    (when (and proposer (forks:fork>= (block-env-spec env) :t14))
+      (let ((expected (proposer-fee-recipient db env proposer)))
+        (unless expected
+          (invalid "proposer 0x~(~a~) has no ValidatorConfigV2 entry" (octets->hex proposer)))
+        (unless (= expected (block-env-beneficiary env))
+          (invalid "block beneficiary 0x~(~40,'0x~) does not match proposer fee recipient 0x~(~40,'0x~)"
+                   (block-env-beneficiary env) expected))))))
+
+(defun boundary-next-players (validators)
+  "DkgCeremonyConfig::boundary_outcome's players: active validators whose ingress is a socket
+address, egress an IP address and public key a valid point, as an ordered set of keys."
+  (let ((keys (loop for (key nil ingress egress) in validators
+                    for octets = (integer->octets key 32)
+                    when (and (clempo.validator-config-v2:parse-ip-port ingress)
+                              (clempo.validator-config-v2:parse-ip-address egress)
+                              (handler-case (progn (clempo.cwcodec:cw-decode 'dkg-public-key octets) t)
+                                (clempo.cwcodec:cw-error () nil)))
+                      collect octets)))
+    (sort (remove-duplicates keys :test #'octets=) #'clempo.cwcodec:cw-order<)))
+
+(defun check-boundary-outcome (env)
+  "From T15, a boundary block with a proposer carries the DKG outcome V2 in the parent state
+implies: the next epoch, the active validators as next players, and the full-DKG flag. Its
+extra data must decode with no trailing bytes."
+  (when (and (block-env-proposer env)
+             (forks:fork>= (block-env-spec env) :t15)
+             (epoch-boundary-p (block-env-number env)))
+    (let ((config (parent-validator-config
+                   env (lambda ()
+                         (cons (clempo.validator-config-v2:get-active-validators)
+                               (clempo.validator-config-v2:get-next-network-identity-rotation-epoch))))))
+      (when config
+        (let* ((proposed (handler-case (clempo.cwcodec:cw-decode 'dkg-outcome (block-env-extra-data env))
+                           (clempo.cwcodec:cw-error (e)
+                             (invalid "failed decoding boundary block extra data as DKG outcome: ~A" e))))
+               (epoch (1+ (floor (block-env-number env)
+                                 (or (chainspec:chain-epoch-length (chainspec:load-chainspec *chain*)) 1))))
+               (players (boundary-next-players (car config)))
+               (full (= (cdr config) epoch)))
+          (unless (and (= (dkg-outcome-epoch proposed) epoch)
+                       (= (length players) (length (dkg-outcome-next-players proposed)))
+                       (every #'octets= players (dkg-outcome-next-players proposed))
+                       (eq (and (dkg-outcome-is-next-full-dkg proposed) t) full))
+            (invalid "boundary block DKG outcome does not match the parent state: epoch ~D (expected ~D), full DKG ~A (expected ~A)"
+                     (dkg-outcome-epoch proposed) epoch
+                     (dkg-outcome-is-next-full-dkg proposed) full)))))))
+
 ;;; The zone factory and the shared zone runtimes (TIP-1091, T10; upgraded at T13, T14, T15).
 ;;; The runtime bytecode is read from data/ when this file is compiled (data/README.md has
 ;;; its provenance; tests pin every runtime by its code hash).

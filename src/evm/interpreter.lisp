@@ -114,7 +114,8 @@ Returns (values status output); FRAME-GAS holds the gas left (0 after an excepti
                     (sync-gas)
                     (multiple-value-bind (new-sp status output)
                         (funcall (the function fn) frame stack sp)
-                      (when status (halt status (or output +empty-code+)))
+                      ;; the op may have charged FRAME-GAS: halt reports it, not the stale local
+                      (when status (reload-gas) (halt status (or output +empty-code+)))
                       (setf sp new-sp)
                       (reload-gas)
                       (incf pc)))))

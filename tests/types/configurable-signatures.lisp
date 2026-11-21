@@ -151,13 +151,25 @@ signature is a ConfigurableAccount one."
                    (let ((text (make-string (file-length in))))
                      (clempo.json:parse-json (subseq text 0 (read-sequence text in))))))
         (configurable 0))
-    (is= 3 (length records))
+    (is= 7 (length records))
     (loop for record across records
           for tx = (clempo.transactions:decode-transaction
                     (hex->octets (clempo.json:jget record "raw")))
           for signature = (car (last (clempo.transactions:transaction-fields tx)))
           do (is= (hex->integer (clempo.json:jget record "from"))
                   (clempo.transactions:transaction-sender tx))
-             (when (eq :configurable-account (signature-kind signature))
+             (when (member (signature-inner-kind signature) '(:configurable-account))
                (incf configurable)))
-    (is= 2 configurable)))
+    ;; owner-signed, derived first use, and the V2 keychain delegating to the 2-of-2 quorum
+    (is= 3 configurable)))
+
+(deftest reference-rehashes-key-authorization-parity ()
+  "A key-type-3 grant whose key authorization signature carries parity 0 (not 27): the
+reference refused it ('admin-signed key authorization account mismatch') because it hashes its
+re-encoding, v = 27, and so recovered sender 0x5f52... (tempo-primitives decode of these
+octets, 2026-11-21), not the grantor. clempo recovers the same sender."
+  (let ((tx (clempo.transactions:decode-transaction
+             (hex->octets "0x76f8d18205398085174876e800832dc6c0d8d79420c00000000000000000000000000000000000008080c0808080808080c0f85dd9820539039473abdfff0489cf370e06cb1d403777e60d6aeaecb8417c8619c41d74228bba06d42ad2b572fe7ec3dbc7f715bc90086d26a8262a91f338f849bcf09ab0598a84ffd7554c30089cb1b1c487936fafebc470e77d26962d00b841eeccb5da7c6848935b9ee1d6a028e54755b376a4de79e37f6c02ed4014dca65d7719245ff0dcd2bd1a9009fb773a2f8b002622d8cbf8a965ecaf005aae608ca800"))))
+    (is (octets= (hex->octets "0x3b14b220e96b647cca5c53c6d42f8b7114e4fc26091ee61a62fdc9ddff6fa7cf")
+                 (clempo.transactions:transaction-signing-hash tx)))
+    (is= #x5f526a65359ea8f44a320415a744095a5a12993d (clempo.transactions:transaction-sender tx))))

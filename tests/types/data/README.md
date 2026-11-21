@@ -8,10 +8,13 @@ Consensus receipts are Ethereum typed receipts (including type 0x76); Tempo `fee
 
 `t14-devnet-transactions.json` holds every Tempo (0x76) transaction a local reference devnet
 (tempoxyz/tempo 568b4fb4 `tempo` release build, `scripts/devnet/devnet.sh provision --hardfork
-t15`, chain 1337, 2026-11-21) accepted and sealed after `bin/clempo-dev devnet-t14-send`
-submitted them: an upgradeAccount call by a primitive root, a transaction from the upgraded
-account signed by its owner quorum (ConfigurableAccount signature, version 1), and a fresh
-2-of-2 derived account's first transaction with a sponsored fee. Fields: block, hash, `from`
-(the reference's recovered sender), raw envelope (`eth_getRawTransactionByHash`), receipt status
-and gas used. `bin/clempo-dev devnet-replay` executed all 338 blocks of that devnet from its
-genesis and matched every gas used, receipts root, logs bloom and state root.
+t15 --base-port 24000`, chain 1337, 2026-11-21) accepted and sealed after `bin/clempo-dev
+devnet-t14-send` submitted them: an upgradeAccount call by a primitive root, a transaction from
+the upgraded account signed by its owner quorum (ConfigurableAccount signature, version 1), a
+fresh 2-of-2 derived account's first transaction with a sponsored fee, a grant of that derived
+account as an access key (key type 3), a send through it (V2 keychain wrapping the 2-of-2
+quorum), and two isValidSignature calls on the upgraded account's 0xef marker (owner approval:
+0x1626ba7e; stranger: 0xffffffff, per the reference's eth_call). Fields: label, block, hash,
+`from` (the reference's recovered sender), raw envelope (`eth_getRawTransactionByHash`),
+receipt status and gas used. `bin/clempo-dev devnet-replay` executed all 567 blocks of that
+devnet from its genesis and matched every gas used, receipts root, logs bloom and state root.

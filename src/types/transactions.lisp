@@ -206,6 +206,18 @@
              (setf (nth 10 result) (make-octets 0)
                    (nth 11 result) (octets-of 0))
              (setf (nth 11 result) (make-octets 0)))
+         ;; The reference hashes its re-encoding, where every secp256k1 parity nested in a
+         ;; Tempo authorization's or the key authorization's signature reads 27/28.
+         (flet ((canonical-last (item length)
+                  (let ((signature (and (listp item) (= (length item) length) (car (last item)))))
+                    (if (typep signature 'octets)
+                        (let ((canonical (clempo.signatures:canonical-signature signature)))
+                          (if (eq canonical signature) item (append (butlast item) (list canonical))))
+                        item))))
+           (when (listp (nth 12 result))
+             (setf (nth 12 result) (mapcar (lambda (a) (canonical-last a 4)) (nth 12 result))))
+           (when (> (length result) 13)
+             (setf (nth 13 result) (canonical-last (nth 13 result) 2))))
          result))
       (t (butlast fields 3)))))
 

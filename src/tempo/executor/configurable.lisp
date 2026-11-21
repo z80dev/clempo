@@ -81,7 +81,9 @@ accounts loaded, in order."
             (case (clempo.signatures:configurable-commitment-error role commitment)
               ((nil))
               (:commitment-mismatch
-               (invalid "configurable account: configuration commitment mismatch"))
+               ;; ConfigurationCommitmentMismatch's Display: stored, then supplied
+               (invalid "configurable account: account configuration commitment mismatch: expected 0x~(~64,'0x~), actual 0x~(~64,'0x~)"
+                        commitment (clempo.signatures:configurable-commitment role)))
               (t (invalid "configurable account: invalid account ~X" address)))
             (when (zerop commitment)
               (incf extra (clempo.signatures:configurable-derivation-gas role))

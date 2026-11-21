@@ -729,6 +729,8 @@ names (\"AccountKeychainError(KeyNotFound(KeyNotFound))\"), for errors without f
                          before now (+ now 30)))))
           ((and (starts "nonce manager: ") (precompile-error-debug reason))
            (format nil "nonce manager error: Tempo Transaction nonce error: ~A" (precompile-error-debug reason)))
+          ((starts "configurable account: account configuration commitment mismatch: ")
+           (subseq reason (length "configurable account: ")))
           ((starts "value transfer not allowed in AA") "value transfer in Tempo Transaction not allowed")
           ((starts "calls cannot contain CREATE when the authorization list is non-empty")
            "calls cannot contain CREATE when 'aa_authorization_list' is non-empty")

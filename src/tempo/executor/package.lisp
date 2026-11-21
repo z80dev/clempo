@@ -29,6 +29,8 @@ with RETRY-BLOCK, HEAL-FROM-REFERENCE, SKIP-BLOCK and ABORT-REPLAY restarts.")
    #:block-mismatch-fields #:block-mismatch-result #:heal-block #:apply-prestate-diff
    #:execution-failure #:execution-failure-tx-index #:execution-failure-reason
    #:invalid-transaction #:unsupported-transaction #:invalid-transaction-kind
+   #:insufficient-amm-liquidity #:insufficient-amm-liquidity-user-token
+   #:insufficient-amm-liquidity-validator-token #:insufficient-amm-liquidity-required
    ;; incremental execution (builder, pool, validators)
    #:begin-block #:apply-transaction #:finish-block #:check-transaction #:block-context
    #:flush-transactions

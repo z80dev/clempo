@@ -25,7 +25,8 @@
            #:configurable-account-address #:configurable-derivation-gas
            #:configurable-verification-gas #:verify-configurable-approvals
            #:configurable-config-error #:make-configurable-signature
-           #:encode-configurable-signature #:signature-error-reason #:key-authorization-hash))
+           #:encode-configurable-signature #:signature-error-reason #:key-authorization-hash
+           #:canonical-signature))
 
 (in-package #:clempo.signatures)
 
@@ -251,9 +252,11 @@ ascending; SIGNATURES the owners' primitive signature octets, in approval order.
          :threshold-exceeds-weight)))
 
 (defun signature-shape-primitive (signature)
-  "The kind of a PrimitiveSignature's octets, or NIL when they are not one."
+  "The kind of a PrimitiveSignature's octets, or NIL when they are not one (a secp256k1
+parity outside alloy's normalize_v does not decode)."
   (let ((n (length signature)))
-    (cond ((= n 65) :secp256k1)
+    (cond ((= n 65) (let ((v (aref signature 64)))
+                      (and (or (<= v 1) (= v 27) (= v 28) (>= v 35)) :secp256k1)))
           ((< n 2) nil)
           ((= (aref signature 0) 1) (and (= n 130) :p256))
           ((= (aref signature 0) 2) (and (<= 129 n 2049) :webauthn)))))
@@ -439,6 +442,36 @@ approval and without one to spare. Returns the account or signals SIGNATURE-ERRO
           ((>= weight (+ threshold min-weight))
            (reject-signature "excess configurable account owner signatures")))
     (configurable-signature-account signature)))
+
+(defun canonical-signature (signature)
+  "SIGNATURE (a TempoSignature's or AccountSignature's octets) as the reference re-encodes it
+after decoding: alloy's Signature::as_bytes writes a secp256k1 parity as 27/28, wherever the
+signature sits (direct, an owner approval inside 0x05, a keychain's inner signature). Signing
+hashes cover this re-encoding, not the received octets. Octets that do not decode are
+returned unchanged (decoding rejects them elsewhere)."
+  (handler-case
+      (let ((n (length signature)))
+        (cond ((= n 65)
+               (let ((parity (secp256k1-parity (aref signature 64))))
+                 (if (= (aref signature 64) (+ 27 parity))
+                     signature
+                     (let ((out (copy-seq signature)))
+                       (setf (aref out 64) (+ 27 parity))
+                       out))))
+              ((< n 2) signature)
+              ((= (aref signature 0) 5)
+               (let ((c (parse-configurable-signature signature 1)))
+                 (encode-configurable-signature
+                  (%make-configurable-signature
+                   :account (configurable-signature-account c) :salt (configurable-signature-salt c)
+                   :version (configurable-signature-version c)
+                   :threshold (configurable-signature-threshold c)
+                   :owners (configurable-signature-owners c)
+                   :signatures (mapcar #'canonical-signature (configurable-signature-signatures c))))))
+              ((and (member (aref signature 0) '(3 4)) (> n 21))
+               (octets-concat (subseq signature 0 21) (canonical-signature (subseq signature 21))))
+              (t signature)))
+    (signature-error () signature)))
 
 (defun recover-account (signature start hash)
   "AccountSignature::recover_account of SIGNATURE[START..] over HASH (32 octets)."

@@ -184,6 +184,7 @@ and transaction-local modes/budgets. Callback scopes return the value and credit
            #:rotate-validator #:set-fee-recipient #:set-ip-addresses
            #:transfer-validator-ownership #:transfer-ownership
            #:set-network-identity-rotation-epoch #:migrate-validator #:initialize-if-migrated
+           #:parse-ip-address #:parse-ip-port
            #:already-initialized #:ingress-already-exists #:empty-v1-validator-set
            #:invalid-migration-index #:invalid-ip #:invalid-owner #:invalid-public-key
            #:invalid-signature #:invalid-signature-format #:invalid-validator-address

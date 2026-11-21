@@ -42,6 +42,15 @@ builder skips without marking the sender's lane invalid; everything else is :inv
 more specific keyword."))
   (:documentation "The reference rejects the transaction, which makes the block invalid."))
 
+(define-condition insufficient-amm-liquidity (invalid-transaction)
+  ((user-token :initarg :user-token :initform nil :reader insufficient-amm-liquidity-user-token)
+   (validator-token :initarg :validator-token :initform nil
+                    :reader insufficient-amm-liquidity-validator-token)
+   (required :initarg :required :reader insufficient-amm-liquidity-required))
+  (:documentation "FeePaymentError::InsufficientAmmLiquidity: fee collection found no FeeAMM
+liquidity to swap REQUIRED (the collected fee) of USER-TOKEN into VALIDATOR-TOKEN. Both tokens
+are NIL when the validator token could not be read (the reference's Option::None)."))
+
 (define-condition unsupported-transaction (execution-failure) ()
   (:documentation "Execution needs a piece clempo does not have yet."))
 
