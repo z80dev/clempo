@@ -9,8 +9,9 @@
 (defmethod state:backend-account ((db store:statedb) address)
   (let ((a (store:db-account db address)))
     (if a
-        (values t (store:account-nonce a) (store:account-balance a) (store:account-code-hash a))
-        (values nil 0 0 state:+empty-code-hash+))))
+        (values t (store:account-nonce a) (store:account-balance a) (store:account-code-hash a)
+                (store:account-commitment a))
+        (values nil 0 0 state:+empty-code-hash+ 0))))
 
 (defmethod state:backend-storage ((db store:statedb) address slot)
   (store:db-storage db address slot))
@@ -32,7 +33,8 @@
              (let ((code (state:account-change-code c)))
                (when (and code (plusp (length code))) (store:db-put-code db code)))
              (store:db-set-account db address (state:account-change-nonce c)
-                                   (state:account-change-balance c) (state:account-change-code-hash c))
+                                   (state:account-change-balance c) (state:account-change-code-hash c)
+                                   (state:account-change-commitment c))
              (loop for (slot . value) in (state:account-change-storage c)
                    do (store:db-set-storage db address slot value)))))))
 
