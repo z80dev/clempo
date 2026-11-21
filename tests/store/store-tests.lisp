@@ -86,12 +86,14 @@
           (db-commit-block db 10 (block-hash 10))
           (is= 10 (db-number db)))
         (is= 9 (db-number db))
-        (random-block db rng 10))       ; left open: unwound too
+        (random-block db rng 10)        ; left open and hashed: unwound too
+        (db-state-root db))
       (is= 5 (db-number db))
       (is (null (db-block-hash db 6)))
       (is-equalp (block-hash 5) (db-hash db))
       (is (equal before (snapshot db)))
       (is-equalp root (db-state-root db))
+      (is-equalp root (db-root-hash db))
       (is-equalp (reference-root db) (db-state-root db))
       ;; and normal blocks continue from there
       (random-block db rng 6)

@@ -151,12 +151,17 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
 
 (defun tip20-address-p (address) (pc:tip20-address-p address))
 
+(defmacro selector (signature)
+  "The 4-byte ABI selector of SIGNATURE as an integer, computed at load time."
+  `(load-time-value (octets->integer (clempo.keccak:keccak256 (string->octets ,signature)) :end 4)))
+
 (defun fee-inference-call-p (input)
   "common.rs is_tip20_fee_inference_call: transfer, transferWithMemo; distributeReward before T7."
   (and (>= (length input) 4)
        (let ((s (octets->integer input :end 4)))
-         (or (= s #xa9059cbb) (= s #x95777d59)
-             (and (forks:spec< :t7) (= s #x3b6e750f))))))
+         (or (= s (selector "transfer(address,uint256)"))
+             (= s (selector "transferWithMemo(address,uint256,bytes32)"))
+             (and (forks:spec< :t7) (= s (selector "distributeReward(uint256)")))))))
 
 (defun valid-fee-token-p (token)
   (and (tip20-address-p token)
@@ -170,7 +175,7 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
     (when (txv-fee-token v) (return-from resolve-fee-token (values (txv-fee-token v) nil)))
     (multiple-value-bind (kind input) (txv-first-call v)
       (when (and (not aa) (= fee-payer sender) (eql kind +fee-manager-address+)
-                 (>= (length input) 36) (= (octets->integer input :end 4) #xe7898ae0)) ; setUserToken(address)
+                 (>= (length input) 36) (= (octets->integer input :end 4) (selector "setUserToken(address)")))
         (return-from resolve-fee-token (values (octets->integer input :start 16 :end 36) nil)))
       (let ((user (with-protocol-storage (:static t) (clempo.fee-manager:user-token fee-payer))))
         (unless (zerop user) (return-from resolve-fee-token (values user nil))))
@@ -186,7 +191,9 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
         (let ((selector (octets->integer input :end 4))
               (token-in (octets->integer input :start 16 :end 36)))
           ;; swapExactAmountIn / swapExactAmountOut(address tokenIn, ...)
-          (when (and (member selector '(#xf8856c0f #x9a35a7a5)) (valid-fee-token-p token-in))
+          (when (and (or (= selector (selector "swapExactAmountIn(address,address,uint128,uint128)"))
+                         (= selector (selector "swapExactAmountOut(address,address,uint128,uint128)")))
+                     (valid-fee-token-p token-in))
             (return-from resolve-fee-token (values token-in nil)))))
       (if (or (forks:spec< :t13) (zerop max-fee))
           (values pc:+default-fee-token+ t)
@@ -349,9 +356,9 @@ builder read (Rust TempoTxResult / ResolvedFeeToken / key_expiry)."
         (when (and (plusp (length code)) (not (state:delegation-target code)))
           (invalid "sender has code"))
         (when (and (not (ctx-skip-nonce-check ctx)) (/= (state:account-nonce account) (txv-nonce v)))
-          (error 'invalid-transaction :tx-index *tx-index*
-                                      :reason (if (< (txv-nonce v) (state:account-nonce account))
-                                                  "nonce too low" "nonce too high")))
+          (if (< (txv-nonce v) (state:account-nonce account))
+              (error 'invalid-transaction :tx-index *tx-index* :kind :nonce-too-low :reason "nonce too low")
+              (error 'invalid-transaction :tx-index *tx-index* :kind :nonce-too-high :reason "nonce too high")))
         (state:warm-address world sender)
         (let ((sender-nonce (state:account-nonce account)))
           (state:increment-nonce world account)

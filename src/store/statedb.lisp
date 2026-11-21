@@ -181,8 +181,8 @@ committed blocks into a log and periodic checkpoints.")
                                                    (flush-storage a) (account-code-hash a)))
                          (trie-delete trie (address-octets address)))))
                  dirty)
-        (clrhash dirty)
-        (setf (db-root-hash db) nil)))
+        ;; DB-ROOT-HASH stays the last committed root; an open block's root is only returned.
+        (clrhash dirty)))
     (trie-root (db-trie db))))
 
 ;;; Writes. Every write happens inside an open block so it can be undone and logged.

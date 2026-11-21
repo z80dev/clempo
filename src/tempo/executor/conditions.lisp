@@ -35,7 +35,11 @@ reference receipts are known.")
              (format s "~@[tx ~D: ~]~A" (execution-failure-tx-index c) (execution-failure-reason c))))
   (:documentation "A block could not be executed as the reference executes it."))
 
-(define-condition invalid-transaction (execution-failure) ()
+(define-condition invalid-transaction (execution-failure)
+  ((kind :initarg :kind :initform :invalid :reader invalid-transaction-kind
+         :documentation "A keyword: :nonce-too-low and :expiring-nonce-replay are the ones a
+builder skips without marking the sender's lane invalid; everything else is :invalid or a
+more specific keyword."))
   (:documentation "The reference rejects the transaction, which makes the block invalid."))
 
 (define-condition unsupported-transaction (execution-failure) ()

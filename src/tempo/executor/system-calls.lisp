@@ -210,23 +210,26 @@ gas. An undecodable outcome or a failed call makes the block invalid."
   (logior 1 (ash owner 32)))
 
 (defparameter *zone-runtimes*
-  (list (list :t10 (zone-runtime "zone-portal-t10.hex") (zone-runtime "zone-verifier-t10.hex")
-              (zone-runtime "zone-messenger-t10.hex"))
-        (list :t13 (zone-runtime "zone-portal-t13.hex") (zone-runtime "zone-verifier-t13.hex")
-              (zone-runtime "zone-messenger-t13.hex"))
-        (list :t14 (zone-runtime "zone-portal-t14.hex") (zone-runtime "zone-verifier-t13.hex")
-              (zone-runtime "zone-messenger-t13.hex"))
-        (list :t15 (zone-runtime "zone-portal-t15.hex") (zone-runtime "zone-verifier-t13.hex")
-              (zone-runtime "zone-messenger-t13.hex")))
-  "(fork portal verifier messenger): initial_zone_factory_state and t13/t14/t15_zone_factory_state.
-T14 and T15 replace only the portal.")
+  (flet ((runtimes (portal verifier messenger)
+           (mapcar (lambda (address code) (list address code (state:code-hash code)))
+                   (list pc:+zone-portal-impl-address+ pc:+zone-verifier-address+
+                         pc:+zone-messenger-address+)
+                   (list portal verifier messenger))))
+    (list (cons :t10 (runtimes (zone-runtime "zone-portal-t10.hex") (zone-runtime "zone-verifier-t10.hex")
+                               (zone-runtime "zone-messenger-t10.hex")))
+          (cons :t13 (runtimes (zone-runtime "zone-portal-t13.hex") (zone-runtime "zone-verifier-t13.hex")
+                               (zone-runtime "zone-messenger-t13.hex")))
+          (cons :t14 (runtimes (zone-runtime "zone-portal-t14.hex") (zone-runtime "zone-verifier-t13.hex")
+                               (zone-runtime "zone-messenger-t13.hex")))
+          (cons :t15 (runtimes (zone-runtime "zone-portal-t15.hex") (zone-runtime "zone-verifier-t13.hex")
+                               (zone-runtime "zone-messenger-t13.hex")))))
+  "fork -> ((address code code-hash) ...) of the portal implementation, verifier and messenger:
+initial_zone_factory_state and t13/t14/t15_zone_factory_state (T14 and T15 replace only the
+portal). The code hashes are computed once here: the runtime check runs every block from T13.")
 
 (defun zone-runtimes (fork)
-  "((address . code) ...) of the shared runtimes FORK installs, portal, verifier, messenger."
-  (destructuring-bind (portal verifier messenger) (rest (assoc fork *zone-runtimes*))
-    (list (cons pc:+zone-portal-impl-address+ portal)
-          (cons pc:+zone-verifier-address+ verifier)
-          (cons pc:+zone-messenger-address+ messenger))))
+  "((address code code-hash) ...) of the shared runtimes FORK installs."
+  (or (cdr (assoc fork *zone-runtimes*)) (unreachable "no zone runtimes for ~S" fork)))
 
 (defun zone-runtime-fork (spec)
   "zone_runtime_fork: the fork whose shared runtimes are live under SPEC, NIL before T13."
@@ -239,11 +242,11 @@ T14 and T15 replace only the portal.")
   (not (octets= (state:account-code-hash account) state:+empty-code-hash+)))
 
 (defun install-zone-runtimes (world runtimes)
-  "install_zone_runtimes: give each (address . code) its code, keeping nonce, balance and
-storage; an account that already has that code is left alone."
-  (loop for (address . code) in runtimes
+  "install_zone_runtimes: give each (address code code-hash) its code, keeping nonce,
+balance and storage; an account that already has that code is left alone."
+  (loop for (address code hash) in runtimes
         for account = (state:get-account world address)
-        unless (octets= (state:account-code-hash account) (state:code-hash code))
+        unless (octets= (state:account-code-hash account) hash)
           do (state:set-code world account code)))
 
 (defun deploy-zone-factory (world)

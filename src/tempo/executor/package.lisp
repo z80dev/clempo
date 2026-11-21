@@ -28,7 +28,7 @@ with RETRY-BLOCK, HEAL-FROM-REFERENCE, SKIP-BLOCK and ABORT-REPLAY restarts.")
    #:block-mismatch-expected #:block-mismatch-actual #:block-mismatch-detail
    #:block-mismatch-fields #:block-mismatch-result #:heal-block #:apply-prestate-diff
    #:execution-failure #:execution-failure-tx-index #:execution-failure-reason
-   #:invalid-transaction #:unsupported-transaction
+   #:invalid-transaction #:unsupported-transaction #:invalid-transaction-kind
    ;; incremental execution (builder, pool, validators)
    #:begin-block #:apply-transaction #:finish-block #:check-transaction #:block-context
    #:with-state-storage #:tx-outcome-storage-changes #:payment-transaction-p

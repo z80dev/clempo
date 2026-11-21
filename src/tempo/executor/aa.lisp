@@ -54,7 +54,9 @@
 
 (defun key-authorization-gas (auth signature gp fork)
   "handler.rs calculate_key_authorization_gas (EIP-8037 off: no state gas)."
-  (let* ((sig-gas (signature-gas signature))
+  ;; A key authorization pays the full verification (PrimitiveSignature::verification_gas): the
+  ;; intrinsic gas above the base plus the secp256k1 verification the base already covers.
+  (let* ((sig-gas (+ 3000 (signature-gas signature)))
          (limits (clempo.signatures:key-authorization-limits auth))
          (num-limits (if (eq limits :absent) 0 (length limits))))
     (if (forks:fork>= fork :t1b)
@@ -121,8 +123,9 @@
       (cond
         ((zerop (txv-nonce-key v))
          (when (/= protocol-nonce (txv-nonce v))
-           (error 'invalid-transaction :tx-index *tx-index*
-                                       :reason (if (< (txv-nonce v) protocol-nonce) "nonce too low" "nonce too high")))
+           (if (< (txv-nonce v) protocol-nonce)
+               (error 'invalid-transaction :tx-index *tx-index* :kind :nonce-too-low :reason "nonce too low")
+               (error 'invalid-transaction :tx-index *tx-index* :kind :nonce-too-high :reason "nonce too high")))
          (when (first (first (txv-calls v)))   ; a CALL first: bump now; CREATE bumps in the batch
            (state:increment-nonce world account)))
         ((and (= (txv-nonce-key v) +expiring-nonce-key+) (forks:fork>= fork :t1))
@@ -134,14 +137,19 @@
            (handler-case
                (with-protocol-storage ()
                  (clempo.nonce:check-and-mark-expiring-nonce replay (txv-valid-before v)))
-             (contract:precompile-revert (c) (invalid "expiring nonce: ~A" c)))))
+             (contract:precompile-revert (c)
+               (error 'invalid-transaction :tx-index *tx-index*
+                                           :kind (if (search "REPLAY" (string (contract:precompile-revert-name c)))
+                                                     :expiring-nonce-replay :invalid)
+                                           :reason (format nil "expiring nonce: ~A" c))))))
         (t
          (handler-case
              (with-protocol-storage ()
                (let ((state (clempo.nonce:get-nonce caller (txv-nonce-key v))))
                  (unless (or (ctx-skip-nonce-check *ctx*) (= state (txv-nonce v)))
-                   (error 'invalid-transaction :tx-index *tx-index*
-                                               :reason (if (< (txv-nonce v) state) "nonce too low" "nonce too high")))
+                   (if (< (txv-nonce v) state)
+                       (error 'invalid-transaction :tx-index *tx-index* :kind :nonce-too-low :reason "nonce too low")
+                       (error 'invalid-transaction :tx-index *tx-index* :kind :nonce-too-high :reason "nonce too high")))
                  (clempo.nonce:increment-nonce caller (txv-nonce-key v))))
            (contract:precompile-revert (c) (invalid "nonce manager: ~A" c)))))
       protocol-nonce)))

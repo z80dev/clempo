@@ -41,9 +41,10 @@ end-of-block committee call. Returns the drained changes."
   (clempo.state:drain-changes (clempo.executor::ctx-world ctx)))
 
 (defun runtime-with-hash (hash)
-  (loop for (nil . codes) in clempo.executor::*zone-runtimes*
-        do (dolist (code codes)
-             (when (octets= hash (clempo.keccak:keccak256 code)) (return-from runtime-with-hash code)))))
+  (loop for (nil . runtimes) in clempo.executor::*zone-runtimes*
+        do (loop for (nil code) in runtimes
+                 when (octets= hash (clempo.keccak:keccak256 code))
+                   do (return-from runtime-with-hash code))))
 
 ;;; The runtime bytecode, pinned: every hash is the reference node's (web3_sha3 of the bytes;
 ;;; for T10 and T13 the bytes are eth_getCode's, for T14 and T15 the crates/contracts
@@ -63,10 +64,11 @@ end-of-block committee call. Returns the drained changes."
                (:t15 "c07055d023c14eb7c5f092caf2be26cf80d33aed7f757eae087d6d2f01a02f0e"
                      "cf7b19d3c186e4fd235c94907d10bba5c1ce21d6e815676b00aaf298b456de14"
                      "526c5bb045b6229e5a693d70feee066cc3848b5f91c62949ced54818045214ee"))
-        do (loop for (address . code) in (clempo.executor::zone-runtimes fork)
+        do (loop for (address code hash) in (clempo.executor::zone-runtimes fork)
                  for expected in (list portal verifier messenger)
                  do (is-equalp (hex->octets expected) (clempo.keccak:keccak256 code)
-                               "~(~A~) runtime at ~X" fork address)))
+                               "~(~A~) runtime at ~X" fork address)
+                    (is-equalp (hex->octets expected) hash "~(~A~) runtime hash at ~X" fork address)))
   ;; The factory's slot 0 after the T10 activation (eth_getStorageAt 0x5af2.. 0 35816049).
   (is= #xAF571FD4B3AD43A5807A5E58BFB25EA1AB327A1400000001
        (clempo.executor::initial-zone-factory-config clempo.executor::+initial-factory-owner+)))
@@ -219,7 +221,7 @@ end-of-block committee call. Returns the drained changes."
                   (env (header-block-env (blocks:block-header (system-block 47250842)) :chain :mainnet)))
              (clempo.state:memory-backend-put-account backend clempo.precompiles:+zone-factory-address+
                                                       :code (octets-of #xef))
-             (loop for (address . code) in (clempo.executor::zone-runtimes :t10)
+             (loop for (address code) in (clempo.executor::zone-runtimes :t10)
                    do (clempo.state:memory-backend-put-account backend address :code code))
              (let ((ctx (system-ctx backend env)))
                (clempo.executor::apply-zone-factory ctx)
