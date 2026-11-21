@@ -14,7 +14,8 @@ representation.")
            #:read-string #:read-bool #:read-number #:read-null-p #:skip-value #:read-value
            #:read-raw-value #:invalid-type #:do-object #:do-array #:unexpected-text
            #:*key-end* #:serde-fail-after-key
-           #:rust-debug-string))
+           #:rust-debug-string #:rust-float #:number-unexpected #:parse-serde-number
+           #:read-integer #:read-content))
 
 (in-package #:clempo.serde)
 
@@ -110,21 +111,78 @@ representation.")
                    (t (serde-fail-here src "invalid escape")))))
               (t (write-char c out)))))))
 
-(defun read-number (src)
-  "Consume a JSON number; integers stay integers, anything with . or e is a double."
+(defun number-out-of-range () (serde-fail "number out of range"))
+
+(defun f64-from-parts (positive significand exponent)
+  "serde_json's f64_from_parts: the significand as an f64 scaled once by a power of ten."
+  (let ((f (coerce significand 'double-float)))
+    (loop
+      (cond ((<= (abs exponent) 308)
+             (let ((pow (coerce (expt 10 (abs exponent)) 'double-float)))
+               (setf f (if (>= exponent 0)
+                           (handler-case (* f pow) (floating-point-overflow () (number-out-of-range)))
+                           (/ f pow))))
+             (return))
+            ((zerop f) (return))
+            ((>= exponent 0) (number-out-of-range))
+            (t (setf f (/ f 1d308)) (incf exponent 308))))
+    (if positive f (- f))))
+
+(defun parse-serde-number (text &key (start 0) (end (length text)))
+  "The JSON number TEXT[START,END) as serde_json parses it (without float_roundtrip): a u64
+or an i64 when it is an integer that fits, otherwise an f64 built from the digits that fit
+a u64 and one power of ten, so it may be an ulp from the nearest double. \"-0\" is -0.0."
+  (let ((pos start) (positive t) (significand 0) (exponent 0) (float nil))
+    (labels ((digit () (and (< pos end) (digit-char-p (char text pos))))
+             (overflowp (d) (let ((q (floor +u64-max+ 10)))
+                              (or (> significand q) (and (= significand q) (> d (mod +u64-max+ 10)))))))
+      (when (and (< pos end) (char= (char text pos) #\-)) (setf positive nil) (incf pos))
+      (loop for d = (digit) while d
+            do (if (or float (overflowp d))
+                   (setf float t exponent (1+ exponent))
+                   (setf significand (+ (* significand 10) d)))
+               (incf pos))
+      (when (and (< pos end) (char= (char text pos) #\.))
+        (setf float t) (incf pos)
+        (let ((overflowed nil))
+          (loop for d = (digit) while d
+                do (unless (or overflowed (setf overflowed (overflowp d)))
+                     (setf significand (+ (* significand 10) d))
+                     (decf exponent))
+                   (incf pos))))
+      (when (and (< pos end) (char-equal (char text pos) #\e))
+        (setf float t) (incf pos)
+        (let ((positive-exp t) (e 0))
+          (case (and (< pos end) (char text pos))
+            (#\+ (incf pos))
+            (#\- (setf positive-exp nil) (incf pos)))
+          (loop for d = (digit) while d do (setf e (+ (* e 10) d)) (incf pos))
+          (when (> e (1- (ash 1 31)))
+            (return-from parse-serde-number
+              (if (and positive-exp (plusp significand)) (number-out-of-range) (if positive 0d0 -0d0))))
+          (setf exponent (max (- (ash 1 31)) (min (1- (ash 1 31)) (if positive-exp (+ exponent e) (- exponent e)))))))
+      (cond (float (f64-from-parts positive significand exponent))
+            (positive significand)
+            ((zerop significand) -0d0)
+            ((<= significand (ash 1 63)) (- significand))
+            (t (- (coerce significand 'double-float)))))))
+
+(defun skip-number (src)
+  "Consume a JSON number without converting it (serde_json's ignore_number); returns its start."
   (skip-ws src)
-  (let* ((text (src-text src)) (start (src-pos src)) (float nil))
+  (let ((text (src-text src)) (start (src-pos src)))
     (when (char= (schar text start) #\-) (advance src 1))
-    (loop while (< (src-pos src) (src-end src))
-          do (let ((c (schar text (src-pos src))))
-               (cond ((digit-char-p c))
-                     ((find c ".eE+-") (setf float t))
-                     (t (return))))
-             (advance src 1))
-    (if float
-        (let ((*read-default-float-format* 'double-float))
-          (coerce (let ((*read-eval* nil)) (read-from-string text t nil :start start :end (src-pos src))) 'double-float))
-        (parse-integer text :start start :end (src-pos src)))))
+    (loop while (and (< (src-pos src) (src-end src))
+                     (let ((c (schar text (src-pos src)))) (or (digit-char-p c) (find c ".eE+-"))))
+          do (advance src 1))
+    start))
+
+(defun read-number (src)
+  "Consume a JSON number as serde_json reads it: an integer in u64 or i64 range, otherwise a
+double (see PARSE-SERDE-NUMBER); one beyond the double range fails \"number out of range\"."
+  (let ((start (skip-number src)))
+    (handler-case (parse-serde-number (src-text src) :start start :end (src-pos src))
+      (serde-error (e) (serde-fail-here src "~A" (serde-error-message e))))))
 
 (defun read-literal (src word)
   (skip-ws src)
@@ -155,16 +213,30 @@ representation.")
     (write-char #\" out)))
 
 (defun rust-float (x)
-  (if (and (= x (ffloor x)) (< (abs x) 1d16))
-      (format nil "~D.0" (truncate x))
-      (let ((*read-default-float-format* 'double-float)) (prin1-to-string x))))
+  "An f64 as serde prints an unexpected float: the shortest round-trip digits, in exponent
+form (1e-6, 1.5e+20) below 1e-5 and from 1e16, else positional with at least one decimal."
+  (if (zerop x)
+      (if (minusp (float-sign x)) "-0.0" "0.0")
+      (multiple-value-bind (k digits) (sb-impl::flonum-to-digits (abs x))
+        (let ((e (1- k)) (n (length digits)))
+          (concatenate
+           'string (if (minusp x) "-" "")
+           (cond ((or (< e -5) (>= e 16))
+                  (format nil "~A~:[.~A~;~*~]e~:[~;+~]~D"
+                          (char digits 0) (= n 1) (subseq digits 1) (>= e 0) e))
+                 ((<= k 0) (format nil "0.~v,,,'0A~A" (- k) "" digits))
+                 ((>= k n) (format nil "~A~v,,,'0A.0" digits (- k n) ""))
+                 (t (format nil "~A.~A" (subseq digits 0 k) (subseq digits k)))))))))
+
+(defun number-unexpected (n)
+  "serde's Unexpected for a number READ-NUMBER returned: integer `N` or floating point `F`."
+  (if (integerp n) (format nil "integer `~D`" n) (format nil "floating point `~A`" (rust-float n))))
 
 (defun unexpected-text (src)
   "Describe the next value as serde's Unexpected does, consuming scalars but not containers."
   (ecase (peek-kind src)
     (:string (format nil "string ~A" (rust-debug-string (read-string src))))
-    (:number (let ((n (read-number src)))
-               (if (integerp n) (format nil "integer `~D`" n) (format nil "floating point `~A`" (rust-float n)))))
+    (:number (number-unexpected (read-number src)))
     (:true (read-literal src "true") "boolean `true`")
     (:false (read-literal src "false") "boolean `false`")
     (:null (read-literal src "null") "null")
@@ -178,35 +250,54 @@ representation.")
   (let ((what (unexpected-text src)))
     (serde-fail-here src "invalid type: ~A, expected ~A" what expected)))
 
-(defun skip-value (src)
+(defun read-integer (src min max expected)
+  "A Rust primitive integer (u8, i32, u64, usize ...) from a JSON number, as serde's
+primitive visitors take it: an integer out of [MIN, MAX] is an invalid value, a float an
+invalid type, anything else an invalid type against EXPECTED."
+  (if (eq (peek-kind src) :number)
+      (let ((n (read-number src)))
+        (cond ((not (integerp n)) (serde-fail-here src "invalid type: ~A, expected ~A" (number-unexpected n) expected))
+              ((<= min n max) n)
+              (t (serde-fail-here src "invalid value: integer `~D`, expected ~A" n expected))))
+      (invalid-type src expected)))
+
+(defun skip-value (src &optional numbers)
+  "Consume the next value. With NUMBERS, numbers are converted as serde_json does when it
+buffers a value (a Value or a flattened struct's Content), so one beyond the double range
+fails where it ends; without, they are only scanned (serde's IgnoredAny)."
   (ecase (peek-kind src)
     (:string (read-string src))
-    (:number (read-number src))
+    (:number (if numbers (read-number src) (skip-number src)))
     (:true (read-literal src "true"))
     (:false (read-literal src "false"))
     (:null (read-literal src "null"))
     (:object (advance src 1)
      (unless (eql (peek src) #\})
-       (loop (read-string src) (peek src) (advance src 1) (skip-value src)
+       (loop (read-string src) (peek src) (advance src 1) (skip-value src numbers)
              (if (eql (peek src) #\,) (advance src 1) (return))))
      (peek src) (advance src 1))
     (:array (advance src 1)
      (unless (eql (peek src) #\])
-       (loop (skip-value src) (if (eql (peek src) #\,) (advance src 1) (return))))
+       (loop (skip-value src numbers) (if (eql (peek src) #\,) (advance src 1) (return))))
      (peek src) (advance src 1))
     (:eof (eof-error src))
     (:invalid (serde-fail-here src "expected value"))))
 
-(defun read-raw-value (src)
-  "The raw text of the next value."
+(defun read-raw-value (src &optional numbers)
+  "The raw text of the next value (NUMBERS as for SKIP-VALUE)."
   (skip-ws src)
   (let ((start (src-pos src)))
-    (skip-value src)
+    (skip-value src numbers)
     (subseq (src-text src) start (src-pos src))))
 
+(defun read-content (src)
+  "The raw text of the next value, buffered as serde's Content is for a flattened struct."
+  (read-raw-value src t))
+
 (defun read-value (src)
-  "The next value as clempo.json data."
-  (clempo.json:parse-json (read-raw-value src)))
+  "The next value as clempo.json data; a number beyond the double range fails as it does
+when serde_json reads a Value."
+  (clempo.json:parse-json (read-raw-value src t)))
 
 (defmacro do-object ((key src &key (expected "a map")) &body body)
   "Walk the object at SRC: KEY is bound to each key (consumed, the value not yet); BODY must

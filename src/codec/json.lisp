@@ -144,9 +144,15 @@
                        do (incf pos))
                  (when (= start pos) (jfail "unexpected ~C at ~D" (schar s pos) pos))
                  (if float
-                     (let ((*read-default-float-format* 'double-float))
-                       (coerce (let ((*read-eval* nil)) (read-from-string s t nil :start start :end pos))
-                               'double-float))
+                     ;; a literal beyond the double range is valid JSON: it reads as an
+                     ;; infinity (as JavaScript's JSON.parse does), never a Lisp error
+                     (let* ((*read-default-float-format* 'double-float)
+                            (x (handler-case (let ((*read-eval* nil)) (read-from-string s t nil :start start :end pos))
+                                 (sb-kernel:reader-impossible-number-error ()
+                                   (if (char= (schar s start) #\-)
+                                       sb-ext:double-float-negative-infinity
+                                       sb-ext:double-float-positive-infinity)))))
+                       (if (realp x) (coerce x 'double-float) (jfail "bad number at ~D" start)))
                      (parse-integer s :start start :end pos)))))
       (let ((v (value)))
         (skip-ws)

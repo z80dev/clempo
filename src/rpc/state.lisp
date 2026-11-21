@@ -184,9 +184,7 @@ quantity."
     (:number (let ((n (serde:read-number src)))
                (if (and (integerp n) (<= 0 n +u64-max+))
                    (make-storage-key n nil)
-                   (serde:serde-fail-here src "invalid type: ~A, expected ~A"
-                                          (if (integerp n) (format nil "integer `~D`" n)
-                                              (format nil "floating point `~A`" (clempo.serde::rust-float n)))
+                   (serde:serde-fail-here src "invalid type: ~A, expected ~A" (serde:number-unexpected n)
                                           +storage-key-expected+))))
     (t (serde:invalid-type src +storage-key-expected+))))
 

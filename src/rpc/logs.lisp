@@ -252,11 +252,12 @@ or a list (possibly empty)."
 
 (defvar *filters* (make-hash-table :test 'equal :synchronized t) "filter id -> installed")
 
-(defparam filter-id (src) "reth FilterId: a string or a number"
-  (case (serde:peek-kind src)
-    (:string (serde:read-string src))
-    (:number (format nil "~A" (serde:read-number src)))
-    (t (serde:invalid-type src "a string or a number"))))
+(defparam filter-id (src) "reth FilterId: untagged Num(u64) or Str(String)"
+  ;; an untagged enum buffers the value first (numbers converted), then tries each variant
+  (let ((v (if (eq (serde:peek-kind src) :number) (serde:read-number src) (serde:read-value src))))
+    (cond ((stringp v) v)
+          ((and (integerp v) (<= 0 v +u64-max+)) (format nil "~D" v))
+          (t (serde:serde-fail "data did not match any variant of untagged enum FilterId")))))
 
 (defun install (kind &optional filter)
   (let ((id (format nil "0x~(~32,'0x~)" (octets->integer (clempo.io:random-octets 16)))))

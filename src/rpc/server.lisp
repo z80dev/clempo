@@ -5,10 +5,11 @@
 per connection. HTTP answers as the reference does (POST with Content-Type application/json,
 405 and 415 otherwise); a GET with Upgrade: websocket switches the connection to frames,
 where requests are answered in order and subscriptions push eth_subscription
-notifications.")
+notifications from a writer thread per websocket, fed by PUBLISH-HEAD through a bounded
+queue.")
   (:export #:start-server #:stop-server #:server-port #:server-backend #:publish-head
            #:connection #:connection-subscriptions #:send-notification #:*server*
-           #:new-subscription-id #:notify-head #:after-response))
+           #:new-subscription-id #:notify-head #:after-response #:log-event))
 
 (in-package #:clempo.rpcserver)
 
@@ -25,17 +26,37 @@ starts there, so no notification precedes the response that names it)."
 (defstruct (server (:constructor %make-server))
   socket port backend (connections '())
   (lock (sb-thread:make-mutex :name "rpc server"))
-  (running t) acceptor (max-connections 256))
+  (running t) acceptor (max-connections 256)
+  (log *error-output*) (log-lock (sb-thread:make-mutex :name "rpc log")))
+
+(defconstant +outbox-capacity+ 256
+  "New heads a websocket subscriber may fall behind before the oldest is skipped: reth's
+PER_BLOCK_FEED_CAPACITY, the depth of its per-block broadcast feeds.")
 
 (defstruct (connection (:constructor make-connection (socket stream)))
   socket stream
   (send-lock (sb-thread:make-mutex :name "ws send"))
   (websocket-p nil)
-  (subscriptions '()))
+  (subscriptions '())
+  ;; New heads waiting for the writer thread: (number . subscriptions) oldest first.
+  (outbox '()) (outbox-length 0) (skipped 0)
+  (outbox-lock (sb-thread:make-mutex :name "ws outbox"))
+  (outbox-ready (sb-thread:make-waitqueue))
+  (closed nil) (writer nil))
 
-(defgeneric notify-head (backend connection number)
-  (:documentation "Send CONNECTION's subscription notifications for new head NUMBER.")
-  (:method (backend connection number) (declare (ignore backend connection number)) nil))
+(defgeneric notify-head (backend connection number subscriptions)
+  (:documentation "Send the notifications of SUBSCRIPTIONS (CONNECTION's, oldest first) for
+new head NUMBER. Runs on CONNECTION's writer thread with *SERVER* bound.")
+  (:method (backend connection number subscriptions)
+    (declare (ignore backend connection number subscriptions))
+    nil))
+
+(defun log-event (fmt &rest args)
+  "Write one line to the current server's log (its LOG stream, *ERROR-OUTPUT* by default)."
+  (let ((stream (if *server* (server-log *server*) *error-output*)))
+    (when stream
+      (flet ((emit () (format stream "~&rpc: ~?~%" fmt args) (force-output stream)))
+        (if *server* (sb-thread:with-mutex ((server-log-lock *server*)) (emit)) (emit))))))
 
 (defun new-subscription-id ()
   (format nil "0x~(~32,'0x~)" (octets->integer (clempo.io:random-octets 16))))
@@ -148,22 +169,79 @@ starts there, so no notification precedes the response that names it)."
               #\Return #\Newline #\Return #\Newline))
      stream)
     (force-output stream)
-    (setf (connection-websocket-p connection) t)
-    (loop
-      (multiple-value-bind (opcode payload) (ws:read-message stream)
-        (cond ((or (null opcode) (= opcode ws:+op-close+))
-               (ignore-errors (sb-thread:with-mutex ((connection-send-lock connection))
-                                (ws:write-frame stream ws:+op-close+ (or payload (make-octets 0)))))
-               (return))
-              ((= opcode ws:+op-ping+)
+    (setf (connection-websocket-p connection) t
+          (connection-writer connection)
+          (let ((server *server*))
+            (sb-thread:make-thread (lambda () (write-notifications server connection))
+                                   :name "rpc websocket writer")))
+    (flet ((control (opcode payload)
+             ;; pings may come between the fragments of a message; pongs need no answer
+             (when (= opcode ws:+op-ping+)
                (sb-thread:with-mutex ((connection-send-lock connection))
-                 (ws:write-frame stream ws:+op-pong+ payload)))
-              ((member opcode (list ws:+op-text+ ws:+op-binary+))
-               (let ((rpc:*connection* connection) (*after-response* '()))
-                 (multiple-value-bind (status response) (run-body (octets->string payload))
-                   (declare (ignore status))
-                   (unless (string= response "null") (send-text connection response)))
-                 (mapc #'funcall *after-response*))))))))
+                 (ws:write-frame stream ws:+op-pong+ payload)))))
+      (loop
+        (multiple-value-bind (opcode payload) (ws:read-message stream #'control)
+          (cond ((or (null opcode) (= opcode ws:+op-close+))
+                 (ignore-errors (sb-thread:with-mutex ((connection-send-lock connection))
+                                  (ws:write-frame stream ws:+op-close+ (or payload (make-octets 0)))))
+                 (return))
+                (t
+                 (let ((rpc:*connection* connection) (*after-response* '()))
+                   (multiple-value-bind (status response) (run-body (octets->string payload))
+                     (declare (ignore status))
+                     (unless (string= response "null") (send-text connection response)))
+                   (mapc #'funcall *after-response*)))))))))
+
+;;; Subscription notifications: PUBLISH-HEAD queues, a writer thread per websocket sends.
+
+(defun close-connection (connection)
+  "Stop CONNECTION's writer and wake its reader: both see the socket shut down."
+  (sb-thread:with-mutex ((connection-outbox-lock connection))
+    (setf (connection-closed connection) t)
+    (sb-thread:condition-broadcast (connection-outbox-ready connection)))
+  (ignore-errors (sb-bsd-sockets:socket-shutdown (connection-socket connection) :direction :io)))
+
+(defun next-head (connection)
+  "Wait for the oldest queued (number . subscriptions); NIL once CONNECTION is closed."
+  (let ((lock (connection-outbox-lock connection)))
+    (sb-thread:with-mutex (lock)
+      (loop until (or (connection-closed connection) (connection-outbox connection))
+            do (sb-thread:condition-wait (connection-outbox-ready connection) lock))
+      (unless (connection-closed connection)
+        (decf (connection-outbox-length connection))
+        (pop (connection-outbox connection))))))
+
+(defun write-notifications (server connection)
+  "CONNECTION's writer thread: render and send each queued head's notifications for the
+subscriptions still running. A client that cannot be written to closes the connection; any
+other failure is logged and the next head is sent."
+  (let ((*server* server))
+    (loop for item = (next-head connection)
+          while item
+          do (destructuring-bind (number . subscriptions) item
+               (let ((running (remove-if-not (lambda (s) (member s (connection-subscriptions connection)))
+                                             subscriptions)))
+                 (when running
+                   (handler-case (notify-head (server-backend server) connection number running)
+                     ((or stream-error sb-bsd-sockets:socket-error) ()
+                       (close-connection connection)
+                       (return))
+                     (error (e) (log-event "notifications for block ~D failed: ~A" number e)))))))))
+
+(defun queue-head (connection number)
+  "Queue head NUMBER for CONNECTION's subscriptions; returns the number of heads it skipped
+so far when this one pushed the oldest out, else NIL."
+  (let ((subscriptions (reverse (connection-subscriptions connection))))
+    (when subscriptions
+      (sb-thread:with-mutex ((connection-outbox-lock connection))
+        (unless (connection-closed connection)
+          (setf (connection-outbox connection)
+                (nconc (connection-outbox connection) (list (cons number subscriptions))))
+          (sb-thread:condition-notify (connection-outbox-ready connection))
+          (when (> (incf (connection-outbox-length connection)) +outbox-capacity+)
+            (pop (connection-outbox connection))
+            (decf (connection-outbox-length connection))
+            (incf (connection-skipped connection))))))))
 
 ;;; Connections and the listener
 
@@ -182,7 +260,10 @@ starts there, so no notification precedes the response that names it)."
                      (unless (serve-http-request connection method headers stream) (return)))))
            ;; A broken or closed connection ends its thread, never the process.
            (error () nil))
-      (ignore-errors (close stream))
+      (close-connection connection)
+      (let ((writer (connection-writer connection)))
+        (when writer (sb-thread:join-thread writer :default nil :timeout 10)))
+      (ignore-errors (close stream :abort t))
       (ignore-errors (sb-bsd-sockets:socket-close (connection-socket connection)))
       (sb-thread:with-mutex ((server-lock server))
         (setf (server-connections server) (remove connection (server-connections server)))))))
@@ -205,15 +286,17 @@ starts there, so no notification precedes the response that names it)."
                    (sb-thread:make-thread (lambda () (serve-connection server connection))
                                           :name "rpc connection")))))))
 
-(defun start-server (&key (host "127.0.0.1") (port 8545) backend (max-connections 256))
-  "Listen on HOST:PORT (0 picks a free port) and serve BACKEND. Returns the server."
+(defun start-server (&key (host "127.0.0.1") (port 8545) backend (max-connections 256)
+                       (log *error-output*))
+  "Listen on HOST:PORT (0 picks a free port) and serve BACKEND, logging to the stream LOG
+\(NIL for none). Returns the server."
   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
     (setf (sb-bsd-sockets:sockopt-reuse-address socket) t)
     (sb-bsd-sockets:socket-bind socket (sb-bsd-sockets:make-inet-address host) port)
     (sb-bsd-sockets:socket-listen socket 128)
     (let ((server (%make-server :socket socket
                                 :port (nth-value 1 (sb-bsd-sockets:socket-name socket))
-                                :backend backend :max-connections max-connections)))
+                                :backend backend :max-connections max-connections :log log)))
       (setf (server-acceptor server)
             (sb-thread:make-thread (lambda () (accept-loop server)) :name "rpc accept"))
       server)))
@@ -229,12 +312,18 @@ starts there, so no notification precedes the response that names it)."
      (sb-bsd-sockets:socket-close s)))
   (ignore-errors (sb-thread:join-thread (server-acceptor server) :timeout 5))
   (dolist (c (sb-thread:with-mutex ((server-lock server)) (copy-list (server-connections server))))
-    (ignore-errors (sb-bsd-sockets:socket-shutdown (connection-socket c) :direction :io)))
+    (close-connection c))
   server)
 
 (defun publish-head (server number)
-  "A new head NUMBER is committed: push subscription notifications to every websocket."
-  (dolist (c (sb-thread:with-mutex ((server-lock server)) (copy-list (server-connections server))))
-    (when (and (connection-websocket-p c) (connection-subscriptions c))
-      (handler-case (notify-head (server-backend server) c number)
-        (error () nil)))))
+  "A new head NUMBER is committed: queue it for every websocket with subscriptions and
+return at once. Each connection's writer thread renders and sends, so a slow or stalled
+client never holds back the caller; one that falls +OUTBOX-CAPACITY+ heads behind skips
+the oldest, as a lagging receiver of reth's per-block feeds does (the connection stays)."
+  (let ((*server* server))
+    (dolist (c (sb-thread:with-mutex ((server-lock server)) (copy-list (server-connections server))))
+      (when (connection-websocket-p c)
+        (let ((skipped (queue-head c number)))
+          ;; reth logs every lagging receive at debug level; once per capacity's worth here
+          (when (and skipped (= 1 (mod skipped +outbox-capacity+)))
+            (log-event "websocket subscriber lagging behind: ~D heads skipped" skipped)))))))

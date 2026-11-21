@@ -35,44 +35,8 @@ missing piece.")
           (subseq message 0 at)
           message))))
 
-(defun number-unexpected (n)
-  "serde's Unexpected for a JSON number as serde_json visits it (u64, i64 or f64)."
-  (cond ((and (integerp n) (<= 0 n +u64-max+)) (format nil "integer `~D`" n))
-        ((and (integerp n) (<= (- (ash 1 63)) n -1)) (format nil "integer `~D`" n))
-        (t (format nil "floating point `~A`" (clempo.serde::rust-float (coerce n 'double-float))))))
-
 (defun prefixed-p (s prefix)
   (and (>= (length s) (length prefix)) (string= prefix s :end2 (length prefix))))
-
-(defun parse-ruint (s bits)
-  "ruint's FromStr: 0x/0o/0b prefixes or decimal, underscores ignored; NIL when invalid or
-too large for BITS."
-  (multiple-value-bind (digits radix)
-      (cond ((or (prefixed-p s "0x") (prefixed-p s "0X")) (values (subseq s 2) 16))
-            ((or (prefixed-p s "0o") (prefixed-p s "0O")) (values (subseq s 2) 8))
-            ((or (prefixed-p s "0b") (prefixed-p s "0B")) (values (subseq s 2) 2))
-            (t (values s 10)))
-    (let ((n 0))
-      (loop for c across digits
-            unless (char= c #\_)
-              do (let ((d (digit-char-p c radix)))
-                   (unless d (return-from parse-ruint nil))
-                   (setf n (+ (* n radix) d))))
-      (and (< n (ash 1 bits)) n))))
-
-(defun read-ruint (src bits)
-  "ruint Uint<BITS> from JSON: a string (hex, octal, binary or decimal) or a u64 number."
-  (let ((expected (format nil "a ~D byte hex string" (ceiling bits 8))))
-    (case (serde:peek-kind src)
-      (:string (let* ((s (serde:read-string src)) (n (parse-ruint s bits)))
-                 (or n (serde:serde-fail-here src "invalid value: string ~A, expected ~A"
-                                              (serde:rust-debug-string s) expected))))
-      (:number (let ((n (serde:read-number src)))
-                 (cond ((and (integerp n) (<= 0 n +u64-max+))
-                        (if (< n (ash 1 bits)) n
-                            (serde:serde-fail-here src "invalid value: integer `~D`, expected ~A" n expected)))
-                       (t (serde:serde-fail-here src "invalid type: ~A, expected ~A" (number-unexpected n) expected)))))
-      (t (serde:invalid-type src expected)))))
 
 (defparam q8 (src) "alloy quantity u8" (read-ruint src 8))
 (defparam q64 (src) "alloy quantity u64" (read-ruint src 64))
@@ -94,12 +58,7 @@ too large for BITS."
                    (hex->octets h))))
     (:array (let ((bytes '()))
               (serde:do-array (i src)
-                (push (if (eq (serde:peek-kind src) :number)
-                          (let ((n (serde:read-number src)))
-                            (if (and (integerp n) (<= 0 n 255)) n
-                                (serde:serde-fail-here src "invalid value: ~A, expected u8" (number-unexpected n))))
-                          (serde:invalid-type src "u8"))
-                      bytes))
+                (push (serde:read-integer src 0 255 "u8") bytes))
               (coerce (nreverse bytes) 'octets)))
     (t (serde:invalid-type src "a variable number of bytes represented as a hex string, an array of u8, or raw bytes"))))
 
@@ -188,7 +147,7 @@ returned as a list of (key . raw-text) in order, with the position after the obj
     (serde:do-object (key src :expected expected)
       (if (member key known :test #'string=)
           (funcall handle key src)
-          (push (cons key (serde:read-raw-value src)) rest)))
+          (push (cons key (serde:read-content src)) rest)))
     (values (nreverse rest) (serde:src-pos src))))
 
 (defun content-value (src end type raw)
@@ -764,11 +723,7 @@ request calls ON-INVALID with (code message), or fails with reth's error."
   (internal-error (format nil "~A: tracing needs the executor's overlay replay and EvmAgent's tracers, which have not landed yet" what)))
 
 (defparam plain-u64 (src) "Rust u64 from a JSON number"
-  (if (eq (serde:peek-kind src) :number)
-      (let ((n (serde:read-number src)))
-        (if (and (integerp n) (<= 0 n +u64-max+)) n
-            (serde:serde-fail-here src "invalid value: ~A, expected u64" (number-unexpected n))))
-      (serde:invalid-type src "u64")))
+  (serde:read-integer src 0 +u64-max+ "u64"))
 
 (defparam tracer-type (src) "alloy GethDebugTracerType (untagged: a built-in tracer name or JavaScript)"
   (if (eq (serde:peek-kind src) :string)

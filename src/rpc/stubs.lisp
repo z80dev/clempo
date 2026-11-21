@@ -12,13 +12,9 @@ error paths of methods whose success needs a transaction pool.")
 
 (defmacro def-json-integer (name rust-name bits signed)
   `(defparam ,name (src) ,(format nil "Rust ~A: a JSON number" rust-name)
-     (if (eq (serde:peek-kind src) :number)
-         (let ((n (serde:read-number src)))
-           (if (and (integerp n) ,(if signed `(<= ,(- (ash 1 (1- bits))) n ,(1- (ash 1 (1- bits))))
-                                       `(<= 0 n ,(1- (ash 1 bits)))))
-               n
-               (serde:serde-fail-here src "invalid value: integer `~A`, expected ~A" n ,rust-name)))
-         (serde:invalid-type src ,rust-name))))
+     (serde:read-integer src ,(if signed (- (ash 1 (1- bits))) 0)
+                         ,(if signed (1- (ash 1 (1- bits))) (1- (ash 1 bits)))
+                         ,rust-name)))
 
 (def-json-integer json-u64 "u64" 64 nil)
 (def-json-integer json-i32 "i32" 32 t)
@@ -34,7 +30,7 @@ error paths of methods whose success needs a transaction pool.")
 (defparam pagination (src) "Tempo PaginationParams"
   (serde:do-object (key src :expected "struct PaginationParams")
     (if (string= key "limit")
-        (if (eq (serde:peek-kind src) :number) (serde:read-number src) (serde:invalid-type src "usize"))
+        (serde:read-integer src 0 +u64-max+ "usize")
         (serde:skip-value src)))
   t)
 

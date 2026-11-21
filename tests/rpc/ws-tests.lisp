@@ -10,7 +10,7 @@
 
 ;;; A websocket client: RFC 6455 handshake and masked client frames over sb-bsd-sockets.
 
-(defstruct (client (:constructor %make-client (socket stream))) socket stream (queue '()))
+(defstruct (client (:constructor %make-client (socket stream))) socket stream (queue '()) (pongs '()))
 
 (defun read-line-crlf (stream)
   (let ((out (make-string-output-stream)))
@@ -19,9 +19,11 @@
           unless (= b 13) do (write-char (code-char b) out))
     (get-output-stream-string out)))
 
-(defun connect (port)
-  "Open a websocket to 127.0.0.1:PORT; reads time out after 10 seconds."
+(defun connect (port &key receive-buffer)
+  "Open a websocket to 127.0.0.1:PORT; reads time out after 10 seconds. RECEIVE-BUFFER sets
+SO_RCVBUF (a small one makes a client that stops reading stall the server quickly)."
   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (when receive-buffer (setf (sb-bsd-sockets:sockopt-receive-buffer socket) receive-buffer))
     (sb-bsd-sockets:socket-connect socket #(127 0 0 1) port)
     (let* ((stream (sb-bsd-sockets:socket-make-stream socket :input t :output t :timeout 10
                                                              :element-type '(unsigned-byte 8)
@@ -61,8 +63,11 @@
     (force-output stream)))
 
 (defun receive (client)
-  "The next server message: (values opcode payload)."
-  (ws:read-message (client-stream client)))
+  "The next data or close message: (values opcode payload); pongs are kept in CLIENT-PONGS."
+  (ws:read-message (client-stream client)
+                   (lambda (opcode payload)
+                     (when (= opcode ws:+op-pong+)
+                       (setf (client-pongs client) (append (client-pongs client) (list (octets->string payload))))))))
 
 (defun receive-json (client)
   (multiple-value-bind (opcode payload) (receive client)
@@ -82,8 +87,13 @@
         do (setf (client-queue client) (append (client-queue client) (list m)))
         finally (return m)))
 
-(defun drain (client)
-  "Every notification received so far: a round trip delimits them."
+(defun notifications (client count)
+  "At least the next COUNT notifications (subscriptions are pushed from the server's writer
+thread, so they may come after later responses), with any others received before the
+answer to one more round trip."
+  (loop while (< (length (client-queue client)) count)
+        do (let ((m (receive-json client)))
+             (setf (client-queue client) (append (client-queue client) (list m)))))
   (call client "drain" "web3_clientVersion")
   (prog1 (client-queue client) (setf (client-queue client) '())))
 
@@ -222,9 +232,13 @@ receipts are absent."
       (skip-test (format nil "receipts of block ~D are not in ~~/cache/clempo/receipts" *block*)))
     b))
 
-(defmacro with-test-server ((server backend) &body body)
+(defmacro with-test-server ((server backend &optional (log (gensym "LOG"))) &body body)
+  "Run BODY with SERVER serving BACKEND (a TEST-BACKEND), its log going to the string output
+stream LOG."
   `(let* ((,backend (test-backend))
-          (,server (server:start-server :port 0 :backend ,backend)))
+          (,log (make-string-output-stream))
+          (,server (server:start-server :port 0 :backend ,backend :log ,log)))
+     (declare (ignorable ,log))
      (unwind-protect (progn ,@body)
        (server:stop-server ,server))))
 
@@ -256,9 +270,8 @@ receipts are absent."
                (is= 2 (length batch))
                (is= '(3 4) (map 'list (lambda (r) (json:jget r "id")) batch)))
              (send-frame c ws:+op-ping+ "hi")
-             (multiple-value-bind (op payload) (receive c)
-               (is= ws:+op-pong+ op)
-               (is= "hi" (octets->string payload)))
+             (is= clempo.rpc.eth:*client-version* (json:jget (call c 5 "web3_clientVersion") "result"))
+             (is= '("hi") (client-pongs c))
              (send-frame c ws:+op-close+ (integer->octets 1000 2))
              (multiple-value-bind (op payload) (receive c)
                (is= ws:+op-close+ op)
@@ -288,9 +301,9 @@ receipts are absent."
              (is= 8 (length (remove-duplicates (list heads all-logs transfers elsewhere later refused receipts syncing)
                                                :test #'equal)))
              ;; syncing says false once, right after its id
-             (is-equalp (list :false) (results-for (drain c) syncing))
+             (is-equalp (list :false) (results-for (notifications c 1) syncing))
              (advance-head server backend)
-             (let ((notes (drain c))
+             (let ((notes (notifications c 7))
                    (expected-logs (json:jget (answer backend
                                                      (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getLogs\",\"params\":[{\"fromBlock\":\"~A\",\"toBlock\":\"~:*~A\"}]}"
                                                              (quantity->hex *block*)))
@@ -342,9 +355,13 @@ receipts are absent."
              (is= :false (json:jget (call c 12 "eth_unsubscribe" (vector refused)) "result"))
              (is= :true (json:jget (call c 13 "eth_unsubscribe" (vector syncing)) "result"))
              (server:publish-head server *block*)
-             (let ((notes (drain c)))
+             (let ((notes (notifications c 6)))
+               (is= 6 (length notes))
                (is (null (results-for notes heads)))
-               (is= 3 (length (results-for notes all-logs)))))
+               (is (null (results-for notes syncing)))
+               (is= 3 (length (results-for notes all-logs)))
+               (is= 2 (length (results-for notes transfers)))
+               (is= 1 (length (results-for notes receipts)))))
         (close-client c)))))
 
 (deftest ws-concurrent-clients ()
@@ -367,7 +384,111 @@ receipts are absent."
              (is= n (length (remove-duplicates (coerce ids 'list) :test #'equal)))
              (advance-head server backend)
              (loop for c in clients for i from 0
-                   do (let ((h (results-for (drain c) (aref ids i))))
+                   do (let ((h (results-for (notifications c 1) (aref ids i))))
                         (is= 1 (length h))
                         (is= "0xd87" (json:jget (first h) "number")))))
         (mapc #'close-client clients)))))
+
+(deftest ws-control-frames-between-fragments ()
+  ;; RFC 6455 5.4: control frames may be injected in the middle of a fragmented message
+  (let ((server (server:start-server :port 0 :log nil)))
+    (unwind-protect
+         (let ((c (connect (server:server-port server))))
+           (unwind-protect
+                (progn
+                  (send-frame c ws:+op-text+ "{\"jsonrpc\":\"2.0\"," :fin nil)
+                  (send-frame c ws:+op-ping+ "first")
+                  (send-frame c 0 "\"id\":7," :fin nil)
+                  (send-frame c ws:+op-pong+ "unsolicited")
+                  (send-frame c ws:+op-ping+ "second")
+                  (send-frame c 0 "\"method\":\"web3_sha3\",\"params\":[\"0x\"]}")
+                  (is= (json:parse-json "{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":\"0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470\"}")
+                       (call-raw c 7))
+                  (is= '("first" "second") (client-pongs c))
+                  ;; a close between fragments ends the connection
+                  (send-frame c ws:+op-text+ "{\"jsonrpc\":" :fin nil)
+                  (send-frame c ws:+op-close+ (integer->octets 1000 2))
+                  (is= ws:+op-close+ (receive c))
+                  (is (null (receive c))))
+             (close-client c)))
+      (server:stop-server server))))
+
+;;; Slow subscribers: PUBLISH-HEAD only queues, a lagging connection skips its oldest heads.
+
+(defun head-numbers (notes subscription)
+  (mapcar (lambda (h) (parse-integer (json:jget h "number") :start 2 :radix 16))
+          (results-for notes subscription)))
+
+(defun strictly-increasing-p (list) (every #'< list (rest list)))
+
+(deftest ws-stalled-client-never-blocks-the-follower ()
+  (with-test-server (server backend log)
+    (let* ((first 2000) (last 3999)
+           (stalled (connect (server:server-port server) :receive-buffer 4096))
+           (live (connect (server:server-port server))))
+      (unwind-protect
+           (let ((stalled-heads (json:jget (call stalled 1 "eth_subscribe" #("newHeads")) "result"))
+                 (stalled-logs (json:jget (call stalled 2 "eth_subscribe" #("logs")) "result"))
+                 (live-heads (json:jget (call live 1 "eth_subscribe" #("newHeads")) "result")))
+             (declare (ignore stalled-logs))
+             (setf (chain:archive-backend-head backend) last)
+             ;; LIVE reads on its own thread until the last head; STALLED reads nothing.
+             (let* ((reader (sb-thread:make-thread
+                             (lambda ()
+                               (loop for m = (receive-json live)
+                                     collect m
+                                     until (equal (json:jget* m "params" "result" "number") (quantity->hex last))))))
+                    (follower (sb-thread:make-thread
+                               (lambda ()
+                                 ;; as the node commits: under the write lock, then publish
+                                 (loop for n from first to last
+                                       maximize (let ((start (get-internal-real-time)))
+                                                  (chain:with-backend-write (backend) nil)
+                                                  (server:publish-head server n)
+                                                  (- (get-internal-real-time) start))))))
+                    (slowest (sb-thread:join-thread follower :default :blocked :timeout 60)))
+               (is (integerp slowest) "the follower finished (~S)" slowest)
+               (when (integerp slowest)
+                 (is (< slowest (* 2 internal-time-units-per-second)) "slowest commit+publish ~D ms"
+                     (round (* 1000 slowest) internal-time-units-per-second)))
+               (let ((numbers (head-numbers (sb-thread:join-thread reader :default '() :timeout 60) live-heads)))
+                 (is= last (car (last numbers)))
+                 (is (strictly-increasing-p numbers) "the live client's heads are in order")))
+             ;; the live client has everything; the stalled one's writer is blocked on its
+             ;; socket with a full queue
+             (is= (list server::+outbox-capacity+ 0)
+                  (sort (mapcar #'server::connection-outbox-length (server::server-connections server)) #'>))
+             (is (plusp (reduce #'+ (mapcar #'server::connection-skipped (server::server-connections server)))))
+             (is (search "websocket subscriber lagging behind" (get-output-stream-string log)))
+             ;; once STALLED reads again it gets the newest heads, in order, the oldest skipped
+             (let ((numbers (head-numbers (loop for m = (receive-json stalled)
+                                                collect m
+                                                until (equal (json:jget* m "params" "result" "number") (quantity->hex last)))
+                                          stalled-heads)))
+               (is= last (car (last numbers)))
+               (is (strictly-increasing-p numbers) "the stalled client's heads are in order")
+               (is (< (length numbers) (1+ (- last first))) "~D heads arrived" (length numbers))))
+        (close-client stalled)
+        (close-client live)))))
+
+(deftest ws-notification-errors-are-logged ()
+  (with-test-server (server backend log)
+    ;; a block whose receipts are not stored, and no upstream to fetch them
+    (let ((n (loop for n from 49000000 below 49000100
+                   when (and (chain:backend-block-raw (progn (setf (chain:archive-backend-head backend) n) backend) n)
+                             (null (chain:receipts-store-get (chain::archive-backend-receipts backend) n)))
+                     return n)))
+      (unless n (skip-test "no archived block without stored receipts near 49,000,000"))
+      (let ((c (connect (server:server-port server))))
+        (unwind-protect
+             (let ((heads (json:jget (call c 1 "eth_subscribe" #("newHeads")) "result"))
+                   (logs (json:jget (call c 2 "eth_subscribe" #("logs")) "result")))
+               (server:publish-head server n)
+               (let ((notes (notifications c 1)))
+                 (is= (list (quantity->hex n)) (mapcar (lambda (h) (json:jget h "number")) (results-for notes heads)))
+                 (is (null (results-for notes logs))))
+               (let ((text (get-output-stream-string log)))
+                 (is (search (format nil "logs subscription ~A, block ~D: receipts of block ~D are not available" logs n n)
+                             text)
+                     "log: ~S" text)))
+          (close-client c))))))

@@ -8,9 +8,10 @@ eth_subscribe reads the kind (serde_json's externally tagged unit enum) and the 
 params (alloy's Params, deserialized through a serde_json Value: object keys sorted and
 deduplicated, errors without positions), answers a fresh id, and starts the subscription
 once that answer is written. A kind whose params reth refuses after accepting
-(logs with a boolean, ...) gets its id and never notifies. NOTIFY-HEAD, called by
-PUBLISH-HEAD for each new block, pushes newHeads headers, matching logs, transaction
-receipts; syncing says false once, at its start, and never changes.")
+(logs with a boolean, ...) gets its id and never notifies. NOTIFY-HEAD, called on the
+connection's writer thread for each head PUBLISH-HEAD queued, renders under the backend's
+read lock and then pushes newHeads headers, matching logs, transaction receipts; syncing
+says false once, at its start, and never changes.")
   (:export #:subscription #:subscription-id #:subscription-kind #:subscription-filter
            #:subscribe #:unsubscribe))
 
@@ -76,83 +77,12 @@ fails as jsonrpsee's sequence parser does."
 
 ;;; The params: alloy Params::from_json_value over a serde_json Value
 
-(defun rust-float-text (x)
-  "An f64 as serde_json prints an unexpected float: shortest digits, exponent form (e-6,
-e+16) below 1e-5 and from 1e16."
-  (if (zerop x)
-      (if (minusp (float-sign x)) "-0.0" "0.0")
-      (multiple-value-bind (k digits) (sb-impl::flonum-to-digits (abs x))
-        (let ((e (1- k)) (n (length digits)))
-          (concatenate
-           'string (if (minusp x) "-" "")
-           (cond ((or (< e -5) (>= e 16))
-                  (format nil "~A~:[.~A~;~*~]e~:[~;+~]~D"
-                          (char digits 0) (= n 1) (subseq digits 1) (>= e 0) e))
-                 ((<= k 0) (format nil "0.~v,,,'0A~A" (- k) "" digits))
-                 ((>= k n) (format nil "~A~v,,,'0A.0" digits (- k n) ""))
-                 (t (format nil "~A.~A" (subseq digits 0 k) (subseq digits k)))))))))
-
-(defun out-of-range () (serde:serde-fail "number out of range"))
-
-(defun f64-from-parts (positive significand exponent)
-  "serde_json's f64_from_parts: the significand as an f64 scaled once by a power of ten."
-  (let ((f (coerce significand 'double-float)))
-    (loop
-      (cond ((<= (abs exponent) 308)
-             (let ((pow (coerce (expt 10 (abs exponent)) 'double-float)))
-               (setf f (if (>= exponent 0)
-                           (handler-case (* f pow) (floating-point-overflow () (out-of-range)))
-                           (/ f pow))))
-             (return))
-            ((zerop f) (return))
-            ((>= exponent 0) (out-of-range))
-            (t (setf f (/ f 1d308)) (incf exponent 308))))
-    (if positive f (- f))))
-
-(defun serde-json-number (text)
-  "The JSON number TEXT as serde_json parses it without float_roundtrip: a u64 or an i64 when
-it is an integer that fits, otherwise an f64 from the digits that fit a u64 and a power of
-ten (digits beyond are dropped, so the result may be one ulp from the nearest double)."
-  (let ((pos 0) (n (length text)) (positive t) (significand 0) (exponent 0) (float nil))
-    (labels ((peekc () (and (< pos n) (char text pos)))
-             (digit () (let ((c (peekc))) (and c (digit-char-p c))))
-             (overflowp (d) (let ((q (floor +u64-max+ 10)))
-                              (and (>= significand q) (or (> significand q) (> d (mod +u64-max+ 10)))))))
-      (when (eql (peekc) #\-) (setf positive nil) (incf pos))
-      (loop for d = (digit) while d
-            do (if (or float (overflowp d))
-                   (setf float t exponent (1+ exponent))
-                   (setf significand (+ (* significand 10) d)))
-               (incf pos))
-      (when (eql (peekc) #\.)
-        (setf float t) (incf pos)
-        (let ((overflowed nil))
-          (loop for d = (digit) while d
-                do (unless (or overflowed (setf overflowed (overflowp d)))
-                     (setf significand (+ (* significand 10) d))
-                     (decf exponent))
-                   (incf pos))))
-      (when (member (peekc) '(#\e #\E))
-        (setf float t) (incf pos)
-        (let ((positive-exp t) (e 0))
-          (case (peekc) (#\+ (incf pos)) (#\- (setf positive-exp nil) (incf pos)))
-          (loop for d = (digit) while d do (setf e (+ (* e 10) d)) (incf pos))
-          (when (> e (1- (ash 1 31)))
-            (return-from serde-json-number
-              (if (and positive-exp (plusp significand)) (out-of-range) (if positive 0d0 -0d0))))
-          (setf exponent (max (- (ash 1 31)) (min (1- (ash 1 31)) (if positive-exp (+ exponent e) (- exponent e)))))))
-      (cond (float (f64-from-parts positive significand exponent))
-            (positive significand)
-            ((zerop significand) -0d0)
-            ((<= significand (ash 1 63)) (- significand))
-            (t (- (coerce significand 'double-float)))))))
-
 (defun read-serde-value (src)
   "The next value as serde_json's Value holds it: object keys sorted and deduplicated (the
-last wins), numbers parsed by SERDE-JSON-NUMBER."
+last wins), numbers as serde_json reads them."
   (ecase (serde:peek-kind src)
     (:string (serde:read-string src))
-    (:number (serde-json-number (serde:read-raw-value src)))
+    (:number (serde:read-number src))
     ((:true :false :null) (let ((kind (serde:peek-kind src))) (serde:skip-value src) kind))
     (:object (let ((pairs '()))
                (serde:do-object (key src)
@@ -166,8 +96,7 @@ last wins), numbers parsed by SERDE-JSON-NUMBER."
 (defun unexpected-value (v)
   (cond ((eq v :true) "boolean `true`") ((eq v :false) "boolean `false`") ((eq v :null) "null")
         ((stringp v) (format nil "string ~A" (serde:rust-debug-string v)))
-        ((integerp v) (format nil "integer `~D`" v))
-        ((floatp v) (format nil "floating point `~A`" (rust-float-text v)))
+        ((numberp v) (serde:number-unexpected v))
         ((json:jobject-p v) "map")
         (t "sequence")))
 
@@ -320,10 +249,24 @@ accepting (the id is answered and nothing follows)."
                            collect rc)))
     (when receipts (list (coerce receipts 'simple-vector)))))
 
-(defmethod server:notify-head ((backend chain:backend) connection number)
+(defun render-head (backend number subscriptions)
+  "((subscription . results) ...) for new head NUMBER, rendered under BACKEND's read lock. A
+subscription whose results fail (missing receipts, ...) is logged and skipped, as reth logs
+a conversion error and goes on."
   (chain:with-backend-read (backend)
     (let ((b (chain-block number)))
-      (when b
-        (dolist (sub (reverse (server:connection-subscriptions connection)))
-          (dolist (result (notifications (subscription-kind sub) sub b))
-            (server:send-notification connection "eth_subscription" (subscription-id sub) result)))))))
+      (if (null b)
+          (progn (server:log-event "block ~D is not available for subscriptions" number) '())
+          (loop for sub in subscriptions
+                for results = (handler-case (notifications (subscription-kind sub) sub b)
+                                (error (e)
+                                  (server:log-event "~(~A~) subscription ~A, block ~D: ~A"
+                                                    (subscription-kind sub) (subscription-id sub) number e)
+                                  '()))
+                when results collect (cons sub results))))))
+
+(defmethod server:notify-head ((backend chain:backend) connection number subscriptions)
+  ;; Sent after the read lock is released: a stalled client must not hold back a writer.
+  (loop for (sub . results) in (render-head backend number subscriptions)
+        do (dolist (result results)
+             (server:send-notification connection "eth_subscription" (subscription-id sub) result))))

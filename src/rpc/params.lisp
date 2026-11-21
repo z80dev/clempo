@@ -32,7 +32,7 @@
     (:array
      (let ((bytes '()))
        (do-array (i src)
-         (push (if (eq (peek-kind src) :number) (read-number src) (invalid-type src "u8")) bytes))
+         (push (read-integer src 0 255 "u8") bytes))
        (unless (= (length bytes) n)
          (serde-fail-here src "invalid length ~D, expected exactly ~D bytes" (length bytes) n))
        (coerce (nreverse bytes) 'octets)))
@@ -63,9 +63,11 @@
                                         "Failed to parse hex encoded index value"
                                         "Failed to parse numeric index")
                                     (serde-error-message e))))))
+    ;; its visitor takes only a u64: any other number is an invalid type
     (:number (let ((n (read-number src)))
                (if (and (integerp n) (<= 0 n +u64-max+)) n
-                   (serde-fail-here src "invalid value: integer `~A`, expected hex-encoded or decimal index" n))))
+                   (serde-fail-here src "invalid type: ~A, expected hex-encoded or decimal index"
+                                    (number-unexpected n)))))
     (t (invalid-type src "hex-encoded or decimal index"))))
 
 (defparameter +block-tags+ '("latest" "earliest" "pending" "safe" "finalized"))
@@ -117,18 +119,38 @@
                    (hex->octets h)))))
       (invalid-type src "a valid hex string")))
 
-(defun read-quantity (src bits expected)
-  (case (peek-kind src)
-    (:string (let ((s (read-string src)))
-               (if (hex-prefixed-p s)
-                   (handler-case (rust-parse-uint (subseq s 2) 16 bits)
-                     (serde-error (e) (serde-fail-here src "~A" (serde-error-message e))))
-                   (serde-fail-here src "invalid value: string ~A, expected ~A" (rust-debug-string s) expected))))
-    (:number (let ((n (read-number src)))
-               (if (and (integerp n) (< -1 n (ash 1 bits))) n
-                   (serde-fail-here src "invalid value: integer `~A`, expected ~A" n expected))))
-    (t (invalid-type src expected))))
+(defun parse-ruint (s bits)
+  "ruint's FromStr: 0x/0o/0b prefixes or decimal, underscores ignored; NIL when invalid or
+too large for BITS."
+  (flet ((prefixed-p (prefix) (and (>= (length s) 2) (string-equal prefix s :end2 2))))
+    (multiple-value-bind (digits radix)
+        (cond ((prefixed-p "0x") (values (subseq s 2) 16))
+              ((prefixed-p "0o") (values (subseq s 2) 8))
+              ((prefixed-p "0b") (values (subseq s 2) 2))
+              (t (values s 10)))
+      (let ((n 0))
+        (loop for c across digits
+              unless (char= c #\_)
+                do (let ((d (digit-char-p c radix)))
+                     (unless d (return-from parse-ruint nil))
+                     (setf n (+ (* n radix) d))))
+        (and (< n (ash 1 bits)) n)))))
 
-(defparam u64 (src) "quantity up to 2^64" (read-quantity src 64 "a 64-bit unsigned integer"))
-(defparam u256 (src) "quantity up to 2^256" (read-quantity src 256 "a 256-bit unsigned integer"))
+(defun read-ruint (src bits)
+  "ruint Uint<BITS> (alloy's U64, U256 ...) from JSON: a string (hex, octal, binary or
+decimal) or a u64 number."
+  (let ((expected (format nil "a ~D byte hex string" (ceiling bits 8))))
+    (case (peek-kind src)
+      (:string (let* ((s (read-string src)) (n (parse-ruint s bits)))
+                 (or n (serde-fail-here src "invalid value: string ~A, expected ~A"
+                                        (rust-debug-string s) expected))))
+      (:number (let ((n (read-number src)))
+                 (cond ((and (integerp n) (<= 0 n +u64-max+))
+                        (if (< n (ash 1 bits)) n
+                            (serde-fail-here src "invalid value: integer `~D`, expected ~A" n expected)))
+                       (t (serde-fail-here src "invalid type: ~A, expected ~A" (number-unexpected n) expected)))))
+      (t (invalid-type src expected)))))
+
+(defparam u64 (src) "alloy U64 (ruint)" (read-ruint src 64))
+(defparam u256 (src) "alloy U256 (ruint)" (read-ruint src 256))
 (defparam string (src) "a JSON string" (if (eq (peek-kind src) :string) (read-string src) (invalid-type src "a string")))

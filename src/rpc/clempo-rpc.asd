@@ -27,4 +27,5 @@
   :serial t
   :components ((:file "rpc-tests")
                (:file "ws-tests")
-               (:file "state-tests")))
+               (:file "state-tests")
+               (:file "serde-tests")))

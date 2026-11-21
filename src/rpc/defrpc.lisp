@@ -13,7 +13,8 @@ envelope errors).")
            #:handle-body #:handle-request-object #:*methods* #:read-param
            #:*connection* #:+invalid-params+ #:+internal-error+ #:+method-not-found+
            ;; parameter types (params.lisp)
-           #:hash #:address #:bool #:any #:index #:block-number-or-tag #:block-id #:bytes #:u64 #:u256))
+           #:hash #:address #:bool #:any #:index #:block-number-or-tag #:block-id #:bytes #:u64 #:u256
+           #:read-ruint))
 
 (in-package #:clempo.rpc)
 

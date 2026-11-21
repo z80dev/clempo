@@ -79,14 +79,17 @@ base64, used for nothing else) and reading and writing frames on a binary stream
         (dotimes (i len) (setf (aref payload i) (logxor (aref payload i) (aref mask (mod i 4))))))
       (values fin opcode payload))))
 
-(defun read-message (stream)
-  "The next data or control message: (values opcode payload), reassembling fragments.
-Returns NIL at end of stream."
+(defun read-message (stream &optional on-control)
+  "The next data or close message: (values opcode payload), reassembling fragments. Ping
+and pong frames, which may also come between the fragments of a message (RFC 6455 5.4),
+are handed to ON-CONTROL (a function of opcode and payload; dropped when NIL) and reading
+goes on. Returns NIL at end of stream."
   (handler-case
       (let ((parts '()) (first-op nil))
         (loop
           (multiple-value-bind (fin opcode payload) (read-frame stream)
-            (cond ((>= opcode 8) (return (values opcode payload)))
+            (cond ((= opcode +op-close+) (return (values opcode payload)))
+                  ((>= opcode 8) (when on-control (funcall on-control opcode payload)))
                   (t (unless first-op (setf first-op opcode))
                      (push payload parts)
                      (when fin (return (values first-op (apply #'octets-concat (nreverse parts))))))))))
