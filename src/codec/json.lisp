@@ -6,7 +6,7 @@
   true/false/null -> :true :false :null")
   (:export #:parse-json #:write-json #:to-json-string #:to-json-octets
            #:jget #:jget* #:jobject #:jobject-p #:json-error #:json-equal
-           #:jbool))
+           #:jbool #:*json-max-depth* #:+json-max-integer-digits+))
 
 (in-package #:clempo.json)
 
@@ -37,15 +37,69 @@
                 (string (jget obj k))
                 (integer (if (and (simple-vector-p obj) (< k (length obj))) (svref obj k) nil))))))
 
-;;; Parsing from a string (octets are decoded as UTF-8 first).
+;;; Parsing from a string (octets are decoded as UTF-8 first). The parser is a loop over
+;;; an explicit stack, so input nesting never reaches the control stack; every malformed
+;;; input, including invalid UTF-8, signals JSON-ERROR.
 
-(defun parse-json (input)
-  (let* ((s (etypecase input
-              (string input)
-              (vector (octets->string (coerce input 'octets)))))
+(defvar *json-max-depth* 127
+  "The most arrays and objects a parsed value may nest, NIL for no limit. 127 is serde_json's
+recursion limit (remaining_depth 128, failing when it reaches 0), the reference's own
+bound for a typed value.")
+
+(defconstant +json-max-integer-digits+ 1000
+  "Integer literals up to this many digits parse exactly. A longer one lies beyond the
+double range and reads as a double (an infinity), as serde_json reads an integer that does
+not fit 64 bits, so no literal costs quadratic bignum work.")
+
+(defun json-text (input)
+  (etypecase input
+    (simple-string input)
+    (string (coerce input 'simple-string))
+    (vector (handler-case (octets->string (coerce input 'octets))
+              (error () (jfail "invalid UTF-8"))))))
+
+(defun decimal-to-double (negative digits start end exponent)
+  "The double nearest (ties to even) to the decimal DIGITS[START,END) * 10^EXPONENT, where
+DIGITS holds only #\\0..#\\9 (the decimal point removed). Beyond the double range the result
+is an infinity, below it a zero of the right sign."
+  (declare (type simple-string digits) (type fixnum start end) (type integer exponent))
+  (let ((start (or (position #\0 digits :start start :end end :test-not #'char=) end)))
+    (flet ((signed (x) (if negative (- x) x)))
+      (when (= start end)
+        (return-from decimal-to-double (signed 0d0)))
+      ;; Magnitude: 10^(MAGNITUDE-1) <= value < 10^MAGNITUDE.
+      (let ((magnitude (+ (- end start) exponent)))
+        (cond ((> magnitude 310) (if negative
+                                     sb-ext:double-float-negative-infinity
+                                     sb-ext:double-float-positive-infinity))
+              ((< magnitude -330) (signed 0d0))
+              (t
+               ;; 768 significant digits decide every halfway case; keep 800 and fold the
+               ;; rest into a sticky nonzero digit so the rounding direction is unchanged.
+               (let* ((kept (min (- end start) 800))
+                      (mantissa (parse-integer digits :start start :end (+ start kept)))
+                      (scale (+ exponent (- (- end start) kept))))
+                 (when (find #\0 digits :start (+ start kept) :end end :test-not #'char=)
+                   (setf mantissa (+ (* 10 mantissa) 1) scale (1- scale)))
+                 (let ((x (handler-case
+                              (coerce (if (minusp scale)
+                                          (/ mantissa (expt 10 (- scale)))
+                                          (* mantissa (expt 10 scale)))
+                                      'double-float)
+                            (floating-point-overflow () sb-ext:double-float-positive-infinity))))
+                   (signed x)))))))))
+
+(defun parse-json (input &key (max-depth *json-max-depth*))
+  "Parse one JSON text (RFC 8259) from a string or UTF-8 octets. Arrays and objects may
+nest at most MAX-DEPTH deep (NIL: unbounded). Signals JSON-ERROR on any malformed input."
+  (let* ((s (json-text input))
          (pos 0)
-         (n (length s)))
-    (declare (type simple-string s) (type fixnum pos n))
+         (n (length s))
+         ;; Open containers, innermost first: (:array . items) or (:object key . pairs),
+         ;; items and pairs in reverse order.
+         (stack '())
+         (depth 0))
+    (declare (type simple-string s) (type fixnum pos n depth))
     (labels ((peek () (if (< pos n) (schar s pos) (jfail "unexpected end")))
              (skip-ws ()
                (loop while (and (< pos n) (member (schar s pos) '(#\Space #\Tab #\Newline #\Return)))
@@ -58,54 +112,35 @@
                  (jfail "bad literal at ~D" pos))
                (incf pos (length word))
                value)
-             (value ()
-               (skip-ws)
-               (let ((c (peek)))
-                 (case c
-                   (#\{ (object))
-                   (#\[ (array))
-                   (#\" (str))
-                   (#\t (literal "true" :true))
-                   (#\f (literal "false" :false))
-                   (#\n (literal "null" :null))
-                   (t (num)))))
-             (object ()
-               (expect #\{)
-               (skip-ws)
-               (if (char= (peek) #\})
-                   (progn (incf pos) (list :object))
-                   (let ((pairs '()))
-                     (loop
-                       (skip-ws)
-                       (let ((k (str)))
-                         (skip-ws) (expect #\:)
-                         (push (cons k (value)) pairs))
-                       (skip-ws)
-                       (case (peek)
-                         (#\, (incf pos))
-                         (#\} (incf pos) (return (cons :object (nreverse pairs))))
-                         (t (jfail "expected , or } at ~D" pos)))))))
-             (array ()
-               (expect #\[)
-               (skip-ws)
-               (if (char= (peek) #\])
-                   (progn (incf pos) (vector))
-                   (let ((items '()))
-                     (loop
-                       (push (value) items)
-                       (skip-ws)
-                       (case (peek)
-                         (#\, (incf pos))
-                         (#\] (incf pos) (return (coerce (nreverse items) 'simple-vector)))
-                         (t (jfail "expected , or ] at ~D" pos)))))))
+             (open-container ()
+               (incf pos)
+               (incf depth)
+               (when (and max-depth (> depth max-depth))
+                 (jfail "nesting deeper than ~D at ~D" max-depth pos)))
+             (digits ()
+               "Skip a run of ASCII digits; return how many."
+               (let ((start pos))
+                 (loop while (and (< pos n) (char<= #\0 (schar s pos) #\9)) do (incf pos))
+                 (- pos start)))
              (hex4 ()
-               (when (> (+ pos 4) n) (jfail "short \\u escape"))
-               (prog1 (parse-integer s :start pos :end (+ pos 4) :radix 16) (incf pos 4)))
+               (when (> (+ pos 4) n) (jfail "short \\u escape at ~D" pos))
+               (let ((code 0))
+                 (dotimes (i 4 code)
+                   (let* ((c (schar s pos))
+                          (d (cond ((char<= #\0 c #\9) (- (char-code c) 48))
+                                   ((char<= #\a c #\f) (- (char-code c) 87))
+                                   ((char<= #\A c #\F) (- (char-code c) 55)))))
+                     (unless d (jfail "bad \\u escape at ~D" pos))
+                     (setf code (+ (* code 16) d))
+                     (incf pos)))))
              (str ()
                (expect #\")
                (let ((start pos))
                  ;; fast path: no escapes
-                 (loop while (and (< pos n) (not (member (schar s pos) '(#\" #\\)))) do (incf pos))
+                 (loop while (and (< pos n)
+                                  (let ((c (schar s pos)))
+                                    (not (or (char= c #\") (char= c #\\) (< (char-code c) 32)))))
+                       do (incf pos))
                  (when (>= pos n) (jfail "unterminated string"))
                  (if (char= (schar s pos) #\")
                      (prog1 (subseq s start pos) (incf pos))
@@ -116,7 +151,10 @@
                          (let ((c (schar s pos)))
                            (incf pos)
                            (cond ((char= c #\") (return (get-output-stream-string out)))
+                                 ((< (char-code c) 32)
+                                  (jfail "control character in string at ~D" (1- pos)))
                                  ((char= c #\\)
+                                  (when (>= pos n) (jfail "unterminated string"))
                                   (let ((e (schar s pos)))
                                     (incf pos)
                                     (case e
@@ -125,39 +163,110 @@
                                       (#\f (write-char #\Page out)) (#\n (write-char #\Newline out))
                                       (#\r (write-char #\Return out)) (#\t (write-char #\Tab out))
                                       (#\u (let ((cp (hex4)))
-                                             (when (and (<= #xD800 cp #xDBFF)
-                                                        (< (1+ pos) n) (char= (schar s pos) #\\)
-                                                        (char= (schar s (1+ pos)) #\u))
-                                               (incf pos 2)
-                                               (let ((lo (hex4)))
-                                                 (setf cp (+ #x10000 (ash (- cp #xD800) 10) (- lo #xDC00)))))
+                                             (cond ((<= #xD800 cp #xDBFF)
+                                                    (unless (and (< (1+ pos) n) (char= (schar s pos) #\\)
+                                                                 (char= (schar s (1+ pos)) #\u))
+                                                      (jfail "lone leading surrogate at ~D" pos))
+                                                    (incf pos 2)
+                                                    (let ((lo (hex4)))
+                                                      (unless (<= #xDC00 lo #xDFFF)
+                                                        (jfail "invalid trailing surrogate at ~D" pos))
+                                                      (setf cp (+ #x10000 (ash (- cp #xD800) 10)
+                                                                  (- lo #xDC00)))))
+                                                   ((<= #xDC00 cp #xDFFF)
+                                                    (jfail "lone trailing surrogate at ~D" pos)))
                                              (write-char (code-char cp) out)))
                                       (t (jfail "bad escape \\~C" e)))))
                                  (t (write-char c out)))))))))
              (num ()
-               (let ((start pos) (float nil))
-                 (when (char= (peek) #\-) (incf pos))
-                 (loop while (and (< pos n)
-                                  (let ((c (schar s pos)))
-                                    (or (digit-char-p c)
-                                        (when (find c ".eE+-") (setf float t)))))
-                       do (incf pos))
-                 (when (= start pos) (jfail "unexpected ~C at ~D" (schar s pos) pos))
-                 (if float
-                     ;; a literal beyond the double range is valid JSON: it reads as an
-                     ;; infinity (as JavaScript's JSON.parse does), never a Lisp error
-                     (let* ((*read-default-float-format* 'double-float)
-                            (x (handler-case (let ((*read-eval* nil)) (read-from-string s t nil :start start :end pos))
-                                 (sb-kernel:reader-impossible-number-error ()
-                                   (if (char= (schar s start) #\-)
-                                       sb-ext:double-float-negative-infinity
-                                       sb-ext:double-float-positive-infinity)))))
-                       (if (realp x) (coerce x 'double-float) (jfail "bad number at ~D" start)))
-                     (parse-integer s :start start :end pos)))))
-      (let ((v (value)))
-        (skip-ws)
-        (unless (= pos n) (jfail "trailing data at ~D" pos))
-        v))))
+               ;; number = [ "-" ] ( "0" / digit1-9 *digit ) [ "." 1*digit ] [ e [ "+" / "-" ] 1*digit ]
+               (let ((start pos) (negative nil) (int-start 0) (int-end 0)
+                     (frac-start 0) (frac-end 0) (exponent 0))
+                 (declare (type fixnum start int-start int-end frac-start frac-end)
+                          (type integer exponent))
+                 (when (char= (peek) #\-) (setf negative t) (incf pos))
+                 (setf int-start pos)
+                 (cond ((and (< pos n) (char= (schar s pos) #\0)) (incf pos))
+                       ((zerop (digits)) (jfail "bad number at ~D" start)))
+                 (setf int-end pos frac-start pos frac-end pos)
+                 (when (and (< pos n) (char= (schar s pos) #\.))
+                   (incf pos)
+                   (setf frac-start pos)
+                   (when (zerop (digits)) (jfail "bad number at ~D" start))
+                   (setf frac-end pos))
+                 (when (and (< pos n) (char-equal (schar s pos) #\e))
+                   (incf pos)
+                   (let ((sign 1))
+                     (when (and (< pos n) (find (schar s pos) "+-"))
+                       (when (char= (schar s pos) #\-) (setf sign -1))
+                       (incf pos))
+                     (let ((e-start pos))
+                       (when (zerop (digits)) (jfail "bad number at ~D" start))
+                       ;; Saturate: past 10^7 every value is already an infinity or a zero.
+                       (loop for i from e-start below pos
+                             do (setf exponent (min 10000000 (+ (* 10 exponent)
+                                                                (- (char-code (schar s i)) 48)))))
+                       (setf exponent (* sign exponent)))))
+                 (cond ((and (= frac-start frac-end) (= pos frac-end)
+                             (<= (- int-end int-start) +json-max-integer-digits+))
+                        (let ((v (parse-integer s :start int-start :end int-end)))
+                          (if negative (- v) v)))
+                       ((= frac-start frac-end)
+                        (decimal-to-double negative s int-start int-end exponent))
+                       (t
+                        ;; Join the integer and fraction digits; only the digits matter.
+                        (let ((joined (concatenate 'simple-string
+                                                   (subseq s int-start int-end)
+                                                   (subseq s frac-start frac-end))))
+                          (decimal-to-double negative joined 0 (length joined)
+                                             (- exponent (- frac-end frac-start)))))))))
+      (let ((value nil))
+        (loop
+          ;; Parse a value, entering containers until one completes.
+          (skip-ws)
+          (setf value
+                (case (peek)
+                  (#\{ (open-container) (skip-ws)
+                   (cond ((eql (peek) #\}) (incf pos) (decf depth) (list :object))
+                         (t (let ((key (str))) (skip-ws) (expect #\:)
+                              (push (list :object key) stack))
+                            nil)))
+                  (#\[ (open-container) (skip-ws)
+                   (cond ((eql (peek) #\]) (incf pos) (decf depth) (vector))
+                         (t (push (list :array) stack) nil)))
+                  (#\" (str))
+                  (#\t (literal "true" :true))
+                  (#\f (literal "false" :false))
+                  (#\n (literal "null" :null))
+                  (t (num))))
+          ;; NIL means a container was opened and its first member comes next.
+          (when value
+            ;; Hand the value to the innermost container; close containers that end.
+            (loop
+              (let ((frame (first stack)))
+                (when (null frame)
+                  (skip-ws)
+                  (unless (= pos n) (jfail "trailing data at ~D" pos))
+                  (return-from parse-json value))
+                (skip-ws)
+                (if (eq (first frame) :array)
+                    (progn
+                      (push value (cdr frame))
+                      (case (peek)
+                        (#\, (incf pos) (return))
+                        (#\] (incf pos) (pop stack) (decf depth)
+                         (setf value (coerce (nreverse (cdr frame)) 'simple-vector)))
+                        (t (jfail "expected , or ] at ~D" pos))))
+                    (progn
+                      (push (cons (second frame) value) (cddr frame))
+                      (case (peek)
+                        (#\, (incf pos) (skip-ws)
+                         (setf (second frame) (str))
+                         (skip-ws) (expect #\:)
+                         (return))
+                        (#\} (incf pos) (pop stack) (decf depth)
+                         (setf value (cons :object (nreverse (cddr frame)))))
+                        (t (jfail "expected , or } at ~D" pos)))))))))))))
 
 ;;; Writing
 
@@ -182,7 +291,10 @@
         ((eq v :false) (write-string "false" out))
         ((or (eq v :null) (null v)) (write-string "null" out))
         ((integerp v) (format out "~D" v))
-        ((floatp v) (let ((*read-default-float-format* 'double-float)) (format out "~F" v)))
+        ;; JSON has no infinity or NaN; serde_json's serializer writes null for both.
+        ((floatp v) (if (or (sb-ext:float-infinity-p v) (sb-ext:float-nan-p v))
+                        (write-string "null" out)
+                        (let ((*read-default-float-format* 'double-float)) (format out "~F" v))))
         ((stringp v) (write-json-string v out))
         ((jobject-p v)
          (write-char #\{ out)

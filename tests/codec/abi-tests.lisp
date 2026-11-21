@@ -103,3 +103,24 @@
   (let ((enc (abi-encode '((:int 8)) '(-1))))
     (is= (make-string 64 :initial-element #\f) (hex enc))
     (is= '(-1) (abi-decode '((:int 8)) enc :strict t))))
+
+(deftest abi-zero-size-element-arrays-are-bounded ()
+  ;; ()[] and uint256[0][] carry no data per element, so a 64-byte payload can claim
+  ;; 2^64-1 elements; alloy-sol-types 1.7 charges them to the memory limit up front and
+  ;; rejects any nonzero length in strict mode. Each case once spun allocating NILs.
+  (flet ((payload (len)
+           (words "0000000000000000000000000000000000000000000000000000000000000020"
+                  (format nil "~64,'0x" len))))
+    (dolist (types '(((:array (:tuple))) ((:array (:array (:uint 256) 0)))
+                     ((:array (:tuple (:tuple) (:array :bool 0))))))
+      (is= 0 (abi-min-words (second (first types))))
+      (let ((start (get-internal-real-time)))
+        (signals abi-decode-error (abi-decode types (payload (1- (expt 2 64)))))
+        (signals abi-decode-error (abi-decode types (payload (1- (expt 2 64))) :strict t))
+        (signals abi-decode-error (abi-decode types (payload (1+ (expt 2 26)))))
+        (is (< (- (get-internal-real-time) start) internal-time-units-per-second)))
+      (is= '((nil nil nil)) (abi-decode types (payload 3)))
+      (signals abi-decode-error (abi-decode types (payload 3) :strict t))
+      (is= '(()) (abi-decode types (payload 0) :strict t))
+      (signals abi-decode-error (abi-decode types (payload 4) :memory-limit 63))
+      (is= 64 (length (first (abi-decode types (payload 64) :memory-limit 1024)))))))

@@ -452,6 +452,17 @@ array 24, fixed arrays and tuples the sum of their elements."
           (let ((b (ldb (byte 8 0) w)))
             (if (< b (second type)) b 255))))))))
 
+(defun decode-zero-size-elements (d len)
+  "alloy's DynSeqToken::decode_from for elements of no head words (() or T[0]): no data
+backs them, so LEN alone sets the work. Strict decoding rejects any LEN but 0; otherwise
+each element counts against the memory limit before any is made. alloy charges a nominal
+byte for its zero-sized tokens; each NIL here costs a cons, so it charges the cons's 16
+bytes and the decode stays within the limit it was given (a dynamic array of 2^64-1 empty
+tuples fails at once instead of spinning)."
+  (when (and (decoder-strict d) (plusp len)) (abi-fail "reserialization mismatch"))
+  (reserve d (* len 16))
+  (make-list len))
+
 (defun decode-from (type d)
   (etypecase type
     (keyword
@@ -475,13 +486,15 @@ array 24, fixed arrays and tuples the sum of their elements."
                     (with-child (c (take-indirection d)) (decode-sequence types c))
                     (decode-sequence types d)))
               (with-child (c (take-indirection d))
-                (let* ((len (take-offset c))
-                       (required (* (abi-min-words elem) len)))
-                  (with-child (c2 (child-decoder c (decoder-offset c)))
-                    (set-strict-head-words c2 required)
-                    (when (> required (floor (dec-remaining c2) 32)) (abi-fail "overrun"))
-                    (reserve c2 (* len (token-size elem)))
-                    (loop repeat len collect (decode-from elem c2))))))))
+                (let ((len (take-offset c)))
+                  (if (zerop (abi-min-words elem))
+                      (decode-zero-size-elements c len)
+                      (let ((required (* (abi-min-words elem) len)))
+                        (with-child (c2 (child-decoder c (decoder-offset c)))
+                          (set-strict-head-words c2 required)
+                          (when (> required (floor (dec-remaining c2) 32)) (abi-fail "overrun"))
+                          (reserve c2 (* len (token-size elem)))
+                          (loop repeat len collect (decode-from elem c2))))))))))
        (:tuple
         (if (abi-dynamic-p type)
             (with-child (c (take-indirection d)) (decode-sequence (rest type) c))

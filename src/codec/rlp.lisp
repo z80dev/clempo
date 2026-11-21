@@ -3,7 +3,7 @@
   (:documentation "Recursive Length Prefix encoding. Items are octet vectors and lists of
 items; integers encode as minimal big-endian strings.")
   (:export #:rlp-encode #:rlp-encode-into #:rlp-encoded-length
-           #:rlp-decode #:rlp-decode-integer #:rlp-item-bounds
+           #:rlp-decode #:rlp-decode-integer #:rlp-item-bounds #:*rlp-max-depth*
            #:rlp-error #:rlp-raw #:make-rlp-raw #:rlp-raw-octets #:header-length #:write-header))
 
 (in-package #:clempo.rlp)
@@ -118,21 +118,30 @@ Rejects non-canonical headers."
         (when (> (+ start len) end) (rlp-fail "item overruns input at ~D" pos))
         (values start (+ start len) list-p)))))
 
-(defun decode-at (data pos end)
-  (declare (type octets data) (type fixnum pos end))
+(defvar *rlp-max-depth* 32
+  "The most lists a decoded item may nest, goempo's DepthMax; Tempo's own structures nest
+far less (tests/types/transactions.lisp measures them). Decoding recurses once per level, so
+this also bounds the control stack on hostile input.")
+
+(defun decode-at (data pos end depth)
+  (declare (type octets data) (type fixnum pos end depth))
   (multiple-value-bind (start stop list-p) (rlp-item-bounds data pos end)
     (if list-p
         (let ((items '()) (p start))
+          (when (zerop depth) (rlp-fail "lists nest too deep at ~D" pos))
           (loop while (< p stop)
-                do (multiple-value-bind (item next) (decode-at data p stop)
+                do (multiple-value-bind (item next) (decode-at data p stop (1- depth))
                      (push item items)
                      (setf p next)))
           (values (nreverse items) stop))
         (values (subseq data start stop) stop))))
 
-(defun rlp-decode (data &key (start 0) (end (length data)) (allow-trailing nil))
-  "Decode one item. Returns (values item position-after)."
-  (multiple-value-bind (item next) (decode-at data start end)
+(defun rlp-decode (data &key (start 0) (end (length data)) (allow-trailing nil)
+                          (max-depth *rlp-max-depth*))
+  "Decode one item. Returns (values item position-after). Lists may nest MAX-DEPTH deep."
+  (unless (and (typep data 'octets) (<= 0 start end (length data)))
+    (rlp-fail "invalid input range ~S..~S" start end))
+  (multiple-value-bind (item next) (decode-at data start end max-depth)
     (unless (or allow-trailing (= next end))
       (rlp-fail "~D trailing bytes" (- end next)))
     (values item next)))
