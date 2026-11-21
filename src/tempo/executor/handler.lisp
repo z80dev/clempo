@@ -64,7 +64,14 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
   (authorizations '())                  ; raw 7702 / tempo authorization items
   (calls '())                           ; AA: ((to-or-nil value input) ...)
   (nonce-key 0) valid-before valid-after fee-token sponsored-p
-  key-authorization signature)
+  key-authorization signature
+  (%key-id :unknown))                   ; keychain access key, recovered once
+
+(defun txv-key-id (v)
+  "The access key of a keychain-signed transaction (NIL otherwise), recovered once."
+  (if (eq (txv-%key-id v) :unknown)
+      (setf (txv-%key-id v) (tx:transaction-key-id (txv-tx v)))
+      (txv-%key-id v)))
 
 (defun parse-access-list (raw)
   (mapcar (lambda (entry)
