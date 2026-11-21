@@ -1011,7 +1011,14 @@ methods are slow far behind the head, so they use the samples' recent archive bl
                                        "traceTransfers" :true "returnFullTransactions" :true)
                 n)))
      (list (r "eth_getMultiProof" (jv (jv +pathusd+ (jv +zero-hash+))) "latest")
-           (r "eth_getMultiProof" (jv (jv +pathusd+ (jv)) (jv +fee-manager+ (jv +zero-hash+))) "latest")))))
+           (r "eth_getMultiProof" (jv (jv +pathusd+ (jv)) (jv +fee-manager+ (jv +zero-hash+))) "latest"))
+     ;; reth's no-op and fixed answers, and code by its database key
+     (list (r "debug_seedHash" 0) (r "debug_seedHash" 123456) (r "debug_dbAncient" "headers" 1)
+           (r "debug_printBlock" 1) (r "debug_getModifiedAccountsByNumber" 1 2)
+           (r "debug_getModifiedAccountsByHash" +unknown-hash+ +unknown-hash+)
+           (r "debug_dbGet" "0x63309b8896ee4c1ff7ec1966155373dee42663b6b40c3fedc70ba501684848d2a3")
+           (r "debug_dbGet" (concatenate 'string "0x63" (subseq +zero-hash+ 2)))
+           (r "debug_dbGet" (concatenate 'string "0x63" (subseq (octets->hex clempo.trie:+empty-code-hash+) 2)))))))
 
 ;;; Recording
 
@@ -1108,10 +1115,10 @@ methods are slow far behind the head, so they use the samples' recent archive bl
 
 (defparameter *impl-txs*
   '((47952533 0) (14051124 0) (26944661 0) (45604163 0) (6254004 0) (7360166 0) (30383358 0)
-    (46015857 0) (35240394 0 1))
+    (46015857 0) (35240394 0 1) (4036134 0))
   "(block index...) of the archive transactions the impl suite replays: Tempo batch, EIP-1559
 create, EIP-7702 (a nonzero tip), legacy, EIP-2930 create, expiring nonce, a reverting Tempo
-transaction, and a two-transaction bundle.")
+transaction, a two-transaction bundle, and a pre-EIP-155 CREATE whose address collides.")
 
 (defun archive-raw-txs (n indices)
   "(values raw-tx-hex-list timestamp-hex) of the transactions INDICES of archive block N."
@@ -1168,7 +1175,8 @@ transaction, and a two-transaction bundle.")
                (r "trace_rawTransaction" raw (jv "trace") number)
                (r "trace_rawTransaction" raw (jv "trace") "latest")
                (r "trace_rawTransaction" raw (jv "trace") +far-block+)
-               (r "trace_rawTransaction" raw (jv "nope") parent))))
+               (r "trace_rawTransaction" raw (jv "nope") parent)
+               (r "trace_transaction" "0x07471adfe8f4ec553c1199f495be97fc8be8e0626ae307281c22534460184ed1"))))
      (when n
        (flet ((root (accounts storages) (r "debug_stateRootWithUpdates" (jo "accounts" accounts "storages" storages) n))
               (storage (&rest kvs) (jo "wiped" :false "storage" (apply #'jo kvs))))
@@ -1179,3 +1187,96 @@ transaction, and a two-transaction bundle.")
                (root (jo pathusd :null) (jo))
                (root (jo fresh (jo "nonce" 0 "balance" "0x0" "bytecode_hash" :null))
                      (jo fresh (jo "wiped" :true "storage" (jo slot1 "0x1"))))))))))
+
+;;; The admin peer methods' parameter parsing. Every request here must fail to parse on the
+;;; reference: each carries a malformed node id, host, port or record, so no peer is ever
+;;; added to or removed from it.
+
+(defparameter +bad-peer-id+ (concatenate 'string "zz" (make-string 126 :initial-element #\a)))
+
+(defun enr-text (hex)
+  (concatenate 'string "enr:" (string-right-trim "=" (substitute #\_ #\/ (substitute #\- #\+ (clempo.websocket:base64-encode (hex->octets hex)))))))
+
+(defsuite "admin" (s)
+  "admin_addPeer, admin_addTrustedPeer, admin_removePeer and admin_removeTrustedPeer parse errors"
+  (let* ((n +bad-peer-id+) (short (make-string 127 :initial-element #\a))
+         (urls (list "enode://bad" (format nil "enode://~A@127.0.0.1:30303" short)
+                     (format nil "enode://~A@127.0.0.1:30303" n) (format nil "enode://~A@localhost:30303" n)
+                     (format nil "enode://~A@[::1]:30303" n) (format nil "enode://~A@127.0.0.1" n)
+                     (format nil "enode://~A@127.0.0.1:30303?discport=x" n) (format nil "enode://~A@127.0.0.1:99999" n)
+                     n (format nil "0x~A" n) "enr:-garbage" "enr:" "" (format nil "http://~A@127.0.0.1:30303" n)
+                     (format nil "enode://~A" n) (format nil "enode://0x~A@1.2.3.4:1" short)
+                     (format nil "ENODE://~A@1.2.3.4:1" n) (format nil "enode://~A@1.2.3:1" n)
+                     (format nil "enode://~A@01.2.3.4:1" n) (format nil " enode://~A@1.2.3.4:1" n)
+                     "enode://:pw@1.2.3.4:1" (format nil "enode://~A@0x7f.1:1" n)
+                     (format nil "enode://~A@1.2.3.4:1?discport=1" n)
+                     (format nil "enode://~A@1.2.3.4:1?discport=" n) (format nil "enode://~A@1.2.3.4:1?discport=99999" n)
+                     (format nil "enode://~A@1.2.3.4:1?discport=+5" n) (format nil "enode://~A@[zz]:1" n)
+                     (format nil "enode://~A@a b:1" n) "enode://" "enode://@:1" (format nil "http://~A@1.2.3.4" n)
+                     (format nil "http://~A@0x7f.1:1" n) (format nil "enode://~A@1.2.3.4:" n) "a b://x" "1abc://x"
+                     (format nil "enode:~A@1.2.3.4:1" n) (format nil "enode://~A@1.2.3.4:1#frag" n)
+                     (format nil "enode://~A@1.2.3.4:1/path?x=1" n) (format nil "enode://~A:pw@1.2.3.4:1" n)
+                     (format nil "enode://~A@256.2.3.4:1" n) "enode://x@1.2.3.4:1?a=b&discport=7"
+                     (format nil "enode://0x~Ax" (make-string 128 :initial-element #\a))))
+         (records (append (list "enr:!!!" "enr:a" "enr:ab" "enr:-garbage=" "enr:+/" "enr:!" "enr:aaaaa" "enr:aaaaaa!"
+                                "enr:ab!" "enrx")
+                          (mapcar #'enr-text
+                                  '("0000" "c0" "c000" "c100" "c10000" "c20000" "c3000000" "c3810000" "c20081" "c40000c000"
+                                    "c300820001" "c20089" "f8" "f80100" "81" "c20001" "c3000161" "c400016162"
+                                    "c6000162786178" "c6000161786178" "c80001826964827634" "c80001826964827635"
+                                    "c60001826964c0" "c5000161c101" "c40001c061" "c2c001" "cb0089010101010101010101"
+                                    "c20080" "d3000182696482763489736563703235366b3105"
+                                    "f4000182696482763489736563703235366b31a1021111111111111111111111111111111111111111111111111111111111111111")))))
+    (loop for m in '("admin_addPeer" "admin_addTrustedPeer" "admin_removePeer" "admin_removeTrustedPeer")
+          append (mapcar (lambda (p) (r m p)) (append urls records))
+          append (list (r m 123) (r m :null) (r m (jo "a" 1)) (r m (jv n)) (rpc-request-string m '())
+                       (r m "enode://bad" 1)))))
+
+;;; Success paths of the installed-filter polls: each case installs a log filter over fixed
+;;; historical blocks (eth_newFilter, its "filterSetup"), polls it with the request whose
+;;; "$FILTER" parameter is the installed id, then uninstalls it. Filter ids are node-local;
+;;; the logs are not.
+
+(defparameter *filter-objects*
+  (list (jo "fromBlock" "0x1312d4d" "toBlock" "0x1312d4f")
+        (jo "fromBlock" "0x1312d4d" "toBlock" "0x1312d55" "address" "0x20c000000000000000000000b9537d11c60e8b50")
+        (jo "fromBlock" "0x1312d4d" "toBlock" "0x1312d4d"
+            "topics" (jv "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"))
+        (jo "blockHash" "0x0000000000000000000000000000000000000000000000000000000000000000"))
+  "Filters over fixed blocks; the last names no block the chain has.")
+
+(defun call-with-filter (url setup request)
+  "Install SETUP's filter at URL, send REQUEST with its id, uninstall: (values status response)."
+  (multiple-value-bind (status response) (post-raw url setup :retries 0)
+    (let ((id (and (eql status 200) (clempo.json:jget response "result"))))
+      (if (not (stringp id))
+          (values status response)
+          (unwind-protect
+               (post-raw url (substitute-filter-id request id) :retries 0)
+            (post-raw url (rpc-request-string "eth_uninstallFilter" (list id)) :retries 0))))))
+
+(defun substitute-filter-id (request id)
+  (let ((at (search "\"$FILTER\"" request)))
+    (concatenate 'string (subseq request 0 at) (format nil "~S" id) (subseq request (+ at 9)))))
+
+(defun record-filter-cases (url)
+  (let ((path (corpus-path "corpus-filters.jsonl")) (n 0))
+    (with-open-file (out path :direction :output :if-exists :supersede :if-does-not-exist :create
+                              :external-format :utf-8)
+      (dolist (filter *filter-objects*)
+        (dolist (method '("eth_getFilterLogs" "eth_getFilterChanges"))
+          (let ((setup (r "eth_newFilter" filter)) (request (r method "$FILTER")))
+            (multiple-value-bind (status response) (call-with-filter url setup request)
+              (let ((again (nth-value 1 (call-with-filter url setup request))))
+                (incf n)
+                (write-line (to-json-string*
+                             (jo "suite" "filters" "method" method "request" request "filterSetup" setup
+                                 "status" status "response" response
+                                 "class" (if (clempo.json:json-equal response again) "stable" "live")))
+                            out)))))))
+    n))
+
+(defcommand "rpc-record-filters" (args)
+  "record the installed-filter poll cases (corpus-filters.jsonl) from the reference: rpc-record-filters [-url U]"
+  (format t "filters: ~D cases~%" (record-filter-cases (arg args :url (clempo.jsonrpc:local-rpc-url))))
+  0)

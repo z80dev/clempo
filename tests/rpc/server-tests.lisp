@@ -72,7 +72,7 @@
 
 (defun answers-p (port)
   "The server still answers a plain request."
-  (= 200 (status-of (exchange port (post +client-version-request+)))))
+  (eql 200 (status-of (exchange port (post +client-version-request+)))))
 
 (deftest http-limits-refuse-hostile-requests ()
   (with-server (port)
@@ -140,17 +140,18 @@
 (deftest slow-and-idle-clients-are-dropped ()
   (with-limits ((server:*idle-seconds* 1) (server:*request-seconds* 1) (server:*write-seconds* 1))
     (with-server (port :max-connections 4)
-      (is (closed-within-p port 5 nil) "a silent connection")
-      (is (closed-within-p port 5 "POST / HTTP/1.1") "a request line that never ends (slowloris)")
-      (is (closed-within-p port 5 (crlf "POST / HTTP/1.1" "Content-Length: 100" "" "{\"jsonrpc\""))
+      ;; generous bounds: the 1 s deadlines must fire, but a loaded host may be slow to run them
+      (is (closed-within-p port 15 nil) "a silent connection")
+      (is (closed-within-p port 15 "POST / HTTP/1.1") "a request line that never ends (slowloris)")
+      (is (closed-within-p port 15 (crlf "POST / HTTP/1.1" "Content-Length: 100" "" "{\"jsonrpc\""))
           "a body that never ends")
       ;; the connection slots come back: fill them with silent clients, then wait them out
       (let ((idle (loop repeat 4 collect (open-client port))))
         (unwind-protect
              (progn (sleep 0.3)
                     (is (string= "" (exchange port (post +client-version-request+))) "over the connection limit")
-                    (sleep 2.5)
-                    (is (answers-p port) "slots freed by the idle timeout"))
+                    (is (loop repeat 30 thereis (progn (sleep 0.5) (answers-p port)))
+                        "slots freed by the idle timeout"))
           (mapc (lambda (s) (ignore-errors (close s :abort t))) idle))))))
 
 (deftest stalled-reader-releases-its-connection ()

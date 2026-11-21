@@ -353,7 +353,8 @@ state root) and held for the call."
                            (mapcar (lambda (slot) (make-storage-key (octets->integer slot) t)) (cdr target))))
              targets))))
 
-(defrpc "debug_codeByHash" ((hash hash) (block block-id :optional t)) "code by its hash"
+(defun code-json (hash block)
+  "The code HASH names as of BLOCK (NIL: the head), as hex, or :null."
   ;; The empty code's hash names the empty code whatever the state holds.
   (let ((code (if (octets= hash trie:+empty-code-hash+)
                   (progn (state-block block) (make-octets 0))
@@ -368,6 +369,14 @@ state root) and held for the call."
                           ((and h (history:history-code-by-hash h hash)))
                           (t (code-by-hash (state-at block) hash)))))))
     (if code (hexbytes code) :null)))
+
+(defrpc "debug_codeByHash" ((hash hash) (block block-id :optional t)) "code by its hash"
+  (code-json hash block))
+
+(defrpc "debug_dbGet" ((key bytes)) "reth: a 0x63-prefixed key names a code (its original bytes) by hash"
+  (cond ((/= (length key) 33) (rpc-fail +invalid-params+ (format nil "Key must be 33 bytes, got ~D" (length key))))
+        ((/= (aref key 0) #x63) (rpc-fail +invalid-params+ "Key prefix must be 0x63"))
+        (t (code-json (subseq key 1) nil))))
 
 ;;; This node: admin_nodeInfo describes clempo itself. Its devp2p identity is a secp256k1 key
 ;;; made for the process (as reth makes one for a datadir without a key file); the RPC server

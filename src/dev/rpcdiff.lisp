@@ -206,6 +206,8 @@ window is 0; an external URL keeps its own and fails them)."
                 ((equal "ws" (clempo.json:jget c "transport"))
                  (handler-case (replay-ws-case url server c)
                    (error (e) (values nil (princ-to-string e)))))
+                ((clempo.json:jget c "filterSetup")
+                 (call-with-filter url (clempo.json:jget c "filterSetup") (clempo.json:jget c "request")))
                 (t (post-raw url (clempo.json:jget c "request") :retries 0)))
         (list c status response (case-matches c status response))))
     (remove-if #'verified-case-p cases) threads)

@@ -305,7 +305,18 @@ block, atomically, so concurrent polls never answer the same blocks twice."
         (ecase (installed-kind it)
           (:blocks (coerce (loop for n from from to head collect (hex32 (cblock-hash (chain-block n)))) 'simple-vector))
           (:pending #())
-          (:logs (if (> from head) #() (logs-in-range (installed-filter it) from head))))))))
+          (:logs
+           (let ((f (installed-filter it)))
+             (if (filter-block-hash f)
+                 (get-logs f)
+                 ;; reth get_filter_block_range: a fromBlock earlier than the poll start
+                 ;; wins (so a past range answers its logs at every poll), a toBlock caps
+                 ;; the head
+                 (let* ((filter-from (range-number (filter-from f)))
+                        (filter-to (range-number (filter-to f)))
+                        (from (if filter-from (min from filter-from) from))
+                        (to (if filter-to (min head filter-to) head)))
+                   (if (> from to) #() (logs-in-range f from to)))))))))))
 
 (defrpc "eth_getFilterLogs" ((id filter-id)) "every log a log filter matches"
   (let ((it (poll-filter id)))

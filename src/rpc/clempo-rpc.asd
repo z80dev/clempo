@@ -18,6 +18,7 @@
                (:file "logs")
                (:file "config")
                (:file "stubs")
+               (:file "peers")
                (:file "sender")
                (:file "consensus")
                (:file "subscribe")

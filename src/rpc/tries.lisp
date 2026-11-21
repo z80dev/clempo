@@ -64,8 +64,27 @@ moving the cursor (a load costs about as much as moving across this many blocks)
         (append (directory (merge-pathnames "checkpoint-*.state" p))
                 (directory (merge-pathnames "job-*.state" p))))))
 
+(defun kv-datadir-p (dir)
+  "DIR holds a clempo.store KV datadir (its MANIFEST is a KV manifest)."
+  (let ((manifest (probe-file (merge-pathnames "MANIFEST" dir))))
+    (and manifest (eql 0 (search "clempo-kv " (io:read-file-string manifest))))))
+
+(defvar *datadir-heights* (make-hash-table :test 'equal :synchronized t)
+  "datadir -> (MANIFEST write date . flushed height), so a base list costs no snapshot open
+until the datadir flushes again.")
+
+(defun datadir-height (dir)
+  (let* ((date (file-write-date (merge-pathnames "MANIFEST" dir)))
+         (cell (gethash dir *datadir-heights*)))
+    (if (and cell (eql (car cell) date))
+        (cdr cell)
+        (let ((db (store:open-datadir-snapshot dir)))
+          (when db
+            (cdr (setf (gethash dir *datadir-heights*) (cons date (store:db-number db)))))))))
+
 (defun trie-bases (backend)
-  "The checkpoints a trie state can start from: ((number . path) ...)."
+  "The states a trie state can start from: ((number . base) ...), BASE a checkpoint path or
+(:datadir . dir) for a clempo.store datadir's flushed state."
   (let ((dirs (append (let ((env (io:getenv "CLEMPO_TRIE_STATE")))
                         (when (and env (plusp (length env)))
                           (loop with start = 0
@@ -76,13 +95,18 @@ moving the cursor (a load costs about as much as moving across this many blocks)
                       (let ((h (chain:backend-history backend)))
                         (when h (list (namestring (history:history-dir h))))))))
     (loop for dir in dirs
-          append (loop for path in (checkpoint-files (if (and (plusp (length dir))
-                                                             (char/= (char dir (1- (length dir))) #\/)
-                                                             (not (search ".state" dir)))
-                                                        (concatenate 'string dir "/")
-                                                        dir))
-                       for n = (handler-case (checkpoint-number path) (error () nil))
-                       when (and n (<= n (chain:backend-head backend))) collect (cons n path)))))
+          for slashed = (if (and (plusp (length dir))
+                                 (char/= (char dir (1- (length dir))) #\/)
+                                 (not (search ".state" dir)))
+                            (concatenate 'string dir "/")
+                            dir)
+          append (if (and (not (search ".state" dir)) (kv-datadir-p slashed))
+                     (let ((n (handler-case (datadir-height slashed) (error () nil))))
+                       (when (and n (<= n (chain:backend-head backend)))
+                         (list (cons n (cons :datadir slashed)))))
+                     (loop for path in (checkpoint-files slashed)
+                           for n = (handler-case (checkpoint-number path) (error () nil))
+                           when (and n (<= n (chain:backend-head backend))) collect (cons n path))))))
 
 ;;; Moving a state database between blocks
 
@@ -172,7 +196,12 @@ deletions the history does not list) every key DB holds is re-read as well."
          (base (first (sort (copy-list bases) #'<
                             :key (lambda (b) (if h (move-cost h (car b) n) (abs (- (car b) n))))))))
     (unless base (unavailable n "no state checkpoint (set CLEMPO_TRIE_STATE to a datadir)"))
-    (let ((db (store:read-checkpoint (cdr base) :check-root t)))
+    (let ((db (if (consp (cdr base))
+                  (or (store:open-datadir-snapshot (cddr base))
+                      (unavailable n (format nil "datadir ~A holds no state" (cddr base))))
+                  (store:read-checkpoint (cdr base) :check-root t))))
+      ;; a datadir may have flushed past its recorded height since: move from where it is
+      (setf base (cons (store:db-number db) (cdr base)))
       (when (/= (car base) n)
         (unless h (unavailable n "no history to move a checkpoint with"))
         (move-state db n h))

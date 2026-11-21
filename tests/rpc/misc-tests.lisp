@@ -62,3 +62,32 @@
   (is= '() (filter:paginate '(1 2) 0 0))
   (is (nth-value 1 (filter:paginate '(1 2 3) 0 2)))
   (is (not (nth-value 1 (filter:paginate '(1 2) 0 2)))))
+
+;;; Admin peer parameters: the success paths reth acknowledges (never sent to the reference;
+;;; its parse errors are corpus suite "admin").
+
+(defun result-of (method params)
+  (json:jget (json:parse-json
+              (nth-value 1 (clempo.rpc:handle-body
+                            (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":~S,\"params\":~A}" method params))))
+             "result"))
+
+(deftest admin-peer-parameters ()
+  (let* ((id (make-string 128 :initial-element #\b))
+         (key 12345)
+         (public (clempo.secp256k1:private->public key))
+         (enr (clempo.rpc.state::node-enr key public (octets-of 127 0 0 1) (integer->octets-minimal 30303)
+                                          (integer->octets-minimal 30303))))
+    (dolist (m '("admin_addPeer" "admin_addTrustedPeer" "admin_removePeer" "admin_removeTrustedPeer"))
+      (is (eq :true (result-of m (format nil "[\"enode://~A@127.0.0.1:30303\"]" id))) m)
+      (is (eq :true (result-of m (format nil "[\"enode://0x~A@[::1]:1?discport=9\"]" id))) m))
+    (dolist (m '("admin_addTrustedPeer" "admin_removePeer" "admin_removeTrustedPeer"))
+      (is (eq :true (result-of m (format nil "[\"enode://~A\"]" id))) m)
+      (is (eq :true (result-of m (format nil "[~S]" enr))) m)
+      ;; one flipped signature bit
+      (let ((bad (let ((s (copy-seq enr))) (setf (char s 6) (if (char= (char s 6) #\A) #\B #\A)) s)))
+        (is (search "Invalid ENR" (error-data m (format nil "[~S]" bad))) m)))
+    (is (equal "Failed to parse id at line 1 column 23"
+               (error-data "admin_addPeer" "[\"http://xyz@1.2.3.4:81\"]")))
+    (is (equal "Failed to parse url: no port specified at line 1 column 21"
+               (error-data "admin_addPeer" "[\"http://x@1.2.3.4:80\"]")))))

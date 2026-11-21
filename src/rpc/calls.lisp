@@ -851,7 +851,15 @@ gas (ALLOWANCE: gas -> what the fee payer's fee token balance buys)."
   "Fail with the reference's error for the executor's rejection E of REQUEST in ENV, or hand
 ON-INVALID its (code message)."
   (multiple-value-bind (code message data)
-      (invalid-request-error (executor:execution-failure-reason e) :request request :env env)
+      (if (and (typep e 'executor:insufficient-amm-liquidity)
+               (executor:insufficient-amm-liquidity-validator-token e))
+          ;; tempo's TempoInvalidTransaction::InsufficientAmmLiquidity
+          (values -32003
+                  (format nil "insufficient liquidity in FeeAMM pool to swap fee tokens for pair ~A -> ~A (required: ~D)"
+                          (checksum-address (executor:insufficient-amm-liquidity-user-token e))
+                          (checksum-address (executor:insufficient-amm-liquidity-validator-token e))
+                          (executor:insufficient-amm-liquidity-required e)))
+          (invalid-request-error (executor:execution-failure-reason e) :request request :env env))
     (if on-invalid (funcall on-invalid code message) (rpc-fail code message data))))
 
 (defun request-runner (b state request &key state-overrides block-overrides)
@@ -1303,7 +1311,7 @@ INPUT's accounts) reports every stored node of its storage trie removed."
            (pre (hashed-view (store:db-account-trie db)))
            (post (hashed-view (store:db-account-trie db)))
            (existing (let ((set (make-hash-table :test 'equalp)))
-                       (loop for (h . v) in (append storages (remove :null accounts :key #'cdr :test-not #'eq))
+                       (loop for (h) in (append storages accounts)
                              when (trie:trie-get pre h) do (setf (gethash h set) t))
                        set))
            (addresses (address-preimages db existing))
@@ -1351,7 +1359,11 @@ INPUT's accounts) reports every stored node of its storage trie removed."
           (let ((storage-json
                   (loop for nibbles in leaves
                         for h = (nibbles-octets nibbles)
-                        for entry = (gethash h storage-tries)
+                        ;; reth walks the stored storage trie of every changed account it
+                        ;; rebuilds, with an empty prefix set when its storage is unchanged
+                        for entry = (or (gethash h storage-tries)
+                                        (and (gethash h existing) (assoc h accounts :test #'equalp)
+                                             (let ((s (stored h))) (list s s '()))))
                         when (and entry (trie:trie-get post h))
                           append (destructuring-bind (before after slot-changes) entry
                                    (multiple-value-bind (snodes sremoved)

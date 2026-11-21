@@ -110,9 +110,16 @@ the reference's (EXPECTED, the slot -> value object)."
              (= proven want)
              (= (hex->integer (clempo.json:jget item "value")) want))))))
 
+(defun zero-hash-p (s)
+  (and (stringp s) (let ((o (hex-octets s))) (and (= (length o) 32) (every #'zerop o)))))
+
 (defun verify-account-proof (state-root proof expected)
   "An eth_getProof answer PROOF whose account proof hashes up to STATE-ROOT, whose fields are
-the ones proven and the reference's (EXPECTED), and whose storage proofs all verify."
+the ones proven and the reference's (EXPECTED), and whose storage proofs all verify.
+The balance is checked only against the proof: the reference's eth_getBalance answers
+Tempo's placeholder balance, not the account's state balance, and the proof already binds
+the state balance to the reference's state root. An absent account may carry reth's zero
+code and storage hashes."
   (let ((address (hex-octets (clempo.json:jget proof "address"))))
     (multiple-value-bind (leaf valid)
         (clempo.trie:verify-proof state-root address (proof-nodes (clempo.json:jget proof "accountProof")) :secure t)
@@ -125,17 +132,23 @@ the ones proven and the reference's (EXPECTED), and whose storage proofs all ver
                            (clempo.rlp:rlp-decode leaf) '(0 1 2 3 4))
                    '())
              (declare (ignore ext))
-             (and (= nonce (hex->integer (clempo.json:jget proof "nonce")))
-                  (= balance (hex->integer (clempo.json:jget proof "balance")))
-                  (octets= storage-root (hex-octets (clempo.json:jget proof "storageHash")))
-                  (octets= code-hash (hex-octets (clempo.json:jget proof "codeHash")))
-                  (quantity= (clempo.json:jget proof "nonce") (clempo.json:jget expected "nonce"))
-                  (quantity= (clempo.json:jget proof "balance") (clempo.json:jget expected "balance"))
-                  (string-equal (clempo.json:jget proof "codeHash") (clempo.json:jget expected "codeHash"))
-                  (= (length (clempo.json:jget proof "storageProof"))
-                     (length (cdr (clempo.json:jget expected "storage"))))
-                  (every (lambda (item) (verify-storage storage-root item (clempo.json:jget expected "storage")))
-                         (clempo.json:jget proof "storageProof"))))))))
+             (flet ((hash-ok (key proven)
+                      (let ((got (clempo.json:jget proof key)))
+                        (or (octets= proven (hex-octets got))
+                            (and (null leaf) (zero-hash-p got))))))
+               (and (= nonce (hex->integer (clempo.json:jget proof "nonce")))
+                    (= balance (hex->integer (clempo.json:jget proof "balance")))
+                    (hash-ok "storageHash" storage-root)
+                    (hash-ok "codeHash" code-hash)
+                    (quantity= (clempo.json:jget proof "nonce") (clempo.json:jget expected "nonce"))
+                    (or (string-equal (clempo.json:jget proof "codeHash") (clempo.json:jget expected "codeHash"))
+                        (and (null leaf) (zero-hash-p (clempo.json:jget proof "codeHash"))
+                             (string-equal (clempo.json:jget expected "codeHash")
+                                           (octets->hex clempo.trie:+empty-code-hash+))))
+                    (= (length (clempo.json:jget proof "storageProof"))
+                       (length (cdr (clempo.json:jget expected "storage"))))
+                    (every (lambda (item) (verify-storage storage-root item (clempo.json:jget expected "storage")))
+                           (clempo.json:jget proof "storageProof")))))))))
 
 (defun expected-account (c address)
   (loop for (a . v) in (cdr (clempo.json:jget* c "expect" "accounts"))
@@ -172,11 +185,17 @@ the ones proven and the reference's (EXPECTED), and whose storage proofs all ver
                                                          :retries 0))
                                   "result")))
                      (and proof
-                          (verify-account-proof root proof (jo "balance" (clempo.json:jget expected "balance")
-                                                               "nonce" (clempo.json:jget expected "nonce")
+                          (verify-account-proof root proof (jo "nonce" (clempo.json:jget expected "nonce")
                                                                "codeHash" (clempo.json:jget expected "codeHash")
                                                                "storage" (jo)))
-                          (quantity= (clempo.json:jget result "balance") (clempo.json:jget expected "balance"))
-                          (quantity= (clempo.json:jget result "nonce") (clempo.json:jget expected "nonce"))
-                          (string-equal (clempo.json:jget result "codeHash") (clempo.json:jget expected "codeHash"))
-                          (string-equal (clempo.json:jget result "storageRoot") (clempo.json:jget proof "storageHash")))))))))))))
+                          (if (eq result :null)
+                              ;; reth answers null for an account absent from the state:
+                              ;; accepted only when the verified proof proves the absence
+                              (null (clempo.trie:verify-proof
+                                     root (hex-octets address)
+                                     (proof-nodes (clempo.json:jget proof "accountProof")) :secure t))
+                              (and (quantity= (clempo.json:jget result "balance") (clempo.json:jget proof "balance"))
+                                   (quantity= (clempo.json:jget result "nonce") (clempo.json:jget expected "nonce"))
+                                   (string-equal (clempo.json:jget result "codeHash") (clempo.json:jget proof "codeHash"))
+                                   (string-equal (clempo.json:jget result "storageRoot")
+                                                 (clempo.json:jget proof "storageHash")))))))))))))))

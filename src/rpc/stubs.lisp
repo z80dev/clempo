@@ -33,22 +33,6 @@ admin and signing endpoints of a node with no local accounts.")
         (serde:skip-value src)))
   t)
 
-(defparam enode-url (src) "reth NodeRecord: enode://<id>@<ipv4>:<port>"
-  (let* ((s (if (eq (serde:peek-kind src) :string) (serde:read-string src) (serde:invalid-type src "a string")))
-         (at (position #\@ s))
-         (host (subseq s (if at (1+ at) (min (length s) 8)) (or (position #\: s :start (or at 8)) (length s)))))
-    (unless (and (= 4 (length (split host #\.))) (every (lambda (p) (and (plusp (length p)) (every #'digit-char-p p))) (split host #\.)))
-      (serde:serde-fail-here src "Failed to parse url: invalid IPv4 address syntax"))
-    s))
-
-(defparam any-node (src) "reth AnyNode: an enode URL or a peer id"
-  (let* ((s (if (eq (serde:peek-kind src) :string) (serde:read-string src) (serde:invalid-type src "a string")))
-         (body (if (and (> (length s) 8) (string= "enode://" s :end2 8)) (subseq s 8) s))
-         (id (subseq body 0 (or (position #\@ body) (length body)))))
-    (unless (and (= (length id) 128) (every (lambda (c) (digit-char-p c 16)) id))
-      (serde:serde-fail-here src "invalid public key: ~A" id))
-    s))
-
 (defun split (s ch)
   (loop with start = 0
         for pos = (position ch s :start start)
@@ -89,11 +73,6 @@ admin and signing endpoints of a node with no local accounts.")
 (defrpc "debug_traceBadBlock" ((hash hash) (options any :optional t)) "no bad blocks are kept"
   (internal-error "bad block not found in cache"))
 
-(defrpc "debug_dbGet" ((key bytes)) "reth: only 0x63-prefixed code keys"
-  (cond ((/= (length key) 33) (rpc-fail +invalid-params+ (format nil "Key must be 33 bytes, got ~D" (length key))))
-        ((/= (aref key 0) #x63) (rpc-fail +invalid-params+ "Key prefix must be 0x63"))
-        (t (internal-error "code store unavailable"))))
-
 ;;; A node with no local accounts
 
 (defrpc "eth_sign" ((address address) (data bytes)) "no local accounts" (rpc-fail +invalid-params+ "unknown account"))
@@ -122,10 +101,6 @@ admin and signing endpoints of a node with no local accounts.")
 
 (defrpc "admin_peers" () "no peers" #())
 (defrpc "admin_validatorKey" () "not a validator" :null)
-(defrpc "admin_addPeer" ((enode enode-url)) "accepted" :true)
-(defrpc "admin_addTrustedPeer" ((enode enode-url)) "accepted" :true)
-(defrpc "admin_removePeer" ((node any-node)) "accepted" :true)
-(defrpc "admin_removeTrustedPeer" ((node any-node)) "accepted" :true)
 
 (dolist (name '("admin_peerEvents" "reth_subscribeChainNotifications" "reth_subscribePersistedBlock"
                 "reth_unsubscribeChainNotifications" "eth_subscribe" "eth_unsubscribe"))

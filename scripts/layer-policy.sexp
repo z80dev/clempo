@@ -96,6 +96,9 @@
    ("COMPRESS" 4 "Varint and copy loops consume finite input lengths and matches.")
    ("DECOMPRESS" 1 "Consumes compressed tags up to the finite input length, checking the declared output bound."))
   ("src/rpc/defrpc.lisp" ("VALUE-SPANS" 1 "Advances through values of a fixed JSON slice."))
+  ("src/rpc/peers.lisp"
+   ("FORM-DECODE" 1 "Each step advances the index through the finite query string by one or three characters.")
+   ("PARSE-ENR" 1 "Each key/value pair advances the position through the finite decoded record."))
   ("src/rpc/revert.lisp" ("SPLIT-SEQUENCE" 1 "Scans the finite signature string from one separator to the next."))
   ("src/rpc/serde.lisp"
    ("DO-ARRAY" 1 "Each element consumes input, or invalid JSON stops parsing.")
