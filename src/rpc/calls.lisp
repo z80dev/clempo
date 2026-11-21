@@ -31,7 +31,8 @@ missing piece.")
            #:defobject #:defvec #:q64 #:plain-u64 #:block-traces #:parity-maker #:parity-localized
            #:estimate-request-gas #:copy-call-request #:req-valid-before #:req-valid-after
            #:req-fee-payer-signature #:req-tempo-authorizations #:req-key-authorization
-           #:req-account-simulation #:req-key-authorization-simulation #:req-key-type))
+           #:req-account-simulation #:req-key-authorization-simulation #:req-key-type
+           #:aa-sim-transaction))
 
 (in-package #:clempo.rpc.calls)
 
@@ -571,42 +572,86 @@ place holding the sender), or NIL when the request carries no fee payer signatur
                 (getf sig :r) (getf sig :s) (if (getf sig :y-parity) 1 0)))
           (rpc-fail -32003 "fee payer signature recovery failed")))))
 
+(defun aa-calls (r &key create-default)
+  "build_aa's calls: the request's calls, then its to/value/input as one more call. With
+CREATE-DEFAULT (eth_simulateV1, which fills a missing to with Create) a request without calls
+creates."
+  (let ((to (req-to r)) (calls (req-calls r)))
+    (mapcar (lambda (c) (list (if (eq (first c) :create) nil (first c)) (second c) (third c)))
+            (append calls
+                    (when (or (integerp to) (and create-default (null calls)))
+                      (list (list to (or (req-value r) 0) (or (request-input r) (make-octets 0)))))))))
+
+(defun aa-fields (r chain-id priority max-fee gas calls access-list nonce sponsor)
+  "TempoTransaction's RLP fields without its signature, SPONSOR in the fee payer signature's place."
+  (flet ((address-or-empty (a) (if a (integer->octets a 20) (make-octets 0))))
+    (append (list chain-id priority max-fee gas (call-items calls)
+                  (mapcar (lambda (e) (list (integer->octets (car e) 20)
+                                            (mapcar (lambda (k) (integer->octets k 32)) (cdr e))))
+                          access-list)
+                  (or (req-nonce-key r) 0) nonce
+                  (or (req-valid-before r) (make-octets 0)) (or (req-valid-after r) (make-octets 0))
+                  (address-or-empty (req-fee-token r)) sponsor (req-tempo-authorizations r))
+            (when (req-key-authorization r) (list (req-key-authorization r))))))
+
+(defun aa-plist (r from gas max-fee priority nonce chain-id calls access-list fee-payer signature)
+  (list :type #x76 :from from :gas gas :max-fee max-fee :max-priority priority
+        :nonce nonce :chain-id chain-id :calls calls :access-list access-list
+        :nonce-key (or (req-nonce-key r) 0) :fee-token (req-fee-token r)
+        :valid-before (req-valid-before r) :valid-after (req-valid-after r)
+        :tempo-authorizations (req-tempo-authorizations r)
+        :key-authorization (req-key-authorization r)
+        :fee-payer fee-payer :signature signature))
+
 (defun aa-request-plist (r world gas price env)
   (let* ((from (or (req-from r) 0))
          (gp (or (req-gas-price r) (when (member (request-type r) '(0 1)) price)))
          (max-fee (or gp (req-max-fee r) price))
          (priority (or gp (req-max-priority r) 0))
-         (to (req-to r))
-         (calls (mapcar (lambda (c) (list (if (eq (first c) :create) nil (first c)) (second c) (third c)))
-                        (append (req-calls r)
-                                (when to (list (list to (or (req-value r) 0)
-                                                     (or (request-input r) (make-octets 0)))))))))
+         (calls (aa-calls r)))
     (unless calls (rpc-fail +invalid-params+ "Missing 'calls' or 'to' field for Tempo transaction."))
     (let* ((chain-id (or (req-chain-id r) (executor:block-env-chain-id env)))
            (nonce (request-nonce r world))
            (access-list (access-list-plist r))
-           (fee-payer (fee-payer r (append (list chain-id priority max-fee
-                                                 (or (req-gas r) (executor:block-env-gas-limit env))
-                                                 (call-items calls)
-                                                 (mapcar (lambda (e) (list (integer->octets (car e) 20)
-                                                                           (mapcar (lambda (k) (integer->octets k 32)) (cdr e))))
-                                                         access-list)
-                                                 (or (req-nonce-key r) 0) nonce
-                                                 (or (req-valid-before r) (make-octets 0))
-                                                 (or (req-valid-after r) (make-octets 0))
-                                                 (if (req-fee-token r) (integer->octets (req-fee-token r) 20) (make-octets 0))
-                                                 (integer->octets from 20)
-                                                 (req-tempo-authorizations r))
-                                           (when (req-key-authorization r) (list (req-key-authorization r)))))))
-      (list :type #x76 :from from :gas gas :max-fee max-fee :max-priority priority
-            :nonce nonce :chain-id chain-id :calls calls :access-list access-list
-            :nonce-key (or (req-nonce-key r) 0) :fee-token (req-fee-token r)
-            :valid-before (req-valid-before r) :valid-after (req-valid-after r)
-            :tempo-authorizations (req-tempo-authorizations r)
-            :key-authorization (req-key-authorization r) :key-id (req-key-id r)
-            :fee-payer fee-payer
-            :signature (mock-signature r from (executor:block-env-spec env))
-            :unique-id +simulation-unique-id+))))
+           ;; the fee payer signs the request's gas as converted, before prepare_call_env caps it
+           (fee-payer (fee-payer r (aa-fields r chain-id priority max-fee
+                                              (or (req-gas r) (executor:block-env-gas-limit env))
+                                              calls access-list nonce (integer->octets from 20)))))
+      (list* :key-id (req-key-id r) :unique-id +simulation-unique-id+
+             (aa-plist r from gas max-fee priority nonce chain-id calls access-list fee-payer
+                       (mock-signature r from (executor:block-env-spec env)))))))
+
+(define-constant +simulated-aa-signature+
+  (octets-concat (integer->octets #x840cfc572845f5786e702984c2a582528cad4b49b2a10b9db1be7fca90058565 32)
+                 (integer->octets #x25e7109ceb98168d95b09b18bbf6b685130e0562f233877d492b94eee0c5b6d1 32)
+                 (octets-of 27))
+  "TempoSignature::default(): alloy's test signature, which eth_simulateV1 signs AA requests with.")
+
+(defun aa-sim-transaction (r gas nonce chain-id)
+  "Tempo's TryIntoSimTx for an AA request whose NONCE, GAS and CHAIN-ID eth_simulateV1 has
+filled (missing fee caps are 0): its 0x76 transaction signed with the default signature, and
+the executor's request plist for it. Returns (values plist transaction)."
+  ;; simulate_v1 fills fees by the inner request's type: a legacy or 2930 one gets no max fee
+  (when (and (member (request-type r) '(0 1)) (null (req-max-fee r)))
+    (rpc-fail +invalid-params+ "Failed to convert transaction into RPC response: Missing 'max_fee_per_gas' field for Tempo transaction."))
+  (let* ((from (or (req-from r) 0))
+         (max-fee (or (req-max-fee r) 0)) (priority (or (req-max-priority r) 0))
+         (calls (aa-calls r :create-default t))
+         (access-list (access-list-plist r))
+         (sponsor (req-fee-payer-signature r))
+         (fee-payer (fee-payer r (aa-fields r chain-id priority max-fee gas calls access-list nonce
+                                            (integer->octets from 20))))
+         (fields (append (aa-fields r chain-id priority max-fee gas calls access-list nonce
+                                    (if sponsor
+                                        (list (if (getf sponsor :y-parity) 1 0) (getf sponsor :r) (getf sponsor :s))
+                                        (make-octets 0)))
+                         (list +simulated-aa-signature+)))
+         (tx (tx:decode-transaction (octets-concat (octets-of #x76) (clempo.rlp:rlp-encode fields)))))
+    (values (list* :hash (octets->integer (tx:transaction-hash tx))
+                   :unique-id (octets->integer (tx:transaction-unique-identifier tx from))
+                   (aa-plist r from gas max-fee priority nonce chain-id calls access-list fee-payer
+                             +simulated-aa-signature+))
+            tx)))
 
 (defun access-list-plist (r)
   "The request's access list as the executor takes it: ((address slot ...) ...)."
@@ -705,13 +750,15 @@ names (\"AccountKeychainError(KeyNotFound(KeyNotFound))\"), for errors without f
              (format nil "insufficient fee token balance: required ~D, but only have ~D"
                      (parse-integer reason :start (+ lt 3)) (parse-integer reason :start (length prefix) :end lt)))))))))
 
-(defun invalid-request-error (reason &key simulate)
-  "(values code message data) of the reference's error for an invalid request (see
-*INVALID-CONTEXT*), or an internal error naming a reason with no known reference equivalent."
+(defun invalid-request-error (reason &key simulate request env)
+  "(values code message data) of the reference's error for the executor's rejection REASON of
+REQUEST in the block environment ENV, or an internal error naming a reason with no known
+reference equivalent."
   (let ((e (assoc reason +invalid-transaction-errors+ :test #'string=)))
     (if e
         (values (if simulate (fourth e) (second e)) (third e))
-        (multiple-value-bind (message data) (tempo-invalid-error reason)
+        (multiple-value-bind (message data)
+            (let ((*invalid-context* (cons request env))) (tempo-invalid-error reason))
           (unless message
             (internal-error (format nil "request rejected by clempo's executor with no reference error mapped: ~A" reason)))
           (values -32003 message data)))))
@@ -797,8 +844,7 @@ gas (ALLOWANCE: gas -> what the fee payer's fee token balance buys)."
   "Fail with the reference's error for the executor's rejection E of REQUEST in ENV, or hand
 ON-INVALID its (code message)."
   (multiple-value-bind (code message data)
-      (let ((*invalid-context* (cons request env)))
-        (invalid-request-error (executor:execution-failure-reason e)))
+      (invalid-request-error (executor:execution-failure-reason e) :request request :env env)
     (if on-invalid (funcall on-invalid code message) (rpc-fail code message data))))
 
 (defun request-runner (b state request &key state-overrides block-overrides)

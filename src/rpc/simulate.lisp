@@ -111,10 +111,10 @@ for Tempo, rounded up (reth sanitize_chain).")
 
 (defstruct sim-call request tx outcome gas sender)
 
-(defun invalid-call (e)
-  (multiple-value-bind (code message)
-      (invalid-request-error (executor:execution-failure-reason e) :simulate t)
-    (rpc-fail code message)))
+(defun invalid-call (e request env)
+  (multiple-value-bind (code message data)
+      (invalid-request-error (executor:execution-failure-reason e) :simulate t :request request :env env)
+    (rpc-fail code message data)))
 
 (defun run-calls (ctx env shared calls validation remaining-cap)
   "Execute CALLS in CTX as Tempo's block executor does (its non-shared and non-payment gas
@@ -128,8 +128,6 @@ lanes included); returns (values sim-calls remaining-cap)."
                                                            executor:*chain* gas-limit shared))
          (cumulative 0) (out '()))
     (dolist (r calls)
-      (when (aa-request-p r)
-        (internal-error "eth_simulateV1: Tempo AA requests are not converted to simulated transactions yet"))
       (let* ((block-left (max 0 (- gas-limit cumulative)))
              (gas (let ((g (req-gas r)))
                     (cond ((and g (> g block-left))
@@ -143,18 +141,22 @@ lanes included); returns (values sim-calls remaining-cap)."
         (when (and (= state-nonce +u64-max+) (or (not validation) (eql nonce +u64-max+)))
           (rpc-fail +internal-error+ "nonce has max value"))
         (when (and (not validation) (= nonce +u64-max+)) (setf nonce 0))
-        (let* ((p (request-plist r world gas 0))
-               (p (list* :nonce nonce :chain-id (or (req-chain-id r) chain-id) p))
-               (tx (sim-transaction p chain-id))
-               (p (list* :hash (octets->integer (tx:transaction-hash tx))
-                         :unique-id (octets->integer (tx:transaction-unique-identifier tx from))
-                         p))
-               (outcome (handler-case
+        (multiple-value-bind (p tx)
+            (if (aa-request-p r)
+                (aa-sim-transaction r gas nonce (or (req-chain-id r) chain-id))
+                (let* ((p (request-plist r world gas 0))
+                       (p (list* :nonce nonce :chain-id (or (req-chain-id r) chain-id) p))
+                       (tx (sim-transaction p chain-id)))
+                  (values (list* :hash (octets->integer (tx:transaction-hash tx))
+                                 :unique-id (octets->integer (tx:transaction-unique-identifier tx from))
+                                 p)
+                          tx)))
+        (let* ((outcome (handler-case
                             (executor:execute-request ctx p :skip-nonce-check (not validation)
                                                             :skip-base-fee-check (not validation)
                                                             :skip-gas-caps t
                                                             :skip-eip3607 t)
-                          (executor:invalid-transaction (e) (invalid-call e))))
+                          (executor:invalid-transaction (e) (invalid-call e r env))))
                (used (executor:tx-outcome-gas-used outcome))
                (lane-gas (executor:tx-outcome-block-gas outcome))
                (payment-p (executor:payment-transaction-p tx (executor:block-env-spec env))))
@@ -165,7 +167,7 @@ lanes included); returns (values sim-calls remaining-cap)."
           (when (> used remaining-cap) (rpc-fail -38026 "Client adjustable limit reached"))
           (decf remaining-cap used)
           (incf cumulative used)
-          (push (make-sim-call :request r :tx tx :outcome outcome :gas gas :sender from) out))))
+          (push (make-sim-call :request r :tx tx :outcome outcome :gas gas :sender from) out)))))
     (values (nreverse out) remaining-cap)))
 
 ;;; Assembling and rendering a simulated block
