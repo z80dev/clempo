@@ -124,3 +124,17 @@
       (is= '(()) (abi-decode types (payload 0) :strict t))
       (signals abi-decode-error (abi-decode types (payload 4) :memory-limit 63))
       (is= 64 (length (first (abi-decode types (payload 64) :memory-limit 1024)))))))
+
+(deftest abi-huge-lengths-are-overruns ()
+  ;; A length word whose head words overflow a fixnum once escaped as a TYPE-ERROR from the
+  ;; strict decoder's next-offset slot (found by FuzzLoadAgent: int56 uint160[] bytes).
+  (dolist (len (list (expt 2 60) (expt 2 62) (1- (expt 2 64))))
+    (let ((data (words "0000000000000000000000000000000000000000000000000000000000000020"
+                       (format nil "~64,'0x" len))))
+      (dolist (strict '(nil t))
+        (is= :abi-error (handler-case (progn (abi-decode '((:array (:uint 160))) data
+                                                         :strict strict :validate t)
+                                             :decoded)
+                          (abi-decode-error () :abi-error)
+                          (error (e) (type-of e)))
+             "len ~X strict ~A" len strict)))))

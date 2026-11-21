@@ -393,8 +393,12 @@ array 24, fixed arrays and tuples the sum of their elements."
      (multiple-value-prog1 (progn ,@body) (finish-child ,var))))
 
 (defun set-strict-head-words (d words)
+  "Decoder::set_strict_head_words. alloy fails Overrun when the end overflows a usize; an end
+past the fixnum range lies far beyond any buffer, so it fails the same way here."
   (when (decoder-strict d)
-    (setf (decoder-next d) (max (decoder-next d) (+ (decoder-offset d) (* 32 words))))))
+    (let ((end (+ (decoder-offset d) (* 32 words))))
+      (unless (typep end 'fixnum) (abi-fail "overrun"))
+      (setf (decoder-next d) (max (decoder-next d) end)))))
 
 (defun take-word (d)
   (when (< (dec-remaining d) 32) (abi-fail "overrun"))
