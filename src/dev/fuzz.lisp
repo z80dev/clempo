@@ -111,7 +111,7 @@ matched by a :known entry, and those that were."
                      (error "unknown fuzz target ~S (targets: ~{~A~^ ~})" name (fuzz-targets))))
              (*tally* (cons 0 0))
              (kinds (make-hash-table :test 'equal))
-             (deadline (and seconds (+ (get-internal-real-time)
+             (deadline (and seconds (+ (io:monotonic-ticks)
                                        (floor (* seconds internal-time-units-per-second)
                                               (length targets)))))
              (replays (and replay
@@ -120,7 +120,7 @@ matched by a :known entry, and those that were."
                                            (string= (getf (rest e) :target) name))
                                    collect (list (getf (rest e) :seed) (getf (rest e) :case)))))
              (ran 0) (failed 0) (known-here 0)
-             (t0 (get-internal-real-time)))
+             (t0 (io:monotonic-ticks)))
         (flet ((one (seed case)
                  (incf ran)
                  (multiple-value-bind (what signature input) (run-case tg seed case :debug debug)
@@ -136,7 +136,7 @@ matched by a :known entry, and those that were."
                                  (and entry (getf (rest entry) :note))
                                  name seed case (input-text input))))))))
           (loop for case from case-from
-                while (if cases (< (- case case-from) cases) (< (get-internal-real-time) deadline))
+                while (if cases (< (- case case-from) cases) (< (io:monotonic-ticks) deadline))
                 do (one seed case))
           (loop for (s c) in replays do (one s c)))
         (incf new failed)
@@ -144,7 +144,7 @@ matched by a :known entry, and those that were."
         (format out "~&~A: ~D cases (seed ~D from case ~D, ~D replayed), hostile inputs ~D accepted / ~D rejected, ~D new + ~D known failing in ~D kind~:P, ~,2F s~%"
                 name ran seed case-from (length replays) (car *tally*) (cdr *tally*)
                 failed known-here (hash-table-count kinds)
-                (/ (- (get-internal-real-time) t0) internal-time-units-per-second))))
+                (/ (- (io:monotonic-ticks) t0) internal-time-units-per-second))))
     (values new known)))
 
 ;;; Random draws, all from io:*entropy*
