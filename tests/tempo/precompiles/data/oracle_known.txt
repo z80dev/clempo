@@ -149,14 +149,6 @@ channel/settle-logical/T11
 channel/settle-logical/T12
 channel/settle-logical/T13
 channel/settle-logical/T14
-channel/settle-bad-sig/T11
-channel/settle-bad-sig/T12
-channel/settle-bad-sig/T13
-channel/settle-bad-sig/T14
-channel/settle-garbage-sig/T11
-channel/settle-garbage-sig/T12
-channel/settle-garbage-sig/T13
-channel/settle-garbage-sig/T14
 channel/topUp/T11
 channel/topUp/T12
 channel/topUp/T13
