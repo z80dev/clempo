@@ -505,6 +505,7 @@ pre-execution system changes; returns the context APPLY-TRANSACTION and FINISH-B
 INVALID-TRANSACTION with the block as it was before TX."
   (let* ((*tx-index* (ctx-index ctx))
          (*ctx* ctx)
+         (*non-creditable* nil)            ; per transaction: RESOLVE-FEE-CONTEXT and COLLECT-FEE set it
          (system-p (system-transaction-p tx)))
     (with-block-context (ctx)
       (let ((outcome
@@ -676,7 +677,8 @@ prepare_call_env does: SKIP-GAS-CAPS the transaction and block gas caps; SKIP-FE
 collection, the fee-token balance check and settlement (the fee token is still resolved);
 SKIP-EIP3607 the sender-has-code check."
   (let ((*tx-index* (ctx-index ctx))
-        (*ctx* ctx))
+        (*ctx* ctx)
+        (*non-creditable* nil))            ; per request: RPC threads must not share it
     (setf (ctx-skip-nonce-check ctx) skip-nonce-check
           (ctx-skip-base-fee-check ctx) skip-base-fee-check
           (ctx-skip-gas-caps ctx) skip-gas-caps

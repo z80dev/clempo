@@ -33,7 +33,7 @@ running fork via FORK>=); BODY returns the output or NIL on failure."
        (clrhash *precompile-tables*)
        ',name)))
 
-(defvar *precompile-tables* (make-hash-table) "fork index -> address table")
+(defvar *precompile-tables* (make-hash-table :synchronized t) "fork index -> address table (lazy; shared across threads)")
 
 (defun ethereum-precompiles (fork)
   "A hash table address -> PRECOMPILE of Ethereum's precompiles active in FORK."
