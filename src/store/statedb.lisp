@@ -3,8 +3,7 @@
   (:import-from #:clempo.keccak #:keccak256)
   (:import-from #:clempo.rlp #:rlp-encode)
   (:import-from #:clempo.trie #:make-secure-trie #:trie-clone #:trie-put #:trie-delete
-                #:trie-root #:trie-proof #:encode-account #:+empty-trie-root+ #:+empty-code-hash+
-                #:map-disjoint-tries)
+                #:trie-root #:trie-proof #:encode-account #:+empty-trie-root+ #:+empty-code-hash+)
   (:documentation "The committed state database: every account, storage slot and code blob
 of the chain in RAM, keyed by integers, with the account and storage tries kept beside them so
 a block's state root costs only its dirty paths. A block's writes are applied between
@@ -174,12 +173,6 @@ committed blocks into a log and periodic checkpoints.")
   "The state root of the db as it is now (including an open block)."
   (let ((dirty (db-dirty db)))
     (when (plusp (hash-table-count dirty))
-      ;; Storage tries are disjoint: bring them up to date first (in parallel when the
-      ;; caller bound a trie-hashing parallel map), then the account trie in this thread.
-      (map-disjoint-tries #'flush-storage
-                          (loop for address being the hash-keys of dirty
-                                for a = (db-account db address)
-                                when (and a (account-dirty-slots a)) collect a))
       (let ((trie (db-trie db)))
         (maphash (lambda (address flag)
                    (declare (ignore flag))

@@ -6,7 +6,7 @@
   (:export #:trie #:make-trie #:make-secure-trie #:trie-clone
            #:trie-get #:trie-put #:trie-delete #:trie-root #:ordered-trie-root
            #:trie-proof #:verify-proof #:node-store-get #:node-store-put
-           #:call-with-trie-hashing #:map-disjoint-tries
+           #:call-with-trie-hashing
            #:trie-node-error #:encode-account #:decode-account
            #:+empty-trie-root+ #:+empty-code-hash+))
 
@@ -40,23 +40,6 @@ and parallel calls produce the same root."
         (*parallel-map* parallel-map)
         (*parallel-threshold* parallel-threshold))
     (funcall function)))
-
-(defun map-disjoint-tries (function items)
-  "Call FUNCTION on each of ITEMS, which must touch disjoint tries (no shared mutable
-nodes). With a parallel map bound by CALL-WITH-TRIE-HASHING and several items, the items
-are dealt into at most 16 jobs, each run with its own hashing workspace and no nested
-parallelism; otherwise they run in order on this thread."
-  (if (and *parallel-map* (cdr items))
-      (let* ((n (min 16 (length items)))
-             (groups (make-array n :initial-element '())))
-        (loop for item in items for i from 0
-              do (push item (svref groups (mod i n))))
-        (funcall *parallel-map*
-                 (lambda (group)
-                   (call-with-trie-hashing (lambda () (mapc function group)) :parallel-map nil))
-                 (coerce groups 'list)))
-      (mapc function items))
-  nil)
 
 (declaim (inline hash-octets))
 (defun hash-octets (bytes end)
