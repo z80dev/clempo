@@ -267,6 +267,144 @@ empty block per fork, and up to PER-SHAPE transactions of every shape."
           (clempo.io:write-file-atomically path (string->octets (to-json-string* s)))
           s))))
 
+;;; Shape search: the reference scan above samples windows and misses rare shapes, so the
+;;; archive is scanned locally (every block, decoded) for transaction shapes by wire tags and
+;;; the lowest PER examples of each are appended to samples.json. Appending keeps every
+;;; recorded request; rpc-record then records only the new ones.
+
+(defun key-authorization-tags (ka)
+  (let ((v (ignore-errors (clempo.signatures:parse-key-authorization ka))))
+    (if (null v)
+        (list "ka-unparsed")
+        (append
+         (list (format nil "ka-keytype~D" (clempo.signatures:key-authorization-key-type v))
+               (format nil "ka-sig-~(~A~)"
+                       (ignore-errors (clempo.signatures:signature-kind (second ka)))))
+         (unless (eq :absent (clempo.signatures:key-authorization-allowed-calls v)) (list "ka-allowedcalls"))
+         (when (clempo.signatures:key-authorization-witness v) (list "ka-witness"))
+         (when (clempo.signatures:key-authorization-is-admin v) (list "ka-admin"))
+         (when (clempo.signatures:key-authorization-account v) (list "ka-account"))))))
+
+(defun wire-shape-tags (tx)
+  "Shape tags of a decoded transaction, read from its wire fields."
+  (let ((f (clempo.transactions:transaction-fields tx)))
+    (case (clempo.transactions:transaction-type tx)
+      (0 (append (unless (clempo.transactions:transaction-chain-id tx) (list "pre155"))
+                 (when (zerop (length (nth 3 f))) (list "legacy-create"))))
+      (1 (cons "0x1" (when (zerop (length (nth 4 f))) (list "0x1-create"))))
+      (2 (when (zerop (length (nth 5 f))) (list "0x2-create")))
+      (4 (list "0x4"))
+      (#x76
+       (let* ((sig (car (last f)))
+              (kind (ignore-errors (clempo.signatures:signature-kind sig))))
+         (append
+          (list (if (member kind '(:keychain-v1 :keychain-v2))
+                    (format nil "~(~A-~A~)" kind (clempo.signatures:signature-inner-kind sig))
+                    (format nil "~(~A~)" kind)))
+          (when (some (lambda (c) (zerop (length (first c)))) (nth 4 f)) (list "76-create"))
+          (when (and (listp (nth 12 f)) (nth 12 f)) (list "aaauth"))
+          (when (= (length f) 15) (key-authorization-tags (nth 13 f)))))))))
+
+(defparameter *wanted-shape-tags*
+  '("0x1" "0x1-create" "0x2-create" "0x4" "pre155" "legacy-create" "p256" "webauthn"
+    "keychain-v1-secp256k1" "keychain-v1-p256" "keychain-v1-webauthn"
+    "keychain-v2-secp256k1" "keychain-v2-p256" "keychain-v2-webauthn"
+    "76-create" "aaauth" "ka-keytype0" "ka-keytype1" "ka-keytype2"
+    "ka-sig-secp256k1" "ka-sig-p256" "ka-sig-webauthn"
+    "ka-allowedcalls" "ka-witness" "ka-admin" "ka-account")
+  "Wire shapes the corpus must cover; rpc-shape-samples reports those with no mainnet example.")
+
+(defun scan-archive-shapes (&key (per 2) (threads 12) (to (clempo.archive:archive-contiguous-height)))
+  "Hash table tag -> (count . lowest PER (block index) examples) over archive blocks 0..TO."
+  (let ((shapes (make-hash-table :test 'equal))
+        (lock (sb-thread:make-mutex :name "shapes"))
+        (chunks (loop for c from 0 to to by clempo.archive:+chunk-blocks+ collect c)))
+    (flet ((note (tag n i)
+             (sb-thread:with-mutex (lock)
+               (let ((e (or (gethash tag shapes) (setf (gethash tag shapes) (list 0)))))
+                 (incf (car e))
+                 (setf (cdr e) (let ((l (merge 'list (list (list n i)) (cdr e)
+                                               (lambda (a b) (or (< (first a) (first b))
+                                                                 (and (= (first a) (first b))
+                                                                      (< (second a) (second b))))))))
+                                 (subseq l 0 (min per (length l))))))))
+           (next-chunk () (sb-thread:with-mutex (lock) (pop chunks))))
+      (mapc #'sb-thread:join-thread
+            (loop repeat threads
+                  collect (sb-thread:make-thread
+                           (lambda ()
+                             (loop for first = (next-chunk) while first
+                                   do (let ((c (clempo.archive:read-chunk first)))
+                                        (loop for n from first
+                                                below (min (1+ to) (+ first (clempo.archive:chunk-count c)))
+                                              do (loop for tx in (clempo.blocks:block-transactions
+                                                                  (clempo.blocks:decode-block
+                                                                   (clempo.archive:chunk-block c n)))
+                                                       for i from 0
+                                                       do (dolist (tag (wire-shape-tags tx)) (note tag n i)))))))
+                           :name "shape-scan"))))
+    shapes))
+
+(defun sample-code-hashes (url txs &key (limit 6))
+  "Distinct non-empty code hashes of the call targets of TXS at their blocks."
+  (let ((out '()))
+    (dolist (x txs (nreverse out))
+      (let ((to (or (txf x "to") (clempo.json:jget* (stx x) "calls" 0 "to"))))
+        (when (and (stringp to) (< (length out) limit))
+          (let ((code (clempo.jsonrpc:rpc-call "eth_getCode" (list to (txf x "blockNumber")) :url url)))
+            (when (> (length code) 2)
+              (let ((h (octets->hex (clempo.keccak:keccak256 (hex->octets code)))))
+                (unless (find h out :key (lambda (c) (clempo.json:jget c "codeHash")) :test #'string=)
+                  (push (jo "address" to "block" (txf x "blockNumber") "codeHash" h) out))))))))))
+
+(defun extend-samples (url &key (per 2))
+  "Append archive-found examples of missing wire shapes, their blocks, code hashes and a recent
+archive block to samples.json. Returns the tags with no mainnet example."
+  (let* ((s (load-samples url))
+         (top (clempo.archive:archive-contiguous-height))
+         (shapes (scan-archive-shapes :per per :to top))
+         (txs (sample-txs s)) (blocks (sample-blocks s)) (added '()))
+    (dolist (tag *wanted-shape-tags*)
+      (unless (find (format nil "archive:~A" tag) txs
+                    :key (lambda (x) (clempo.json:jget x "shape")) :test #'string=)
+        (loop for (n i) in (cdr (gethash tag shapes))
+              for tx = (clempo.jsonrpc:rpc-call "eth_getTransactionByBlockNumberAndIndex"
+                                                (list (quantity->hex n) (quantity->hex i)) :url url)
+              unless (find (clempo.json:jget tx "hash") txs
+                           :key (lambda (x) (clempo.json:jget x "hash")) :test #'string=)
+                do (let ((x (jo "shape" (format nil "archive:~A" tag) "fork" (fork-at n)
+                                "hash" (clempo.json:jget tx "hash") "tx" tx)))
+                     (setf txs (append txs (list x)))
+                     (push x added)
+                     (unless (find n blocks :key (lambda (b) (jhex b "number")))
+                       (let ((b (clempo.jsonrpc:rpc-call "eth_getBlockByNumber" (list (quantity->hex n) :false)
+                                                         :url url)))
+                         (setf blocks (append blocks
+                                              (list (jo "number" (quantity->hex n) "hash" (clempo.json:jget b "hash")
+                                                        "fork" (fork-at n)
+                                                        "txs" (length (clempo.json:jget b "transactions"))
+                                                        "why" (format nil "tx archive:~A" tag)))))))))))
+    (let* ((recent (or (clempo.json:jget s "recent")
+                       (let ((b (clempo.jsonrpc:rpc-call "eth_getBlockByNumber" (list (quantity->hex top) :false)
+                                                         :url url)))
+                         (jo "number" (quantity->hex top) "hash" (clempo.json:jget b "hash")))))
+           (codes (or (clempo.json:jget s "codes") (coerce (sample-code-hashes url txs) 'simple-vector)))
+           (out (jo "url" (clempo.json:jget s "url") "head" (clempo.json:jget s "head")
+                    "blocks" (coerce blocks 'simple-vector) "txs" (coerce txs 'simple-vector)
+                    "recent" recent "codes" codes)))
+      (clempo.io:write-file-atomically (corpus-path "samples.json") (string->octets (to-json-string* out))))
+    (log-line "samples: ~D transactions appended" (length added))
+    (loop for tag in *wanted-shape-tags*
+          do (log-line "  ~22A ~9D on mainnet" tag (car (gethash tag shapes '(0)))))
+    (remove-if (lambda (tag) (gethash tag shapes)) *wanted-shape-tags*)))
+
+(defcommand "rpc-shape-samples" (args)
+  "append archive-found rare transaction shapes to samples.json: rpc-shape-samples [-url U] [-per N]"
+  (let ((missing (extend-samples (arg args :url (clempo.jsonrpc:local-rpc-url))
+                                 :per (arg-int args :per 2))))
+    (format t "shapes with no mainnet example: ~{~A~^ ~}~%" missing)
+    0))
+
 ;;; Suites. Each returns a list of raw request bodies built from the samples.
 
 (defvar *suites* '() "Ordered (name . generator); a generator takes the samples object.")
@@ -745,6 +883,41 @@ empty block per fork, and up to PER-SHAPE transactions of every shape."
         (r "consensus_getFinalization" "nope") (r "consensus_getFinalization")
         (r "consensus_getFinalization" (jo "foo" 1))))
 
+(defsuite "success" (s)
+  "success paths of debug_codeByHash, debug_executionWitness, debug_intermediateRoots,
+debug_stateRootWithUpdates, debug_traceBlock, eth_getMultiProof and tempo_simulateV1. The state
+methods are slow far behind the head, so they use the samples' recent archive block."
+  (let* ((recent (clempo.json:jget s "recent"))
+         (n (and recent (clempo.json:jget recent "number")))
+         (h (and recent (clempo.json:jget recent "hash")))
+         (raw (and n (octets->hex (clempo.archive:raw-block (hex->integer n)))))
+         (call (jo "to" +pathusd+ "input" "0x06fdde03"))
+         (holder (format nil "0x70a08231000000000000000000000000~A" (subseq +fee-manager+ 2))))
+    (append
+     (loop for c across (clempo.json:jget s "codes" #())
+           for ch = (clempo.json:jget c "codeHash")
+           append (list (r "debug_codeByHash" ch) (r "debug_codeByHash" ch (clempo.json:jget c "block"))))
+     (when n
+       (list (r "debug_executionWitness" n)
+             (r "debug_executionWitnessByBlockHash" h)
+             (r "debug_intermediateRoots" h :null)
+             (r "debug_intermediateRoots" h (jo "tracer" "callTracer"))
+             (r "debug_stateRootWithUpdates" (jo "accounts" (jo) "storages" (jo)) n)
+             (r "debug_stateRootWithUpdates"
+                (jo "accounts" (jo (octets->hex (clempo.keccak:keccak256 (hex->octets +pathusd+)))
+                                   (jo "nonce" 1 "balance" "0x0" "bytecode_hash" :null))
+                    "storages" (jo))
+                n)
+             (r "debug_traceBlock" raw (jo))
+             (r "debug_traceBlock" raw (jo "tracer" "callTracer"))
+             (r "debug_traceBlock" raw (jo "tracer" "prestateTracer" "tracerConfig" (jo "diffMode" :true)))
+             (r "tempo_simulateV1" (jo "blockStateCalls" (jv (jo "calls" (jv call)))) n)
+             (r "tempo_simulateV1" (jo "blockStateCalls" (jv (jo "calls" (jv call (jo "to" +pathusd+ "input" holder))))
+                                       "traceTransfers" :true "returnFullTransactions" :true)
+                n)))
+     (list (r "eth_getMultiProof" (jv (jv +pathusd+ (jv +zero-hash+))) "latest")
+           (r "eth_getMultiProof" (jv (jv +pathusd+ (jv)) (jv +fee-manager+ (jv +zero-hash+))) "latest")))))
+
 ;;; Recording
 
 (defparameter *node-methods*
@@ -756,6 +929,9 @@ empty block per fork, and up to PER-SHAPE transactions of every shape."
 
 (defparameter *live-tags* '("\"latest\"" "\"pending\"" "\"safe\"" "\"finalized\""))
 
+(defparameter *live-methods* '("consensus_getLatest" "eth_blockNumber")
+  "Methods whose answers follow the head whatever their params.")
+
 (defun request-method (body)
   (let ((v (ignore-errors (clempo.json:parse-json body))))
     (or (and (clempo.json:jobject-p v) (stringp (clempo.json:jget v "method")) (clempo.json:jget v "method"))
@@ -764,6 +940,8 @@ empty block per fork, and up to PER-SHAPE transactions of every shape."
 
 (defun case-class (body method a b)
   (cond ((member method *node-methods* :test #'string=) "node")
+        ((and (clempo.json:jobject-p a) (eql 503 (clempo.json:jget* a "error" "code"))) "node")
+        ((member method *live-methods* :test #'string=) "live")
         ((not (clempo.json:json-equal a b)) "live")
         ((some (lambda (tag) (search tag body)) *live-tags*) "live")
         (t "stable")))
