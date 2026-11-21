@@ -16,6 +16,41 @@ Busy is goempo's published Busy workload. Recent starts 1,084 blocks later than 
 
 ## Results on the shared dev host
 
+### Recent with matched parent-cache preparation
+
+On the same Mac, Clempo `c190f13` (background segment read-ahead) and
+goempo `92e996c` replayed all 40,000 Recent blocks, checking every state
+root and matching gas totals. Both used standalone builds and fresh APFS
+clones of their exact parents. In each cache condition, pair 1 ran Clempo
+then goempo; pair 2 reversed the order. No samples were dropped.
+
+| Parent cache / pair | Clempo process wall / CPU s | goempo process wall / CPU s | Clempo / goempo page faults |
+|---|---:|---:|---:|
+| Cold proxy 1 | 7.75 / 8.10 | 10.77 / 8.97 | 140,084 / 458 |
+| Cold proxy 2 | 7.42 / 8.27 | 11.46 / 8.98 | 139,982 / 466 |
+| Warm 1 | 6.52 / 7.95 | 6.54 / 8.46 | 5 / 476 |
+| Warm 2 | 6.55 / 7.96 | 6.30 / 8.39 | 4 / 8 |
+
+`purge` required privileges not available for the run. For the cold proxy,
+after each clone we ran `dd if="$eviction_file" of=/dev/null bs=8m` on the
+same allocated 145 GiB unrelated file (128 GiB host RAM). This is not a
+guarantee of an empty cache. For warm, we ran
+`find "$work" -type f -exec cat {} + >/dev/null` after each clone. Both
+steps were outside the timer. Then we ran the Recent process commands
+below unchanged; Clempo synced its WAL in the background on the 1 s
+cadence and waited for final sync, while goempo explicitly flushed at the
+terminal block. Rust was not retimed under these cache conditions.
+
+Clempo won both cold-proxy wall pairs. Warm wall times split by 0.02 s
+and 0.25 s, within run-to-run variation; these two pairs do not establish
+a warm wall-time winner. Clempo used less CPU in every pair.
+The prior Clempo build (`af18223`) took 13.67 and 17.42 s wall under the
+same cold proxy and recorded about 69,600 faults per run. Read-ahead
+reduced wall time despite more process faults; the counters alone do not
+identify which faults stalled replay.
+
+Raw logs: `logs/r7-parity/cache-conditioned-{af18223,c190f13}/{cold,warm}-{1,2}-{clempo,go}.{json,log}`.
+
 ### Matched prepared-parent comparison
 
 Clempo `91ab4d2` plus the `-prepared` benchmark entry point and explicitly
@@ -76,24 +111,17 @@ the command or quantify the cost of syncing.
 
 ### Recent store read-ahead
 
-Separate from the three-range sweep: paired Recent runs on the same Mac,
-from the exact parent at 49,409,999, with all 40,000 roots checked by
-both clients. Cold runs read a 145 GiB eviction file before each command;
-warm runs read the entire prepared parent before each command. Conditioning
-is outside the timed interval. Each cell lists the two process wall / CPU
-times from `/usr/bin/time -l`; CPU is user plus system time.
+Baseline before segment read-ahead, under the same
+[matched cache preparation](#recent-with-matched-parent-cache-preparation):
 
-| Clempo revision | Cache | Clempo wall / CPU s | goempo `92e996c` wall / CPU s |
-|---|---|---:|---:|
-| `af18223`, before read-ahead | cold | 13.67 / 8.49; 17.42 / 8.69 | 10.43 / 8.87; 10.80 / 9.04 |
-| `c190f13`, with read-ahead | cold | 7.75 / 8.10; 7.42 / 8.27 | 10.77 / 8.97; 11.46 / 8.98 |
-| `af18223`, before read-ahead | warm | 6.61 / 7.93; 6.61 / 7.93 | 6.42 / 8.42; 6.56 / 8.50 |
-| `c190f13`, with read-ahead | warm | 6.52 / 7.95; 6.55 / 7.96 | 6.54 / 8.46; 6.30 / 8.39 |
+| Parent cache / pair | Clempo `af18223` wall / CPU s | goempo `92e996c` wall / CPU s | Clempo / goempo page faults |
+|---|---:|---:|---:|
+| Cold proxy 1 | 13.67 / 8.49 | 10.43 / 8.87 | 69,626 / 463 |
+| Cold proxy 2 | 17.42 / 8.69 | 10.80 / 9.04 | 69,643 / 480 |
+| Warm 1 | 6.61 / 7.93 | 6.42 / 8.42 | 5 / 468 |
+| Warm 2 | 6.61 / 7.93 | 6.56 / 8.50 | 13 / 3 |
 
-Read-ahead reduced clempo's cold wall time in both pairs, while warm wall
-times were similar across both clients. Cold clempo page faults reported
-by Darwin's `time -l` rose from 69,626–69,643 to 139,982–140,084; goempo
-reported 458–480. The fault count does not measure how long replay spent
+The fault count does not measure how long replay spent
 waiting: the new version asks the kernel to read mapped segments
 sequentially in the background instead of relying on demand reads alone.
 
