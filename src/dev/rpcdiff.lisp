@@ -62,12 +62,30 @@ the error depends on the reference's load, not on the request."
         ((numberp a) (numberp b))
         (t (eq a b))))
 
+(defun head-relative (want got)
+  "WANT with every string equal to its result.head number or hash replaced by GOT's: an
+eth_capabilities answer recorded at the reference's head, compared at clempo's."
+  (let ((map (loop for key in '("number" "hash")
+                   collect (cons (clempo.json:jget* want "result" "head" key)
+                                 (clempo.json:jget* got "result" "head" key)))))
+    (labels ((walk (v)
+               (cond ((clempo.json:jobject-p v) (cons :object (loop for (k . x) in (cdr v) collect (cons k (walk x)))))
+                     ((stringp v) (let ((cell (assoc v map :test #'equal))) (if cell (cdr cell) v)))
+                     ((vectorp v) (map 'vector #'walk v))
+                     (t v))))
+      (walk want))))
+
 (defun case-matches (c status response)
   "A reference-timeout case matches an answer with a result: the reference recorded none to
-compare with."
+compare with. A \"headRelative\" case is value-checked after HEAD-RELATIVE."
   (and (eql status (clempo.json:jget c "status"))
        (let ((class (case-compare-class c)))
-         (cond ((string= class "stable") (clempo.json:json-equal (clempo.json:jget c "response") response))
+         (cond ((string= class "stable")
+                (clempo.json:json-equal (if (and (eq :true (clempo.json:jget c "headRelative"))
+                                                 (clempo.json:jobject-p response))
+                                            (head-relative (clempo.json:jget c "response") response)
+                                            (clempo.json:jget c "response"))
+                                        response))
                ((integerp (clempo.json:jget c "eventHeight"))
                 (and (equal "consensus_event" (clempo.json:jget response "method"))
                      (equal "finalized" (clempo.json:jget* response "params" "result" "type"))

@@ -27,4 +27,4 @@
 (defsystem "clempo-dev/tests"
   :depends-on ("clempo-dev")
   :pathname "../../tests/dev/"
-  :components ((:file "spec-tests")))
+  :components ((:file "spec-tests") (:file "rpcdiff-tests")))
