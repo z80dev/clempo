@@ -3,13 +3,13 @@
   :description "secp256k1, p256, p384, bn254, bls12-381, kzg, modexp"
   :depends-on ("clempo-base" "clempo-crypto-keccak" "clempo-crypto-hash")
   :serial t
-  :components ((:file "native-word")
-               (:file "modexp")
+  :components ((:file "modexp")
                (:file "prime-curve")
                (:file "secp256k1-native-field")
                (:file "secp256k1-native-scalar")
                (:file "secp256k1-native-group")
                (:file "secp256k1-native-recovery")
+               (:file "secp256k1-ct")
                (:file "secp256k1")
                (:file "p256-field")
                (:file "p256-native")
@@ -24,6 +24,7 @@
                (:file "bls12-381-field")
                (:file "bls12-381-tower")
                (:file "bls12-381-group")
+               (:file "bls12-381-ct")
                (:file "bls12-381-pairing")
                (:file "bls12-381-hash")
                (:file "bls12-381-signatures")

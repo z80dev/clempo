@@ -1,7 +1,7 @@
 (defpackage #:clempo.field25519
   (:use #:cl #:clempo.base)
   (:export #:+p+ #:+zero+ #:+one+ #:field #:from-integer #:to-integer #:f+ #:f- #:f* #:sq
-           #:inverse #:pow2523 #:integer-le #:octets-le #:clamped-scalar))
+           #:inverse #:pow2523 #:integer-le #:octets-le #:clamped-octets))
 (in-package #:clempo.field25519)
 
 (defconstant +p+ (- (ash 1 255) 19))
@@ -112,5 +112,9 @@
   (let ((out (make-octets n)))
     (dotimes (i n out) (setf (aref out i) (ldb (byte 8 (* i 8)) x)))))
 
-(defun clamped-scalar (bytes)
-  (logior (logand (integer-le bytes 0 32) (- (ash 1 254) 8)) (ash 1 254)))
+(defun clamped-octets (secret)
+  "RFC 7748 clamping of a 32-octet little-endian scalar, as octets."
+  (let ((k (subseq secret 0 32)))
+    (setf (aref k 0) (logand (aref k 0) 248)
+          (aref k 31) (logior 64 (logand (aref k 31) 127)))
+    k))

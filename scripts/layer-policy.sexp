@@ -59,9 +59,9 @@
    ("SG-WNAF!" 3 "Finite-width signed window decomposition."))
   ("src/crypto/ec/secp256k1.lisp" ("SIGN" 1 "RFC6979 nonce rejection must retry unusable nonces."))
   ("src/crypto/hash/aes.lisp"
-   ("DEFINE-BLOCK-ENCRYPTION" 1 "Macro loop covers the configured fixed round count.")
-   ("GF-MUL" 1 "Consumes finite field multiplier bits.")
-   ("S-BOX-ENTRY" 1 "Consumes exponent bits during GF(2^8) inversion."))
+   ("ENCRYPT-PLANES" 1 "Runs the cipher's fixed round count (10 or 14)."))
+  ("src/crypto/hash/ct.lisp"
+   ("DEFINE-CT-FIELD" 1 "Fermat inversion walks the bits of the fixed public exponent."))
   ("src/crypto/hash/blake.lisp"
    ("DEFINE-BLAKE2F" 1 "Compression runs the declared round count.")
    ("HASH-TREE" 2 "Consumes input chunks or reduces the pending subtree stack."))
@@ -75,8 +75,7 @@
   ("src/crypto/pki/der.lisp" ("DER-CHILDREN" 1 "Each DER child advances the cursor inside the enclosing length."))
   ("src/crypto/pki/gcm.lisp"
    ("CTR-XOR" 2 "Processes finite input blocks and bytes within each counter block.")
-   ("GHASH-BLOCKS" 3 "Visits fixed-size words or a final partial block of the supplied bytes.")
-   ("MAKE-GCM" 1 "Prepares the fixed-size table for multiplying GHASH field elements."))
+   ("GHASH-BLOCKS" 1 "Visits fixed-size blocks of the supplied bytes."))
   ("src/crypto/pki/x509.lisp"
    ("IPV4-OCTETS" 1 "Scans a finite numeric address string, rejecting malformed octets.")
    ("PEM-CERTIFICATES" 1 "Advances through a finite PEM bundle one certificate at a time."))

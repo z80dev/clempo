@@ -5,6 +5,7 @@
                 #:octets-concat)
   (:export #:+p+ #:+r+ #:invalid-point #:g1-generator #:g2-generator
            #:g1-add #:g2-add #:g1-neg #:g2-neg #:g1-mul #:g2-mul
+           #:g1-mul-secret #:g2-mul-secret #:fr-add #:fr-sub #:fr-mul #:fr-reduce-octets
            #:g1-msm #:g2-msm #:g1-on-curve-p #:g2-on-curve-p
            #:g1-subgroup-p #:g2-subgroup-p #:g1-compress #:g2-compress
            #:g1-decompress #:g2-decompress #:g1-encode #:g2-encode

@@ -143,13 +143,18 @@ rename it over PATH."
    16))
 
 (defun cpu-feature-p (feature)
-  "Whether this CPU implements FEATURE: :ARM64-SHA256 (FEAT_SHA256: SHA256H, SHA256H2,
-SHA256SU0, SHA256SU1) or :ARM64-SHA3 (FEAT_SHA3: EOR3, RAX1, XAR, BCAX), as the OS reports
-it (Linux's AT_HWCAP bits 6 and 17, Darwin's hw.optional.arm.FEAT_* sysctls). NIL on other
-hosts."
-  (check-type feature (member :arm64-sha256 :arm64-sha3))
-  #+(and arm64 linux) (logbitp (if (eq feature :arm64-sha256) 6 17) (hwcap))
-  #+(and arm64 darwin) (sysctl-flag (if (eq feature :arm64-sha256)
-                                        "hw.optional.arm.FEAT_SHA256"
-                                        "hw.optional.arm.FEAT_SHA3"))
+  "Whether this CPU implements FEATURE: :ARM64-AES (FEAT_AES: AESE, AESD, AESMC, AESIMC),
+:ARM64-DIT (FEAT_DIT: the PSTATE.DIT data-independent timing bit), :ARM64-SHA256
+(FEAT_SHA256: SHA256H, SHA256H2, SHA256SU0, SHA256SU1) or :ARM64-SHA3 (FEAT_SHA3: EOR3,
+RAX1, XAR, BCAX), as the OS reports it (Linux's AT_HWCAP bits 3, 24, 6 and 17, Darwin's
+hw.optional.arm.FEAT_* sysctls). NIL on other hosts."
+  (check-type feature (member :arm64-aes :arm64-dit :arm64-sha256 :arm64-sha3))
+  #+(and arm64 linux) (logbitp (ecase feature (:arm64-aes 3) (:arm64-dit 24) (:arm64-sha256 6)
+                                 (:arm64-sha3 17))
+                               (hwcap))
+  #+(and arm64 darwin) (sysctl-flag (ecase feature
+                                      (:arm64-aes "hw.optional.arm.FEAT_AES")
+                                      (:arm64-dit "hw.optional.arm.FEAT_DIT")
+                                      (:arm64-sha256 "hw.optional.arm.FEAT_SHA256")
+                                      (:arm64-sha3 "hw.optional.arm.FEAT_SHA3")))
   #-(and arm64 (or linux darwin)) nil)

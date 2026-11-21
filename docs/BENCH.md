@@ -528,6 +528,66 @@ bignum. Bind `clempo.secp256k1:*recovery-scratch*` and
 The 25-µs recovery target remains unmet. See
 [arithmetic, GC safety, exact timings and allocation-counter rounding](../tests/crypto/ec/secp256k1/performance.md).
 
+### Constant-time secret-key operations
+
+Every secret-key operation in `src/crypto` now runs without branches, table
+indices or allocation that depend on the secret (`src/crypto/hash/ct.lisp`,
+README "Limitations"). `clempo-dev ct-timing` is the leakage test: a dudect-style
+Welch t-test of fixed (sparse) against random secrets, interleaved at random, with
+percentile crops; `|t| > 4.5` is a leak. `-aa` runs both classes random, which
+measures the test's own false-positive rate. On Apple M3 Max (check build):
+
+```text
+operation                    samples   median ns    max |t|  verdict
+secp256k1-sign                   20000      60000.0     1.25 ok
+secp256k1-public-key             20000      45000.0     1.22 ok
+secp256k1-ecdh                   10000     121834.0     0.85 ok
+ed25519-sign                     20000      67708.0     2.05 ok
+x25519                           10000      91209.0     0.86 ok
+p256-ecdh                        10000     156333.0     1.03 ok
+bls-sign-g1                       3000     753416.0     0.52 ok
+bls-public-key-g2                 2000    1040583.0     1.13 ok
+dkg-share-mul                    20000        168.3     2.13 ok
+aes-key-schedule-and-block       20000       5125.0     1.53 ok
+aes-256-block                    20000         67.1     1.38 ok
+aes-256-block-bitsliced          20000       3093.8     3.33 ok
+aes-128-gcm                      20000       5875.0     2.30 ok
+chacha20-poly1305                20000       1667.0     1.55 ok
+control-variable-time-wnaf       20000      28042.0   126.41 leak (expected: control)
+```
+
+The test found three leaks in code with no secret branch in its source, each fixed:
+a mask word boxed into a bignum when passed between functions (X25519's ladder
+swap), a mask computed in a form SBCL did not compile as modular arithmetic (it
+tested for a fixnum and allocated a bignum; P-256's table select), and generic `ASH`
+on key bytes in the AES key schedule. In the same harness, one Montgomery
+multiplication on sparse against random words showed |t| near 90 on Apple M3 without
+Arm's DIT bit and none with it; `clempo.ct:with-data-independent-timing` sets the bit
+around every secret-key entry point.
+
+Throughput before (`eebfce9`, variable-time) and after, same host, check build,
+mean of 100 to 2,000 calls (`x25519` includes the public-key ladder):
+
+| Operation | Before | After |
+|---|---:|---:|
+| secp256k1 sign | 43.1 µs | 64.2 µs |
+| secp256k1 private->public | 29.9 µs | 45.9 µs |
+| secp256k1 ECDH | 35.7 µs | 127.0 µs |
+| Ed25519 sign | 56.6 µs | 81.8 µs |
+| X25519 (two ladders) | 197.6 µs | 190.5 µs |
+| P-256 ECDH shared secret | 654.6 µs | 161.0 µs |
+| BLS min-sig sign (hash to G1 included) | 647.1 µs | 757.9 µs |
+| BLS min-sig public key (G2) | 528.9 µs | 1,044.6 µs |
+| AES-256-CTR, 64 KiB | 1,127.2 µs | 403.9 µs |
+| AES-128-GCM, 64 KiB | 1,100.3 µs | 411.3 µs |
+| ChaCha20-Poly1305, 64 KiB | 346.0 µs | 349.3 µs |
+
+AES runs on the Armv8 AES instructions where the CPU has them (constant-time by
+design) and on the bitsliced core elsewhere (about 3.1 µs a block, 13 MB/s on four
+blocks at a time). Fixed-base multiplication uses a 65 x 8 comb of odd multiples;
+variable-base uses 4-bit signed odd windows, so ECDH pays 256 doublings that
+signing does not.
+
 ### EVM compiler (`6dc2b56`)
 
 ```sh

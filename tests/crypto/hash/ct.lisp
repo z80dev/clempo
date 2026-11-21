@@ -1,0 +1,155 @@
+(defpackage #:clempo.ct.tests (:use #:cl #:clempo.base #:clempo.ct))
+(in-package #:clempo.ct.tests)
+
+;;; The constant-time kernel against plain integer arithmetic.
+
+(defconstant +k-p+ #xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f)
+(defconstant +k-n+ #xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141)
+(defconstant +bls-p+ #x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab)
+(defconstant +p256-p+ #xffffffff00000001000000000000000000000000ffffffffffffffffffffffff)
+(defconstant +p256-n+ #xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551)
+(defconstant +p256-b+ #x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b)
+
+(define-ct-field kf #.+k-p+)          ; full-width modulus
+(define-ct-field bf #.+bls-p+)        ; six words with spare bits
+(define-ct-quadratic-field bf2 bf 6)
+(define-ct-field qf #.+p256-p+)
+(define-ct-curve kg :field kf :width 4 :a 0 :b 7 :order #.+k-n+)
+(define-ct-curve qg :field qf :width 4 :a -3 :b #.+p256-b+ :order #.+p256-n+)
+(define-ct-curve qgg :field qf :width 4 :a #.(- +p256-p+ 3) :b #.+p256-b+ :order #.+p256-n+)
+
+(defun generator (seed)
+  (let ((state seed))
+    (lambda (limit)
+      (let ((x 0))
+        (loop repeat (1+ (ceiling (integer-length limit) 64)) do
+          (setf state (ldb (byte 64 0) (logxor state (ash state 13)))
+                state (logxor state (ash state -7))
+                state (ldb (byte 64 0) (logxor state (ash state 17)))
+                x (logior (ash x 64) state)))
+        (mod x limit)))))
+
+(defun field-cases (modulus next)
+  (list* 0 1 2 (1- modulus) (- modulus 2) (ash modulus -1)
+         (loop repeat 200 collect (funcall next modulus))))
+
+(deftest ct-field-arithmetic-matches-integers ()
+  (let ((next (generator 88172645463325252)) (w (make-words 64)))
+    (loop for (m from to add sub mul inv neg)
+            in (list (list +k-p+ #'kf-from-integer! #'kf-to-integer #'kf-add! #'kf-sub! #'kf-mul! #'kf-inv! #'kf-neg!)
+                     (list +bls-p+ #'bf-from-integer! #'bf-to-integer #'bf-add! #'bf-sub! #'bf-mul! #'bf-inv! #'bf-neg!)
+                     (list +p256-p+ #'qf-from-integer! #'qf-to-integer #'qf-add! #'qf-sub! #'qf-mul! #'qf-inv! #'qf-neg!))
+          do (let ((cases (field-cases m next)))
+               (loop for a in cases for b in (reverse cases) for i from 0 do
+                 (funcall from w 0 a) (funcall from w 8 b)
+                 (funcall add w 16 w 0 w 8) (is= (mod (+ a b) m) (funcall to w 16))
+                 (funcall sub w 16 w 0 w 8) (is= (mod (- a b) m) (funcall to w 16))
+                 (funcall mul w 16 w 0 w 8) (is= (mod (* a b) m) (funcall to w 16))
+                 (funcall neg w 16 w 0) (is= (mod (- a) m) (funcall to w 16))
+                 (when (< i 20)
+                   (funcall inv w 16 w 0)
+                   (is= (if (zerop a) 0 1) (mod (* a (funcall to w 16)) m))))))))
+
+(deftest ct-field-word-imports-reduce ()
+  ;; Raw words at or above the modulus, and 2n-word wide values, reduce exactly.
+  (let ((next (generator 1442695040888963407)) (w (make-words 16)))
+    (dolist (x (list +k-p+ (1+ +k-p+) (1- (ash 1 256)) (funcall next (ash 1 256))))
+      (dotimes (i 4) (setf (aref w i) (ldb (byte 64 (* 64 i)) x)))
+      (kf-from-words! w 4 w 0)
+      (is= (mod x +k-p+) (kf-to-integer w 4)))
+    (dolist (x (list (1- (ash 1 512)) (funcall next (ash 1 512)) (* +k-p+ +k-p+)))
+      (dotimes (i 8) (setf (aref w i) (ldb (byte 64 (* 64 i)) x)))
+      (kf-from-wide-words! w 8 w 0 w 4)
+      (is= (mod x +k-p+) (kf-to-integer w 8)))
+    (kf-from-integer! w 0 0) (is= 1 (kf-zero-bit w 0))
+    (kf-from-integer! w 0 5) (is= 0 (kf-zero-bit w 0))
+    (dotimes (i 4) (setf (aref w i) (ldb (byte 64 (* 64 i)) (1- +k-p+))))
+    (is= 1 (kf-less-bit w 0))
+    (dotimes (i 4) (setf (aref w i) (ldb (byte 64 (* 64 i)) +k-p+)))
+    (is= 0 (kf-less-bit w 0))))
+
+(deftest ct-quadratic-field-inverse ()
+  (let ((next (generator 6364136223846793005)) (w (make-words 48)))
+    (dotimes (i 10)
+      (let ((a (cons (funcall next +bls-p+) (funcall next +bls-p+))))
+        (bf2-from-integer! w 0 a) (bf2-inv! w 12 w 0) (bf2-mul! w 24 w 0 w 12)
+        (is-equalp '(1 . 0) (bf2-to-integer w 24))))))
+
+(deftest ct-masks-and-choices ()
+  ;; Out of line: inlined on constants, SBCL would fold the borrow intrinsic itself.
+  (declare (notinline bit-mask equal-mask nonzero-bit))
+  (is= #xffffffffffffffff (bit-mask 1))
+  (is= 0 (bit-mask 0))
+  (is= #xffffffffffffffff (equal-mask 7 7))
+  (is= 0 (equal-mask 7 6))
+  (is= 1 (nonzero-bit #x8000000000000000))
+  (is= 0 (nonzero-bit 0))
+  (let ((w (make-words 8)))
+    (kf-from-integer! w 0 11) (kf-from-integer! w 4 22)
+    (kf-cmov! w 0 w 4 0) (is= 11 (kf-to-integer w 0))
+    (kf-cmov! w 0 w 4 1) (is= 22 (kf-to-integer w 0))))
+
+(deftest ct-signed-odd-recoding ()
+  (let ((next (generator 2862933555777941757)) (digits (make-digits))
+        (order (make-words 4)))
+    (dotimes (i 4) (setf (aref order i) (ldb (byte 64 (* 64 i)) +k-n+)))
+    (dolist (k (list* 0 1 2 15 16 (1- +k-n+) +k-n+ (1- (ash 1 256)) (+ (ash 1 254) 1)
+                      (loop repeat 50 collect (funcall next (ash 1 256)))))
+      (recode-odd! digits (integer->octets k 32) order)
+      (is (every (lambda (d) (and (oddp d) (<= -15 d 15))) digits))
+      (is= (if (oddp k) k (+ k +k-n+))
+           (loop for d across digits for i from 0 sum (* d (expt 16 i)))))))
+
+(defun reference-add (p q a m)
+  (flet ((inv (x) (let ((w (make-words 8))) (qf-from-integer! w 0 (mod x m)) (kf-from-integer! w 0 (mod x m))
+                    (if (= m +k-p+) (progn (kf-inv! w 4 w 0) (kf-to-integer w 4))
+                        (progn (qf-from-integer! w 0 (mod x m)) (qf-inv! w 4 w 0) (qf-to-integer w 4))))))
+    (cond ((null p) q) ((null q) p)
+          ((and (= (car p) (car q)) (/= (cdr p) (cdr q))) nil)
+          (t (let* ((l (if (equal p q)
+                           (mod (* (+ (* 3 (car p) (car p)) a) (inv (* 2 (cdr p)))) m)
+                           (mod (* (- (cdr q) (cdr p)) (inv (- (car q) (car p)))) m)))
+                    (x (mod (- (* l l) (car p) (car q)) m)))
+               (cons x (mod (- (* l (- (car p) x)) (cdr p)) m)))))))
+
+(defun reference-mul (k p a m)
+  (let ((r nil))
+    (loop for i downfrom (integer-length k) to 0 do
+      (setf r (reference-add r r a m))
+      (when (logbitp i k) (setf r (reference-add r p a m))))
+    r))
+
+(defmacro check-curve (prefix field gx gy order a m)
+  (flet ((s (x) (intern (format nil "~A-~A" prefix x) '#:clempo.ct.tests))
+         (fs (x) (intern (format nil "~A-~A" field x) '#:clempo.ct.tests)))
+    `(let ((comb (,(s "BUILD-COMB") ,gx ,gy)) (next (generator 3935559000370003845)))
+       (flet ((ct-mul (k use-comb)
+                (let ((w (make-words 64)) (scalar (integer->octets k 32)))
+                  (if use-comb
+                      (,(s "MUL-COMB!") w 0 comb scalar)
+                      (progn (,(s "FROM-AFFINE-INTEGERS!") w 20 ,gx ,gy) (,(s "MUL!") w 0 w 20 scalar)))
+                  (when (zerop (,(s "AFFINE!") w 40 w 0))
+                    (cons (,(fs "TO-INTEGER") w 40) (,(fs "TO-INTEGER") w 44))))))
+         (dolist (k (list* 0 1 2 3 15 16 17 (1- ,order) ,order (- ,order 2) (1- (ash 1 256))
+                           (+ (ash 1 254) 1) (loop repeat 8 collect (funcall next (ash 1 256)))))
+           (let ((expected (reference-mul (mod k ,order) (cons ,gx ,gy) ,a ,m)))
+             (is-equalp expected (ct-mul k t))
+             (is-equalp expected (ct-mul k nil))))))))
+
+(deftest ct-curve-multiplication-matches-reference ()
+  (check-curve kg kf #x79be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798
+               #x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8 +k-n+ 0 +k-p+)
+  (check-curve qg qf #x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296
+               #x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5 +p256-n+ -3 +p256-p+)
+  (check-curve qgg qf #x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296
+               #x4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5 +p256-n+ -3 +p256-p+))
+
+(deftest ct-data-independent-timing-restores-mode ()
+  ;; Nested use keeps the mode until the outermost exit, and a non-local exit restores it.
+  (is= 3 (with-data-independent-timing (with-data-independent-timing (+ 1 2))))
+  (is= 7 (catch 'out (with-data-independent-timing (throw 'out 7))))
+  #+arm64
+  (when clempo.ct::**dit**
+    (is (not (logbitp 24 (clempo.ct::%read-dit))))
+    (with-data-independent-timing (is (logbitp 24 (clempo.ct::%read-dit))))
+    (is (not (logbitp 24 (clempo.ct::%read-dit))))))

@@ -1,0 +1,16 @@
+(defpackage #:clempo.ecdh.tests (:use #:cl #:clempo.base #:clempo.ecdh))
+(in-package #:clempo.ecdh.tests)
+
+(deftest p256-ecdh-rfc-5903 ()
+  ;; RFC 5903 section 8.1, 256-bit random ECP group.
+  (let* ((i (hex->octets "c88f01f510d9ac3f70a292daa2316de544e9aab8afe84049c62a9c57862d1433"))
+         (r (hex->octets "c6ef9c5d78ae012a011164acb397ce2088685d8f06bf9be0b283ab46476bee53"))
+         (gi (p256-ecdh-public-key i)) (gr (p256-ecdh-public-key r)))
+    (is-equalp (hex->octets "04dad0b65394221cf9b051e1feca5787d098dfe637fc90b9ef945d0c37725811805271a0461cdb8252d61f1c456fa3e59ab1f45b33accf5f58389e0577b8990bb3") gi)
+    (is-equalp (hex->octets "04d12dfb5289c8d4f81208b70270398c342296970a0bccb74c736fc7554494bf6356fbf3ca366cc23e8157854c13c58d6aac23f046ada30f8353e74f33039872ab") gr)
+    (is-equalp (hex->octets "d6840f6b42f6edafd13116e0e12565202fef8e9ece7dce03812464d04b9442de")
+               (p256-ecdh-shared i gr))
+    (is-equalp (p256-ecdh-shared i gr) (p256-ecdh-shared r gi))
+    (let ((bad (copy-seq gr)))
+      (setf (aref bad 64) (logxor 1 (aref bad 64)))
+      (is (null (p256-ecdh-shared i bad))))))

@@ -3,10 +3,11 @@
 
 (in-package #:clempo.dkg)
 
+;; Shares and polynomial coefficients are secret: constant-time Montgomery arithmetic.
 (declaim (inline fr+ fr- fr*))
-(defun fr+ (a b) (mod (+ a b) +group-order+))
-(defun fr- (a b) (mod (- a b) +group-order+))
-(defun fr* (a b) (mod (* a b) +group-order+))
+(defun fr+ (a b) (clempo.bls12-381:fr-add a b))
+(defun fr- (a b) (clempo.bls12-381:fr-sub a b))
+(defun fr* (a b) (clempo.bls12-381:fr-mul a b))
 
 (defun fr-expt (base exponent)
   (let ((result 1) (base (mod base +group-order+)))
@@ -56,7 +57,7 @@ scalar from at least 32 bytes of input keying material."
         for okm = (clempo.sha2:hkdf-sha256-expand
                    (clempo.sha2:hkdf-sha256-extract salt (octets-concat ikm (octets-of 0)))
                    (octets-of 0 48) 48)
-        for sk = (mod (octets->integer okm) +group-order+)
+        for sk = (clempo.bls12-381:fr-reduce-octets okm)
         unless (zerop sk) return sk))
 
 (defun random-scalar (&optional (rng #'clempo.io:random-octets))

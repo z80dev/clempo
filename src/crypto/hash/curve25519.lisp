@@ -8,23 +8,41 @@
 
 (defparameter *a24* (from-integer 121665))
 
+(defun swap-if (swap a b)
+  "A and B, exchanged when SWAP is 1, as fresh field elements. SWAP crosses the call as
+a bit: an all-ones mask word would be boxed, and that allocation is visible in timing."
+  (declare #.clempo.base:*hot* (type field a b) (type bit swap))
+  (let ((x (make-array 5 :element-type '(unsigned-byte 64)))
+        (y (make-array 5 :element-type '(unsigned-byte 64)))
+        (mask (clempo.ct:bit-mask swap)))
+    (declare (type (unsigned-byte 64) mask))
+    (dotimes (i 5 (values x y))
+      (let ((d (logand mask (logxor (aref a i) (aref b i)))))
+        (setf (aref x i) (logxor (aref a i) d) (aref y i) (logxor (aref b i) d))))))
+
 (defun x25519 (secret peer-public)
-  "RFC 7748 raw shared coordinate. Callers must reject an all-zero shared secret."
-  (check-type secret octets)
-  (check-type peer-public octets)
-  (assert (= (length secret) (length peer-public) 32))
-  (let ((scalar (clamped-scalar secret))
-        (u (from-integer (ldb (byte 255 0) (integer-le peer-public)))))
-    (let ((x2 +one+) (z2 +zero+) (x3 u) (z3 +one+) (previous 0))
-      (loop for i from 254 downto 0 for bit = (ldb (byte 1 i) scalar) do
-        (unless (= bit previous) (rotatef x2 x3) (rotatef z2 z3))
-        (setf previous bit)
-        (let* ((a (f+ x2 z2)) (aa (sq a)) (b (f- x2 z2)) (bb (sq b)) (e (f- aa bb))
-               (c (f+ x3 z3)) (d (f- x3 z3)) (da (f* d a)) (cb (f* c b)))
-          (setf x3 (sq (f+ da cb)) z3 (f* u (sq (f- da cb)))
-                x2 (f* aa bb) z2 (f* e (f+ aa (f* *a24* e))))))
-      ;; Scalar clamping fixes the final bit to zero, hence the final swap is a no-op.
-      (octets-le (to-integer (f* x2 (inverse z2)))))))
+  "RFC 7748 raw shared coordinate. Callers must reject an all-zero shared secret.
+The Montgomery ladder swaps with masks, so no branch or index depends on SECRET."
+  (clempo.ct:with-data-independent-timing
+    (check-type secret octets)
+    (check-type peer-public octets)
+    (assert (= (length secret) (length peer-public) 32))
+    (let ((scalar (clamped-octets secret))
+          (u (from-integer (ldb (byte 255 0) (integer-le peer-public)))))
+      (let ((x2 +one+) (z2 +zero+) (x3 u) (z3 +one+) (previous 0))
+        (declare (type bit previous))
+        (loop for i from 254 downto 0
+              for bit of-type bit = (ldb (byte 1 (logand i 7)) (aref scalar (ash i -3))) do
+          (let ((swap (logxor bit previous)))
+            (setf (values x2 x3) (swap-if swap x2 x3)
+                  (values z2 z3) (swap-if swap z2 z3)
+                  previous bit))
+          (let* ((a (f+ x2 z2)) (aa (sq a)) (b (f- x2 z2)) (bb (sq b)) (e (f- aa bb))
+                 (c (f+ x3 z3)) (d (f- x3 z3)) (da (f* d a)) (cb (f* c b)))
+            (setf x3 (sq (f+ da cb)) z3 (f* u (sq (f- da cb)))
+                  x2 (f* aa bb) z2 (f* e (f+ aa (f* *a24* e))))))
+        ;; Scalar clamping fixes the final bit to zero, hence the final swap is a no-op.
+        (octets-le (to-integer (f* x2 (inverse z2))))))))
 
 (defparameter *base-u* (octets-le 9))
 (defun x25519-public-key (secret) (x25519 secret *base-u*))
@@ -106,27 +124,65 @@
   (and (typep data 'octets) (= (length data) 32) (not (null (decode-point data)))))
 
 (defun base-multiples ()
-  ;; A comb: precompute j*16^i*B, so fixed-base multiplication has no doubling.
-  (let ((table (make-array '(64 16))) (base *base*)
-        (points (make-array 16)) (products (make-array 16)))
-    (dotimes (i 64 table)
-      (let ((base-cache (cache base)) (p *identity*) (product +one+))
-        (dotimes (j 16)
+  ;; A comb of odd multiples, (2j+1)*16^i*B for i < 65 and j < 8: fixed-base
+  ;; multiplication has no doublings, and with signed odd digits (CLEMPO.CT:RECODE-ODD!)
+  ;; no entry it reads is the identity.
+  (let ((table (make-array (list clempo.ct:+digits+ 8))) (base *base*)
+        (points (make-array 8)) (products (make-array 8)))
+    (dotimes (i clempo.ct:+digits+ table)
+      (let ((twice (cache (double-point base))) (p base) (product +one+))
+        (dotimes (j 8)
           (setf (aref points j) p (aref products j) product)
-          (setf product (f* product (point-z p)) p (add p base-cache nil)))
+          (setf product (f* product (point-z p)) p (add p twice nil)))
         ;; One inversion per row; the backwards sweep recovers each Z^-1.
         (let ((inv (inverse product)))
-          (loop for j from 15 downto 0 for q = (aref points j) do
+          (loop for j from 7 downto 0 for q = (aref points j) do
             (setf (aref table i j) (cache (to-affine q (f* inv (aref products j))))
                   inv (f* inv (point-z q))))))
       (dotimes (j 4) (setf base (double-point base))))))
 
 (defparameter *fixed-base* (base-multiples))
 
+(defparameter *order-words*
+  (let ((w (clempo.ct:make-words 4)))
+    (dotimes (i 4 w) (setf (aref w i) (ldb (byte 64 (* 64 i)) +order+)))))
+
+(defun select-base (row digit)
+  "DIGIT*16^ROW*B for an odd DIGIT in [-15, 15]: all eight entries of ROW read under
+masks, then a masked negation (swap y-x with y+x, negate 2dxy)."
+  (declare #.clempo.base:*hot* (type (integer 0 64) row) (type (integer -15 15) digit))
+  (let* ((sign (logand 1 (ash digit -63)))
+         (index (ash (+ (logxor digit (- sign)) sign) -1))
+         (negate (clempo.ct:bit-mask sign))
+         (ymx (make-array 5 :element-type '(unsigned-byte 64) :initial-element 0))
+         (ypx (make-array 5 :element-type '(unsigned-byte 64) :initial-element 0))
+         (z (make-array 5 :element-type '(unsigned-byte 64) :initial-element 0))
+         (dxy (make-array 5 :element-type '(unsigned-byte 64) :initial-element 0)))
+    (declare (type bit sign) (type (integer 0 7) index) (type (unsigned-byte 64) negate))
+    (dotimes (j 8)
+      (let ((mask (clempo.ct:equal-mask j index)) (entry (aref *fixed-base* row j)))
+        (declare (type cached entry) (type (unsigned-byte 64) mask))
+        (macrolet ((take (out accessor)
+                     `(let ((from (,accessor entry)))
+                        (dotimes (i 5)
+                          (setf (aref ,out i) (logior (aref ,out i) (logand mask (aref from i))))))))
+          (take ymx cached-ymx) (take ypx cached-ypx) (take z cached-z) (take dxy cached-dxy))))
+    (let ((minus (f- +zero+ dxy)))
+      (dotimes (i 5)
+        (let ((d (logand negate (logxor (aref ymx i) (aref ypx i)))))
+          (setf (aref ymx i) (logxor (aref ymx i) d) (aref ypx i) (logxor (aref ypx i) d)
+                (aref dxy i) (logior (logand negate (aref minus i)) (logandc1 negate (aref dxy i)))))))
+    (%cached ymx ypx z dxy)))
+
 (defun base-mul (scalar)
-  (let ((p *identity*))
-    (dotimes (i 64 p)
-      (setf p (add p (aref *fixed-base* i (ldb (byte 4 (* i 4)) scalar)) t)))))
+  "SCALAR*B for 32 little-endian SCALAR octets; constant-time in SCALAR."
+  (declare (type octets scalar))
+  (let ((digits (clempo.ct:make-digits)))
+    (clempo.ct:recode-odd! digits (reverse scalar) *order-words*)
+    (let ((p (add *identity* (select-base 0 (aref digits 0)) t)))
+      (loop for i from 1 below clempo.ct:+digits+
+            do (setf p (add p (select-base i (aref digits i)) t)))
+      p)))
 
 (defun multiply (scalar base)
   (let ((table (make-array 16)) (cached-base (cache base)) (p base))
@@ -142,8 +198,11 @@
   (assert (= (length seed) 32))
   (clempo.sha2:sha512 seed))
 
+(clempo.ct:define-ct-field ct-scalar #.+order+)
+
 (defun ed25519-public-key (seed)
-  (encode-point (base-mul (clamped-scalar (seed-hash seed)))))
+  (clempo.ct:with-data-independent-timing
+    (encode-point (base-mul (clamped-octets (seed-hash seed))))))
 
 (defun challenge (nonce-public start public-key message)
   (let ((ctx (clempo.sha2:make-sha512)))
@@ -153,16 +212,33 @@
     (mod (integer-le (clempo.sha2:sha512-final ctx)) +order+)))
 
 (defun ed25519-sign (seed message)
-  (check-type message octets)
-  (let* ((digest (seed-hash seed)) (scalar (clamped-scalar digest))
-         (public-key (encode-point (base-mul scalar)))
-         (ctx (clempo.sha2:make-sha512)))
-    (clempo.sha2:sha512-update ctx digest :start 32)
-    (clempo.sha2:sha512-update ctx message)
-    (let* ((r (mod (integer-le (clempo.sha2:sha512-final ctx)) +order+))
-           (encoded-r (encode-point (base-mul r)))
-           (k (challenge encoded-r 0 public-key message)))
-      (octets-concat encoded-r (octets-le (mod (+ r (* k scalar)) +order+))))))
+  "RFC 8032 Ed25519. Constant-time in the seed and nonce: the base comb reads every
+entry under masks, and S = r + k a mod L is Montgomery arithmetic with masked
+reductions. Only R, the challenge k and S, all public, become integers."
+  (clempo.ct:with-data-independent-timing
+    (check-type message octets)
+    (let* ((digest (seed-hash seed)) (scalar (clamped-octets digest))
+           (public-key (encode-point (base-mul scalar)))
+           (ctx (clempo.sha2:make-sha512))
+           (w (clempo.ct:make-words 16)) (r (make-octets 32)) (s (make-octets 32)))
+      (clempo.sha2:sha512-update ctx digest :start 32)
+      (clempo.sha2:sha512-update ctx message)
+      (let ((nonce (clempo.sha2:sha512-final ctx)))
+        (clempo.ct:words-from-octets! w 0 4 nonce 0 :little-endian t)
+        (clempo.ct:words-from-octets! w 4 4 nonce 32 :little-endian t)
+        (ct-scalar-from-wide-words! w 8 w 0 w 4)
+        (ct-scalar-to-words! w 0 w 8)
+        (clempo.ct:words-to-octets! r 0 w 0 4 :little-endian t))
+      (let* ((encoded-r (encode-point (base-mul r)))
+             (k (challenge encoded-r 0 public-key message)))
+        (ct-scalar-from-integer! w 0 k)
+        (clempo.ct:words-from-octets! w 4 4 scalar 0 :little-endian t)
+        (ct-scalar-from-words! w 4 w 4)
+        (ct-scalar-mul! w 0 w 0 w 4)
+        (ct-scalar-add! w 0 w 0 w 8)
+        (ct-scalar-to-words! w 0 w 0)
+        (clempo.ct:words-to-octets! s 0 w 0 4 :little-endian t)
+        (octets-concat encoded-r s)))))
 
 (defun ed25519-verify (public-key message signature)
   "Verify pure Ed25519 using Commonware's ZIP-215 (cofactored) rules."
@@ -176,7 +252,7 @@
           (let ((a (decode-point public-key)) (r (decode-point signature)))
             (when (and a r)
               (let* ((k (challenge signature 0 public-key message))
-                     (p (add (base-mul s) (cache (multiply k (negate a))) nil)))
+                     (p (add (base-mul (octets-le s)) (cache (multiply k (negate a))) nil)))
                 (setf p (add p (cache (negate r)) nil))
                 (dotimes (i 3) (setf p (double-point p)))
                 (and (zerop (to-integer (point-x p)))

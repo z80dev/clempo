@@ -41,6 +41,10 @@
 (defun bls-mul (variant public point scalar)
   (funcall (bls-group-function variant public #'g1-mul #'g2-mul) point scalar))
 
+(defun bls-mul-secret (variant public point scalar)
+  "BLS-MUL for a secret SCALAR: constant-time in SCALAR."
+  (funcall (bls-group-function variant public #'g1-mul-secret #'g2-mul-secret) point scalar))
+
 (defun bls-generator (variant public)
   (funcall (bls-group-function variant public #'g1-generator #'g2-generator)))
 
@@ -62,11 +66,11 @@
            :dst (if dst (bls-octets dst) (bls-dst variant proof))))
 
 (defun bls-public-key (variant secret)
-  (bls-encode variant t (bls-mul variant t (bls-generator variant t) (bls-secret secret))))
+  (bls-encode variant t (bls-mul-secret variant t (bls-generator variant t) (bls-secret secret))))
 
 (defun bls-sign (variant secret message &key namespace dst)
   "NIL namespace signs raw bytes; an empty octet namespace includes its zero prefix."
-  (bls-encode variant nil (bls-mul variant nil (bls-hash variant message namespace nil dst)
+  (bls-encode variant nil (bls-mul-secret variant nil (bls-hash variant message namespace nil dst)
                                                 (bls-secret secret))))
 
 (defun bls-pair (variant public hash)
@@ -91,7 +95,8 @@
 
 (defun bls-pop-prove (variant secret namespace)
   (let ((public (bls-public-key variant secret)))
-    (bls-encode variant nil (bls-mul variant nil (bls-hash variant public namespace t nil) secret))))
+    (bls-encode variant nil (bls-mul-secret variant nil (bls-hash variant public namespace t nil)
+                                                 (bls-secret secret)))))
 
 (defun bls-pop-verify (variant public namespace proof)
   (handler-case
@@ -223,8 +228,8 @@ SOURCE must return independent uniform unsigned 128-bit scalars, including zero.
   (bls-participant-scalar index total :mode mode)
   (bls-decode variant t group-public)
   (cons index (bls-encode variant nil
-                          (bls-mul variant nil (bls-hash variant group-public namespace t nil)
-                                   (bls-secret secret)))))
+                          (bls-mul-secret variant nil (bls-hash variant group-public namespace t nil)
+                                          (bls-secret secret)))))
 
 (defun bls-threshold-pop-verify (variant coefficients total namespace partial &key (mode :nonzero-counter))
   (handler-case

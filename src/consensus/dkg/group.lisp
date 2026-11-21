@@ -25,8 +25,8 @@ the prime-order subgroup other than the identity (G2::read)."
   (clempo.bls12-381:g2-compress point))
 
 (defun g2-base-mul (scalar)
-  "g * SCALAR."
-  (clempo.bls12-381:g2-mul (clempo.bls12-381:g2-generator) scalar))
+  "g * SCALAR, constant-time in the (secret) SCALAR."
+  (clempo.bls12-381:g2-mul-secret (clempo.bls12-381:g2-generator) scalar))
 
 (defun g2-lincomb (points scalars)
   "sum_i scalars_i * points_i."

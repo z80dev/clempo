@@ -10,4 +10,4 @@
   :depends-on ("clempo-crypto-pki")
   :pathname "../../../tests/crypto/pki/"
   :serial t
-  :components ((:file "gcm-tests") (:file "rsa-tests")))
+  :components ((:file "gcm-tests") (:file "rsa-tests") (:file "ecdh-tests")))

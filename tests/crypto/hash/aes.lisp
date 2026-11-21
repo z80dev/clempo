@@ -18,3 +18,34 @@
     (aes-ctr-xor ctx out :start 7 :out out :out-start 7)
     (is-equalp (hex->octets "874d6191b620e3261bef6864990db6ce9806f66b7970fdff8617187bb9fffdff") out)
     (is-equalp data (aes-ctr-xor (make-aes-ctr aes iv) out))))
+
+(defmacro with-portable-aes (&body body)
+  "Run BODY on the bitsliced core even where FEAT_AES is present."
+  #+arm64 `(let ((saved clempo.aes-arm64:**native**))
+             (unwind-protect (progn (setf clempo.aes-arm64:**native** nil) ,@body)
+               (setf clempo.aes-arm64:**native** saved)))
+  #-arm64 `(progn ,@body))
+
+(deftest aes-bitsliced-fips-197 ()
+  (with-portable-aes
+    (let ((block (hex->octets "00112233445566778899aabbccddeeff")))
+      (is-equalp (hex->octets "69c4e0d86a7b0430d8cdb78070b4c55a")
+                 (aes-encrypt-block (make-aes (hex->octets "000102030405060708090a0b0c0d0e0f")) block))
+      (is-equalp (hex->octets "8ea2b7ca516745bfeafc49904b496089")
+                 (aes-encrypt-block (make-aes (hex->octets "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")) block)))))
+
+(deftest aes-bitsliced-matches-native-ctr ()
+  ;; Four-lane batches, partial batches and both key sizes agree with the default path.
+  (let ((state 88172645463325252))
+    (flet ((random-octets (n)
+             (let ((out (make-octets n)))
+               (dotimes (i n out)
+                 (setf state (ldb (byte 64 0) (logxor state (ash state 13)))
+                       state (logxor state (ash state -7))
+                       state (ldb (byte 64 0) (logxor state (ash state 17)))
+                       (aref out i) (ldb (byte 8 0) state))))))
+      (dolist (key-length '(16 32))
+        (let* ((aes (make-aes (random-octets key-length))) (iv (random-octets 16))
+               (data (random-octets 200))
+               (expected (aes-ctr-xor (make-aes-ctr aes iv) data)))
+          (is-equalp expected (with-portable-aes (aes-ctr-xor (make-aes-ctr aes iv) data))))))))
