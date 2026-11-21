@@ -36,6 +36,8 @@ with RETRY-BLOCK, HEAL-FROM-REFERENCE, SKIP-BLOCK and ABORT-REPLAY restarts.")
    #:tx-outcome #:tx-outcome-status #:tx-outcome-gas-used #:tx-outcome-block-gas
    #:tx-outcome-logs #:tx-outcome-fee-token #:tx-outcome-fee-payer #:tx-outcome-key-expiry
    #:tx-outcome-validator-fee #:tx-outcome-fallback-fee-token-p #:tempo-evm-spec
+   ;; overlay blocks (RPC requests and trace replays)
+   #:begin-call-block #:call-block-world #:execute-request #:next-call-block
    ;; replay
    #:replay-blocks #:retry-block #:heal-from-reference #:skip-block #:abort-replay
    #:replay-result #:make-replay-result #:replay-result-from #:replay-result-to

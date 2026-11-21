@@ -78,14 +78,13 @@ from T4."
                  (eql (tx:transaction-chain-id tx) (block-env-chain-id env)))
       (fail-tx 'invalid-transaction index "system transaction fields must be zero"))))
 
-(defun execute-system-transaction (db env tx index)
+(defun execute-system-transaction (env tx index)
   "config.rs execute_legacy, System: a system call from the zero address to the zero address
 with SYSTEM_CALL_GAS_LIMIT; its receipt reports success and no gas. The zero address carries
 no code on Tempo chains, so the call runs no instruction and changes no state."
   (validate-system-transaction env tx index)
-  (let ((target (store:db-account db 0)))
-    (when (and target (not (octets= (store:account-code-hash target) clempo.trie:+empty-code-hash+)))
-      (fail-tx 'unsupported-transaction index "system call into code at the zero address")))
+  (when (plusp (state:code-size evm:*world* 0))
+    (fail-tx 'unsupported-transaction index "system call into code at the zero address"))
   (make-tx-outcome t 0 0 '()))
 
 ;;; Pre- and post-execution system changes
@@ -115,6 +114,14 @@ their fork is active (once; an account that already has code is left alone).")
       (fail-tx 'invalid-transaction nil "withdrawals are not permitted"))
     (dolist (m *fork-markers*)
       (when (forks:fork>= spec (car m)) (deploy-marker db (cdr m))))))
+
+(defun deploy-markers-in-world (world env)
+  "APPLY-PRE-EXECUTION-CHANGES's markers written into WORLD (an overlay block: no database)."
+  (let ((spec (block-env-spec env)))
+    (dolist (m *fork-markers*)
+      (when (and (forks:fork>= spec (car m)) (zerop (state:code-size world (cdr m))))
+        (state:set-code world (cdr m) (octets-of #xef))))
+    (state:finalize-tx world)))
 
 ;;; The block
 

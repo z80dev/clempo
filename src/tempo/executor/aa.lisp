@@ -132,9 +132,7 @@
         ((and (= (txv-nonce-key v) +expiring-nonce-key+) (forks:fork>= fork :t1))
          (when (and (forks:fork< fork :t12) (/= (txv-nonce v) 0)) (invalid "expiring nonce must be zero"))
          (unless (txv-valid-before v) (invalid "expiring nonce without valid_before"))
-         (let ((replay (octets->integer (if (forks:fork>= fork :t1b)
-                                            (tx:transaction-unique-identifier (txv-tx v) caller)
-                                            (tx:transaction-hash (txv-tx v))))))
+         (let ((replay (if (forks:fork>= fork :t1b) (txv-unique-id v) (txv-hash v))))
            (handler-case
                (with-protocol-storage ()
                  (clempo.nonce:check-and-mark-expiring-nonce replay (txv-valid-before v)))
@@ -352,12 +350,13 @@ runs unmetered. Returns the gas it used, or :OUT-OF-GAS (its writes rolled back)
       (invalid "access-key transactions cannot use CREATE as the first call"))
     (when (some (lambda (c) (/= 0 (second c))) (txv-calls v)) (invalid "value transfer not allowed in AA"))
     ;; Only a sponsored transaction has a separate fee payer to recover.
-    (let ((fee-payer (if (txv-sponsored-p v) (tx:transaction-fee-payer (txv-tx v)) caller)))
+    (let ((fee-payer (txv-fee-payer v)))
       (when (and (forks:fork>= fork :t2) (txv-sponsored-p v) (= fee-payer caller))
         (invalid "self-sponsored fee payer"))
       (when (> (txv-max-priority v) (txv-max-fee v)) (invalid "priority fee greater than max fee"))
       (when (and (not (ctx-skip-base-fee-check ctx)) (< price base-fee)) (invalid "fee cap below base fee"))
-      (unless (= (tx:transaction-chain-id (txv-tx v)) (block-env-chain-id env)) (invalid "wrong chain id"))
+      (let ((chain-id (txv-chain-id v)))  ; a request may leave it out
+        (when (and chain-id (/= chain-id (block-env-chain-id env))) (invalid "wrong chain id")))
       (when (> gas-limit (evm:gas-params-tx-gas-cap gp)) (invalid "gas limit above the transaction cap"))
       (when (> gas-limit (block-env-gas-limit env)) (invalid "gas limit above the block's"))
       (unless (and (forks:fork>= fork :t1) (= (txv-nonce-key v) +expiring-nonce-key+))
@@ -376,8 +375,9 @@ runs unmetered. Returns the gas it used, or :OUT-OF-GAS (its writes rolled back)
           (when (< gas-limit floor) (invalid "gas limit below the calldata floor"))
           (unless (forks:fork>= fork :t0) (incf intrinsic nonce-gas))
           (when (and (/= 0 (txv-nonce-key v)) (null (first (first (txv-calls v))))
-                     (let ((a (store:db-account (ctx-db ctx) caller))) ; account_info_untracked
-                       (or (null a) (zerop (store:account-nonce a)))))
+                     (multiple-value-bind (found nonce) ; account_info_untracked: the committed state
+                         (state:backend-account (state:world-backend world) caller)
+                       (or (not found) (zerop nonce))))
             (incf intrinsic (evm:gas-params-new-account gp))
             (when (< gas-limit intrinsic) (invalid "intrinsic gas too low")))
           ;; warm_aa_accounts, warm_beneficiary

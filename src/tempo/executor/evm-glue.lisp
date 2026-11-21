@@ -208,19 +208,24 @@ evm2's journaled semantics (crates/precompiles/src/storage/evm.rs sload_journal 
                 (setf (svref (evm:spec-extra-opcodes spec) #x4f) #'millis-timestamp-op))
               spec))))
 
-(defun evm-block-env (db env)
-  "The EVM's block environment for ENV; BLOCKHASH reads the last 256 committed hashes."
-  (evm:make-block-env :number (block-env-number env)
-                      :timestamp (block-env-timestamp env)
-                      :coinbase (block-env-beneficiary env)
-                      :gas-limit (block-env-gas-limit env)
-                      :base-fee (block-env-base-fee env)
-                      :prevrandao (octets->integer (block-env-prevrandao env))
-                      :difficulty 0
-                      :chain-id (block-env-chain-id env)
-                      :excess-blob-gas 0
-                      :blob-base-fee 1
-                      :block-hash-fn (lambda (n)
-                                       (let ((h (store:db-block-hash db n)))
-                                         (if h (octets->integer h) 0)))
-                      :ext env))
+(defun evm-block-env (backend env &optional block-hash-fn)
+  "The EVM's block environment for ENV. BLOCKHASH asks BLOCK-HASH-FN (block number -> 32-byte
+hash or NIL); by default a state database's last 256 committed hashes."
+  (let ((hash-fn (or block-hash-fn
+                     (if (typep backend 'store:statedb)
+                         (lambda (n) (store:db-block-hash backend n))
+                         (lambda (n) (error "BLOCKHASH ~D: no block-hash function for this backend" n))))))
+    (evm:make-block-env :number (block-env-number env)
+                        :timestamp (block-env-timestamp env)
+                        :coinbase (block-env-beneficiary env)
+                        :gas-limit (block-env-gas-limit env)
+                        :base-fee (block-env-base-fee env)
+                        :prevrandao (octets->integer (block-env-prevrandao env))
+                        :difficulty 0
+                        :chain-id (block-env-chain-id env)
+                        :excess-blob-gas 0
+                        :blob-base-fee 1
+                        :block-hash-fn (lambda (n)
+                                         (let ((h (funcall hash-fn n)))
+                                           (if h (octets->integer h) 0)))
+                        :ext env)))

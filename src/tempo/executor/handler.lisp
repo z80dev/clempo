@@ -65,13 +65,34 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
   (calls '())                           ; AA: ((to-or-nil value input) ...)
   (nonce-key 0) valid-before valid-after fee-token sponsored-p
   key-authorization signature
-  (%key-id :unknown))                   ; keychain access key, recovered once
+  (%key-id :unknown)                    ; keychain access key, recovered once
+  ;; Set for unsigned requests (eth_call), which have no envelope to derive them from.
+  %unique-id %hash %fee-payer (%chain-id :unknown))
 
 (defun txv-key-id (v)
   "The access key of a keychain-signed transaction (NIL otherwise), recovered once."
   (if (eq (txv-%key-id v) :unknown)
       (setf (txv-%key-id v) (tx:transaction-key-id (txv-tx v)))
       (txv-%key-id v)))
+
+(defun txv-unique-id (v)
+  "unique_tx_identifier: keccak(signing payload || sender), as an integer."
+  (or (txv-%unique-id v)
+      (setf (txv-%unique-id v) (octets->integer (tx:transaction-unique-identifier (txv-tx v) (txv-sender v))))))
+
+(defun txv-hash (v)
+  (or (txv-%hash v) (setf (txv-%hash v) (octets->integer (tx:transaction-hash (txv-tx v))))))
+
+(defun txv-fee-payer (v)
+  "The fee payer: the sender unless the transaction is sponsored."
+  (cond ((txv-%fee-payer v))
+        ((txv-sponsored-p v) (setf (txv-%fee-payer v) (tx:transaction-fee-payer (txv-tx v))))
+        (t (txv-sender v))))
+
+(defun txv-chain-id (v)
+  (if (eq (txv-%chain-id v) :unknown)
+      (setf (txv-%chain-id v) (tx:transaction-chain-id (txv-tx v)))
+      (txv-%chain-id v)))
 
 (defun parse-access-list (raw)
   (mapcar (lambda (entry)
@@ -226,7 +247,7 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
       ;; T5 nothing can observe it.
       (when (forks:spec>= :t5)
         (pcall "CLEMPO.CHANNEL-RESERVE" "SET-CHANNEL-OPEN-CONTEXT-HASH"
-               (octets->integer (tx:transaction-unique-identifier (txv-tx v) (txv-sender v))))))
+               (txv-unique-id v))))
     (multiple-value-bind (token fallback-p) (resolve-fee-token v fee-payer max-fee)
       (unless (tip20-address-p token) (invalid "fee token ~X is not TIP-20" token))
       (unless (zerop max-fee)
@@ -351,7 +372,7 @@ builder read (Rust TempoTxResult / ResolvedFeeToken / key_expiry)."
     (when (and (txv-max-fee v) (> (txv-max-priority v) (txv-max-fee v)))
       (invalid "priority fee greater than max fee"))
     (when (and (not (ctx-skip-base-fee-check ctx)) (< price base-fee)) (invalid "fee cap below base fee"))
-    (let ((chain-id (tx:transaction-chain-id (txv-tx v))))
+    (let ((chain-id (txv-chain-id v)))
       (when (and chain-id (/= chain-id (block-env-chain-id env))) (invalid "wrong chain id")))
     (when (> gas-limit (evm:gas-params-tx-gas-cap gp)) (invalid "gas limit above the transaction cap"))
     (when (> gas-limit (block-env-gas-limit env)) (invalid "gas limit above the block's"))
@@ -416,20 +437,25 @@ builder read (Rust TempoTxResult / ResolvedFeeToken / key_expiry)."
             (*host* (ctx-host ,c)))
        ,@body)))
 
+(defun make-context (backend env &key world block-hash-fn overlay)
+  "A block context over BACKEND; an OVERLAY context has no database: its writes stay in its world."
+  (make-block-context
+   :db (unless overlay backend) :env env
+   :block-env-evm (evm-block-env backend env block-hash-fn)
+   :world (or world (state:make-world backend))
+   :host (make-instance 'world-host
+                        :block-info (contract:make-block-info
+                                     :number (block-env-number env)
+                                     :timestamp (block-env-timestamp env)
+                                     :beneficiary (block-env-beneficiary env)
+                                     :chain-id (block-env-chain-id env)))
+   :non-shared-left (- (block-env-gas-limit env) (block-env-shared-gas-limit env))
+   :non-payment-left (block-env-general-gas-limit env)))
+
 (defun begin-block (db env &key block (db-block t))
-  "Open a block on DB for ENV (unless OPEN is NIL: the caller opened it) and apply the
+  "Open a block on DB for ENV (unless DB-BLOCK is NIL: the caller opened it) and apply the
 pre-execution system changes; returns the context APPLY-TRANSACTION and FINISH-BLOCK take."
-  (let ((ctx (make-block-context
-              :db db :env env :block-env-evm (evm-block-env db env)
-              :world (state:make-world db)
-              :host (make-instance 'world-host
-                                   :block-info (contract:make-block-info
-                                                :number (block-env-number env)
-                                                :timestamp (block-env-timestamp env)
-                                                :beneficiary (block-env-beneficiary env)
-                                                :chain-id (block-env-chain-id env)))
-              :non-shared-left (- (block-env-gas-limit env) (block-env-shared-gas-limit env))
-              :non-payment-left (block-env-general-gas-limit env))))
+  (let ((ctx (make-context db env)))
     (when db-block (store:db-begin-block db))
     (with-block-context (ctx)
       (when (and block (blocks:block-withdrawals block)) (invalid "withdrawals are not permitted"))
@@ -456,15 +482,10 @@ INVALID-TRANSACTION with the block as it was before TX."
          (system-p (system-transaction-p tx)))
     (with-block-context (ctx)
       (let ((outcome
-              (handler-bind ((execution-failure (lambda (c) (declare (ignore c)) (state:discard-tx evm:*world*))))
-                (if system-p
-                    (execute-system-transaction (ctx-db ctx) (ctx-env ctx) tx *tx-index*)
-                    (let ((v (make-txv tx sender *tx-index*)))
-                      (when (and (txv-aa-p v) (= (ldb (byte 8 248) (txv-nonce-key v)) #x5b))
-                        (invalid "subblock transactions are not supported"))
-                      (if (txv-aa-p v)
-                          (execute-aa-transaction ctx v)
-                          (execute-ethereum-transaction ctx v)))))))
+              (if system-p
+                  (handler-bind ((execution-failure (lambda (c) (declare (ignore c)) (state:discard-tx evm:*world*))))
+                    (execute-system-transaction (ctx-env ctx) tx *tx-index*))
+                  (execute-txv ctx (make-txv tx sender *tx-index*)))))
         (let ((section (next-section ctx system-p
                                      (and (not system-p) (payment-transaction-p tx forks:*spec*))
                                      (tx-outcome-block-gas outcome))))
@@ -485,9 +506,20 @@ INVALID-TRANSACTION with the block as it was before TX."
               (ctx-receipts ctx))
         outcome))))
 
+(defun execute-txv (ctx v)
+  "Run V's handler in CTX's block (inside WITH-BLOCK-CONTEXT); a failed transaction leaves the
+world as it was."
+  (handler-bind ((execution-failure (lambda (c) (declare (ignore c)) (state:discard-tx evm:*world*))))
+    (when (and (txv-aa-p v) (= (ldb (byte 8 248) (txv-nonce-key v)) #x5b))
+      (invalid "subblock transactions are not supported"))
+    (if (txv-aa-p v)
+        (execute-aa-transaction ctx v)
+        (execute-ethereum-transaction ctx v))))
+
 (defun finish-block (ctx)
   "Run the post-execution system calls, write the block's changes into the state database and
 return the BLOCK-RESULT (the db block stays open for the caller to commit or revert)."
+  (unless (ctx-db ctx) (error "FINISH-BLOCK on an overlay context: use NEXT-CALL-BLOCK"))
   (with-block-context (ctx)
     (apply-committee-call ctx)
     (write-changes (ctx-db ctx) (state:drain-changes (ctx-world ctx))))
@@ -538,3 +570,91 @@ EXECUTE) or signals INVALID-TRANSACTION."
           (ctx-validate-only ctx) (not execute))
     (unwind-protect (apply-transaction ctx tx sender)
       (store:db-revert-block db))))
+
+;;; Overlay blocks: requests (eth_call, eth_estimateGas, eth_simulateV1, eth_callMany) and trace
+;;; replays on a state backend. Pre-execution changes and every write stay in the context's
+;;; world; nothing is written to the backend.
+
+(defun open-call-block (ctx)
+  (with-block-context (ctx)
+    (let ((env (ctx-env ctx)))
+      (apply-history-and-beacon-calls ctx :parent-beacon-block-root (block-env-parent-beacon-block-root env))
+      (deploy-markers-in-world (ctx-world ctx) env)
+      (apply-zone-factory ctx)))
+  ctx)
+
+(defun begin-call-block (backend env &key block-hash-fn)
+  "An overlay block context on BACKEND (any clempo.state backend: a state database or a
+historical view) for ENV, after the block's pre-execution changes. BLOCK-HASH-FN (number ->
+hash octets or NIL) answers BLOCKHASH; a state database answers it itself. APPLY-TRANSACTION
+replays signed transactions on it; EXECUTE-REQUEST runs unsigned requests."
+  (open-call-block (make-context backend env :block-hash-fn block-hash-fn :overlay t)))
+
+(defun call-block-world (ctx)
+  "The clempo.state world holding CTX's writes (for state overrides before the first request,
+and for reading results)."
+  (ctx-world ctx))
+
+(defun next-call-block (ctx env &key block-hash-fn)
+  "Close CTX's block (its post-execution system calls) and open the next overlay block for ENV
+on the same world: eth_simulateV1's block sequence."
+  (with-block-context (ctx) (apply-committee-call ctx))
+  (open-call-block (make-context (state:world-backend (ctx-world ctx)) env
+                                 :world (ctx-world ctx) :block-hash-fn block-hash-fn :overlay t)))
+
+(defun request-txv (request index)
+  "The transaction view of an unsigned REQUEST, a plist of TempoTransactionRequest fields:
+:from :to :gas :gas-price :max-fee :max-priority :value :nonce :chain-id :type :input
+:access-list ((address slot ...) ...) :authorizations (raw EIP-7702 items) and, for Tempo
+transactions (type #x76, the default when :calls is given), :calls ((to-or-nil value input) ...)
+:nonce-key :fee-token :valid-before :valid-after :tempo-authorizations :key-authorization
+:key-id :fee-payer and :signature (the mock signature, whose kind sets the signature gas).
+:unique-id and :hash stand in for the envelope-derived identifiers (default 0)."
+  (destructuring-bind (&key from to gas gas-price max-fee max-priority value nonce chain-id type
+                         input access-list authorizations calls nonce-key fee-token valid-before
+                         valid-after tempo-authorizations key-authorization key-id fee-payer
+                         signature unique-id hash &allow-other-keys)
+      request
+    (let* ((type (or type (cond (calls #x76) (gas-price 0) (t 2))))
+           (from (or from 0))
+           (v (%make-txv :type type :sender from :index index :nonce (or nonce 0)
+                         :gas-limit (or gas (error "request without :gas"))
+                         :access-list access-list
+                         :%unique-id (or unique-id 0) :%hash (or hash 0) :%chain-id chain-id
+                         :%key-id key-id :%fee-payer (or fee-payer from))))
+      (if (member type '(0 1))
+          (setf (txv-gas-price v) (or gas-price 0))
+          (setf (txv-max-fee v) (or max-fee 0) (txv-max-priority v) (or max-priority 0)))
+      (if (= type #x76)
+          (setf (txv-calls v) (or calls (list (list to (or value 0) (or input (make-octets 0)))))
+                (txv-nonce-key v) (or nonce-key 0)
+                (txv-valid-before v) valid-before
+                (txv-valid-after v) valid-after
+                (txv-fee-token v) fee-token
+                (txv-sponsored-p v) (and fee-payer (/= fee-payer from))
+                (txv-authorizations v) tempo-authorizations
+                (txv-key-authorization v) key-authorization
+                (txv-signature v) (or signature (error "Tempo request without its mock :signature")))
+          (setf (txv-to v) to
+                (txv-value v) (or value 0)
+                (txv-input v) (or input (make-octets 0))
+                (txv-authorizations v) authorizations))
+      v)))
+
+(defun execute-request (ctx request &key skip-nonce-check skip-base-fee-check)
+  "Execute the unsigned REQUEST (see REQUEST-TXV) in the overlay block CTX after the requests
+before it; returns its TX-OUTCOME or signals INVALID-TRANSACTION with the world unchanged.
+Requests take no gas lane and leave no receipt."
+  (let ((*tx-index* (ctx-index ctx))
+        (*ctx* ctx))
+    (setf (ctx-skip-nonce-check ctx) skip-nonce-check
+          (ctx-skip-base-fee-check ctx) skip-base-fee-check)
+    (unwind-protect
+         (with-block-context (ctx)
+           (let ((outcome (execute-txv ctx (request-txv request *tx-index*))))
+             (setf (tx-outcome-storage-changes outcome) (collect-storage-changes evm:*world*))
+             (state:finalize-tx evm:*world*)
+             (incf (ctx-index ctx))
+             outcome))
+      (setf (ctx-skip-nonce-check ctx) nil
+            (ctx-skip-base-fee-check ctx) nil))))
