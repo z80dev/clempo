@@ -194,7 +194,7 @@ evm2's journaled semantics (crates/precompiles/src/storage/evm.rs sload_journal 
                                        (block-env-timestamp-millis-part env))))
            (values (1+ sp) nil))))
 
-(defvar *evm-specs* (make-hash-table) "fork -> clempo.evm spec")
+(defvar *evm-specs* (make-hash-table :synchronized t) "fork -> clempo.evm spec")
 
 (defun storage-credit-sstore-hook (frame key original present new cold)
   "instructions.rs sstore from T7: TIP-1060 storage credits after the slot write, metered on the

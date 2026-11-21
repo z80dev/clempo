@@ -458,7 +458,9 @@ into a precompile that runs out of gas ends :PRECOMPILE-OUT-OF-GAS (evm2 Precomp
             (evm:*spec* (tempo-evm-spec forks:*spec*))
             (evm:*world* (ctx-world ,c))
             (evm:*block* (ctx-block-env-evm ,c))
-            (*host* (ctx-host ,c)))
+            (*host* (ctx-host ,c))
+            ;; per thread: RESOLVE-FEE-CONTEXT and COLLECT-FEE set it for the running transaction
+            (*non-creditable* nil))
        ,@body)))
 
 (defun make-context (backend env &key world block-hash-fn overlay)
