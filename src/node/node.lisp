@@ -333,19 +333,17 @@ a gap would make later versions shadow unrecorded ones. Returns the history or N
                      (unless thunk (return))
                      (funcall (the function thunk)))))
            :name "evm compiler"))
-    (setf clempo.evm:*jit-compile-hook*
+    (clempo.evm:install-jit-compiler
      (lambda (thunk)
        (sb-thread:with-mutex ((jit-worker-lock w))
          (unless (jit-worker-stopped w)
            (setf (jit-worker-queue w) (nconc (jit-worker-queue w) (list thunk)))
            (sb-thread:condition-notify (jit-worker-ready w))
            t))))
-    (clempo.evm:enable-jit)
     w))
 
 (defun stop-jit-worker (w)
-  (clempo.evm:disable-jit)
-  (setf clempo.evm:*jit-compile-hook* nil)
+  (clempo.evm:remove-jit-compiler)
   (sb-thread:with-mutex ((jit-worker-lock w))
     (setf (jit-worker-stopped w) t (jit-worker-queue w) '())
     (sb-thread:condition-broadcast (jit-worker-ready w)))
