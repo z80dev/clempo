@@ -28,4 +28,5 @@
                (:file "channel-tests")
                (:file "tip403-tests")
                (:file "zone-tests")
-               (:file "zone-verifier-tests")))
+               (:file "zone-verifier-tests")
+               (:file "dex-tests")))
