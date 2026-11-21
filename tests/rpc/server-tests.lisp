@@ -105,8 +105,8 @@
                                               (append (loop for i below 200 collect (format nil "X-~D: 1" i)) '(""))))))
     (is= 400 (status-of (exchange port (crlf "POST / HTTP/1.1" "no colon here" ""))))
     (is= 400 (status-of (exchange port (crlf "GARBAGE" ""))))
-    ;; an endless run of blank lines ends too
-    (is (null (status-of (exchange port (make-string 100000 :initial-element #\Newline)))))
+    ;; an endless run of blank lines is refused after +HEADER-LINES-MAX+ of them
+    (is= 400 (status-of (exchange port (make-string 100000 :initial-element #\Newline))))
     (is (answers-p port) "the server survives every hostile request")))
 
 (deftest response-limit ()
