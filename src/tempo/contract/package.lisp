@@ -54,6 +54,7 @@ storage/evm.rs over an abstract HOST), HASHMAP-STORAGE, RECORDING-STORAGE.")
    #:hashmap-storage #:make-hashmap-storage #:hashmap-storage-slots #:hashmap-storage-logs
    #:recording-storage #:make-recording-storage #:recording-storage-trace
    #:non-creditable-slots #:storage-credits-address #:+storage-credits-address+
+   #:sstore-storage-credits
    #:with-storage
    ;; storable types and places
    #:address #:bool #:b256 #:bytes #:mapping #:vec #:set #:array
