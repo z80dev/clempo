@@ -16,9 +16,10 @@ clempo is an independent implementation of the Tempo reference node, alongside o
 | R4 Follow | live tip: executed, certified, RPC probed independently | yes: 88,831 blocks executed and certified; peak sampled lag 1 block for the Linux hour run | yes |
 | R5 RPC | recorded reference answers, separated by comparison mode | see the [RPC evidence](FRONTIER.md#evidence) for verdicts and coverage | see [goempo's frontier](https://github.com/gakonst/goempo/blob/main/FRONTIER.md) |
 | R6 Validator | Simplex and DKG; independent signers with Rust validators | seeded sims (4/5/7 validators, faults, reshares); devnet where clempo signers are required for quorum | seeded simulations and mixed-validator devnet |
-| R7 Speed | same-Mac whole-command wall seconds: Early / Busy / Recent, two runs each | 2.66–2.83 / 21.08–21.31 / 12.17–15.29 | 2.97–2.98 / 24.33–24.74 / 10.63–10.90 |
+| R7 Speed | same-Mac whole-command wall seconds, matched APFS-cloned parents: Early / Busy (`239b52f`) / Recent (`c190f13`, cold-cache proxy) | 2.66–2.83 / 21.08–21.31 / 7.42–7.75 | 2.97–2.98 / 24.33–24.74 / 10.77–11.46 |
+| R7 RPC | requests/s vs Rust at 1/16/64 clients, pinned Linux run, identical answers | every load-table method ≥ 1.08× (eth_call 1.23–1.40×, eth_getLogs 3.9–5.3×) | eth_call 1.28×, eth_getLogs 2.01× (published) |
 
-The six R3p differences are T14 keychain grants where clempo follows a newer reference commit than the corpus. In the [matched R7 comparison](docs/BENCH.md#matched-prepared-parent-comparison), clempo used less CPU in all six pairs against goempo, but goempo completed both Recent commands sooner. Both replay engines checked every root; Rust checked import-chunk terminal roots and took 58.16–64.91 s (Early), 32.57–33.09 s (Busy), and 41.81–44.12 s (Recent).
+The six R3p differences are T14 keychain grants where clempo follows a newer reference commit than the corpus. clempo used less CPU than goempo in every R7 pair. With a warm page cache, Recent wall times are within noise of goempo (6.52–6.55 vs 6.30–6.54 s); see [the cache-conditioned pairs](docs/BENCH.md). Both replay engines checked every root; Rust checked import-chunk terminal roots and took 58.16–64.91 s (Early), 32.57–33.09 s (Busy), and 41.81–44.12 s (Recent).
 
 ## Why Lisp
 
