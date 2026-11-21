@@ -12,9 +12,7 @@
   (if (zerop (length code)) +empty-code-hash+ (keccak256 code)))
 
 (defgeneric backend-account (backend address)
-  (:documentation "(values found-p nonce balance code-hash commitment) for ADDRESS. COMMITMENT
-is the T14 configuration commitment (TIP-1108), 0 when absent; a backend that returns only
-four values has none."))
+  (:documentation "(values found-p nonce balance code-hash) for ADDRESS."))
 
 (defgeneric backend-storage (backend address slot)
   (:documentation "The committed value of SLOT of ADDRESS, 0 when absent."))
@@ -28,12 +26,10 @@ four values has none."))
 ;;; In-memory backend: accounts keyed by address, code keyed by its hash as an integer.
 
 (defstruct (mem-account (:constructor make-mem-account (&key (nonce 0) (balance 0)
-                                                            (code-hash +empty-code-hash+)
-                                                            (commitment 0))))
+                                                            (code-hash +empty-code-hash+))))
   (nonce 0 :type (unsigned-byte 64))
   (balance 0 :type u256)
   (code-hash +empty-code-hash+ :type octets)
-  (commitment 0 :type u256)
   (storage (make-hash-table) :type hash-table))
 
 (defclass memory-backend ()
@@ -45,9 +41,8 @@ four values has none."))
 (defmethod backend-account ((b memory-backend) address)
   (let ((a (gethash address (memory-backend-accounts b))))
     (if a
-        (values t (mem-account-nonce a) (mem-account-balance a) (mem-account-code-hash a)
-                (mem-account-commitment a))
-        (values nil 0 0 +empty-code-hash+ 0))))
+        (values t (mem-account-nonce a) (mem-account-balance a) (mem-account-code-hash a))
+        (values nil 0 0 +empty-code-hash+))))
 
 (defmethod backend-storage ((b memory-backend) address slot)
   (let ((a (gethash address (memory-backend-accounts b))))
@@ -63,16 +58,14 @@ four values has none."))
   (let ((a (gethash address (memory-backend-accounts b))))
     (or (null a) (zerop (hash-table-count (mem-account-storage a))))))
 
-(defun memory-backend-put-account (b address &key (nonce 0) (balance 0) (code +empty-code+)
-                                                  (commitment 0))
+(defun memory-backend-put-account (b address &key (nonce 0) (balance 0) (code +empty-code+))
   "Create or replace ADDRESS (keeping its storage) in the in-memory backend."
   (let* ((hash (code-hash code))
          (a (or (gethash address (memory-backend-accounts b))
                 (setf (gethash address (memory-backend-accounts b)) (make-mem-account)))))
     (setf (mem-account-nonce a) nonce
           (mem-account-balance a) balance
-          (mem-account-code-hash a) hash
-          (mem-account-commitment a) commitment)
+          (mem-account-code-hash a) hash)
     (when (plusp (length code))
       (setf (gethash (octets->integer hash) (memory-backend-codes b)) code))
     a))

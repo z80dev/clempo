@@ -117,7 +117,7 @@ head) is not written: chunks are always complete."
          (lock (sb-thread:make-mutex :name "fetch queue"))
          (done 0)
          (errors '())
-         (start (get-internal-real-time)))
+         (start (clempo.io:monotonic-ticks)))
     (flet ((worker ()
              (loop
                (let ((c (sb-thread:with-mutex (lock) (pop queue))))
@@ -128,7 +128,7 @@ head) is not written: chunks are always complete."
                        (sb-thread:with-mutex (lock)
                          (incf done)
                          (when (and log (zerop (mod done 10)))
-                           (let ((secs (/ (- (get-internal-real-time) start)
+                           (let ((secs (/ (- (clempo.io:monotonic-ticks) start)
                                           internal-time-units-per-second)))
                              (format *error-output* "~&archive: ~D/~D chunks, ~,0F blocks/s~%"
                                      done (length firsts)

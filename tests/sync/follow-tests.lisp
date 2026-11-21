@@ -119,3 +119,79 @@
             (is-equalp hash-two (head-hash head)))
           (is-equalp '((1 2) (1 2) (1 2)) requests)
           (is-equalp '(2 1) (collecting-executor-heights executor)))))))
+
+;;; Live following survives upstream failures, never retries an execution failure, and
+;;; returns when asked to stop.
+
+(defun head-json (number hash)
+  (clempo.json:jobject "number" (quantity->hex number) "hash" (octets->hex hash :prefix t)
+                       "stateRoot" (octets->hex trie:+empty-trie-root+ :prefix t)))
+
+(defun call-with-two-block-chain (fail-polls function)
+  "Call FUNCTION with (url source hash-two retries-cell): an upstream whose first FAIL-POLLS
+tip requests fail with a JSON-RPC error, then report block 2."
+  (let ((anchor (make-octets 32)) (polls 0))
+    (multiple-value-bind (one hash-one) (test-block 1 anchor)
+      (multiple-value-bind (two hash-two) (test-block 2 hash-one)
+        (clempo.sync.fake-upstream:call-with-fake-upstream
+         (lambda (method params)
+           (declare (ignore method))
+           (if (equal (first params) "latest")
+               (if (<= (incf polls) fail-polls)
+                   (error 'clempo.sync.fake-upstream:rpc-failure :code -32000 :message "upstream down")
+                   (head-json 2 hash-two))
+               (head-json 2 hash-two)))
+         (lambda (url)
+           (funcall function url (lambda (from count) (subseq (vector one two) (1- from) (+ from count -1)))
+                    anchor hash-two)))))))
+
+(deftest follow-live-retries-upstream-failures ()
+  (call-with-two-block-chain
+   3 (lambda (url source anchor hash-two)
+       (let* ((executor (make-collecting-executor))
+              (retries '())
+              (follower (make-follower (make-head :number 0 :hash anchor) :rpc-url url
+                                       :executor executor :block-source source)))
+         (let ((head (follow-live follower :poll-seconds 0.001 :seconds 0
+                                           :on-retry (lambda (n c) (push (cons n (princ-to-string c)) retries)))))
+           (is-equalp hash-two (head-hash head))
+           (is-equalp '(3 2 1) (mapcar #'car retries))
+           (is (search "upstream down" (cdr (first retries))))
+           (is-equalp '(2 1) (collecting-executor-heights executor)))))))
+
+(deftest follow-live-bounded-gives-up ()
+  (call-with-two-block-chain
+   1000 (lambda (url source anchor hash-two)
+          (declare (ignore hash-two))
+          (let ((follower (make-follower (make-head :number 0 :hash anchor) :rpc-url url
+                                         :block-source source)))
+            (signals clempo.jsonrpc:rpc-error
+              (follow-live follower :poll-seconds 0.001 :once t))))))
+
+(defstruct failing-executor (calls 0))
+
+(defmethod apply-follow-block ((executor failing-executor) block &key certificate)
+  (declare (ignore block certificate))
+  (incf (failing-executor-calls executor))
+  (error "state root mismatch"))
+
+(deftest follow-live-never-retries-execution ()
+  (call-with-two-block-chain
+   0 (lambda (url source anchor hash-two)
+       (declare (ignore hash-two))
+       (let* ((executor (make-failing-executor))
+              (follower (make-follower (make-head :number 0 :hash anchor) :rpc-url url
+                                       :executor executor :block-source source)))
+         (signals execution-failed (follow-live follower :poll-seconds 0.001))
+         (is= 1 (failing-executor-calls executor))))))
+
+(deftest follow-live-stops-on-request ()
+  (call-with-two-block-chain
+   1000 (lambda (url source anchor hash-two)
+          (declare (ignore hash-two))
+          (let* ((asked 0)
+                 (follower (make-follower (make-head :number 0 :hash anchor) :rpc-url url
+                                          :block-source source)))
+            ;; Live (no ONCE/SECONDS) and failing forever: only STOP ends it.
+            (is= 0 (head-number (follow-live follower :poll-seconds 0.001
+                                                      :stop (lambda () (> (incf asked) 5)))))))))

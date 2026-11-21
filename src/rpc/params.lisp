@@ -36,7 +36,8 @@
        (unless (= (length bytes) n)
          (serde-fail-here src "invalid length ~D, expected exactly ~D bytes" (length bytes) n))
        (coerce (nreverse bytes) 'octets)))
-    (:object (refuse-map src expected))
+    ;; deserialize_any: a map's brace is consumed before the visitor refuses it
+    (:object (incf (src-pos src)) (serde-fail-here src "invalid type: map, expected ~A" expected))
     (t (invalid-type src expected))))
 
 (defparam hash (src) "32 bytes as hex; returns octets"

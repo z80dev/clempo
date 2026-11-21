@@ -7,6 +7,7 @@
            #:follower #:make-follower #:follower-head #:follower-blocks #:follower-transactions
            #:follower-certified #:follower-chunks #:follower-rpc-url
            #:follow-error #:follow-error-height #:follow-error-reason
+           #:execution-failed #:execution-failed-cause
            #:apply-follow-block #:certify-follow-batch #:follow-to #:follow-live))
 
 (in-package #:clempo.follow)
@@ -26,6 +27,14 @@
 
 (defun reject-block (height reason details)
   (error 'follow-error :height height :reason reason :details details))
+
+(define-condition execution-failed (error)
+  ((cause :initarg :cause :reader execution-failed-cause))
+  (:report (lambda (condition out)
+             (format out "~A" (execution-failed-cause condition))))
+  (:documentation "The executor failed on a verified block: local state may be wrong, so
+FOLLOW-LIVE never retries it. Every other failure (upstream, transport, certificates,
+malformed blocks) is rejected data and is retried."))
 
 (defun rpc-head (number &key (url (rpc:local-rpc-url)))
   "Fetch the current HEAD when NUMBER is :LATEST, otherwise the canonical header at NUMBER."
@@ -183,11 +192,13 @@ upstream reorg or mismatching block fails closed; this function never rolls back
                  (dotimes (i accepted)
                    (let ((block (svref blocks i)) (head (svref heads i)))
                      (when executor
-                       (apply-follow-block executor block :certificate (and certificates (svref certificates i))))
+                       (handler-bind ((error (lambda (c) (error 'execution-failed :cause c))))
+                         (apply-follow-block executor block
+                                             :certificate (and certificates (svref certificates i)))))
                      (setf (follower-head follower) head last (head-number head))
                      (incf (follower-blocks follower))
                      (incf (follower-transactions follower) (length (blocks:block-transactions block)))
-                     (when certifier (incf (follower-certified follower)))
+                     (when (and certificates (svref certificates i)) (incf (follower-certified follower)))
                      (archive-follow-block follower last (svref raw i))))
                  (unless (= accepted (length blocks))
                    (return-from follow-to (values (follower-head follower) nil))))))
@@ -195,24 +206,55 @@ upstream reorg or mismatching block fails closed; this function never rolls back
       (reject-block limit :canonical-hash "upstream and local head at the same height differ"))
     (values (follower-head follower) t)))
 
-(defun follow-live (follower &key tip (poll-seconds 0.25) once seconds on-poll)
-  "Catch up to the supplied TIP (or the current one), then poll until interrupted.
+(define-constant +retries-bounded+ 20)
+(define-constant +backoff-max-ms+ 10000)
+
+(defun pause (ms stop)
+  "Sleep MS milliseconds in short slices; return true early once STOP says so."
+  (let ((until (+ (clempo.io:now-ms) ms)))
+    (loop (when (and stop (funcall stop)) (return t))
+          (let ((left (- until (clempo.io:now-ms))))
+            (when (<= left 0) (return nil))
+            (sleep (/ (min left 100) 1000))))))
+
+(defun follow-live (follower &key tip (poll-seconds 0.25) once seconds on-poll stop on-retry)
+  "Catch up to the supplied TIP (or the current one), then poll until STOP returns true.
 ONCE exits after reaching the initial TIP. SECONDS counts from first reaching it.
-ON-POLL receives FOLLOWER and remote TIP at the end of each poll."
+ON-POLL receives FOLLOWER and remote TIP at the end of each poll.
+A failed step (upstream, transport, certificate or rejected block) is retried with
+exponential backoff up to 10 s, calling ON-RETRY with the attempt and condition; a live
+follower retries forever, a bounded one (ONCE or SECONDS) gives up after 20 in a row.
+EXECUTION-FAILED is never retried."
   (check-type poll-seconds (real (0) *))
   (check-type seconds (or null (real 0 *)))
   (let ((url (follower-rpc-url follower))
+        (poll-ms (max 1 (round (* 1000 poll-seconds))))
         (initial-tip tip)
-        (since nil))
-    (loop for target = (or initial-tip (rpc-head :latest :url url))
-          do (multiple-value-bind (head caught-up) (follow-to follower target)
-               (declare (ignore head))
-               (when caught-up
-                 (setf initial-tip nil)
-                 (unless since (setf since (get-internal-real-time)))))
-             (when on-poll (funcall on-poll follower target))
-             (when (and since
-                        (or once (and seconds (>= (- (get-internal-real-time) since)
-                                                  (* seconds internal-time-units-per-second)))))
-               (return (follower-head follower)))
-             (sleep poll-seconds))))
+        (since nil)
+        (retries 0))
+    (loop
+      (when (and stop (funcall stop)) (return (follower-head follower)))
+      (let ((failure
+              (handler-case
+                  (let ((target (or initial-tip (rpc-head :latest :url url))))
+                    (when (nth-value 1 (follow-to follower target))
+                      (setf initial-tip nil)
+                      (unless since (setf since (clempo.io:now-ms))))
+                    (when on-poll (funcall on-poll follower target))
+                    nil)
+                (execution-failed (c) (error c))
+                (error (c) c))))
+        (cond (failure
+               (incf retries)
+               (when (and (or once seconds) (> retries +retries-bounded+))
+                 (error failure))
+               (when on-retry (funcall on-retry retries failure))
+               (when (pause (min (* poll-ms (expt 2 (min retries 8))) +backoff-max-ms+) stop)
+                 (return (follower-head follower))))
+              (t
+               (setf retries 0)
+               (when (and since
+                          (or once (and seconds (>= (- (clempo.io:now-ms) since) (* seconds 1000)))))
+                 (return (follower-head follower)))
+               (when (pause poll-ms stop)
+                 (return (follower-head follower)))))))))

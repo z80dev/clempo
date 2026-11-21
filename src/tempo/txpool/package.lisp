@@ -6,7 +6,7 @@ Protocol and 2D nonce lanes share replacement and ordering rules. Expiring nonce
 independent, sender-scoped signing-payload identities. Call POOL-REVALIDATE after
 canonical state changes; selection alone cannot detect revocations or spent balances.")
   (:export #:pool #:make-pool #:pool-count #:submit-transaction
-           #:pool-best-transactions #:pool-remove-transaction #:pool-revalidate
+           #:pool-best-transactions #:pool-remove-transaction #:pool-snapshot #:pool-clear #:pool-revalidate
            #:pool-sweep-expired #:pool-transaction-sender #:pool-transaction-lane
            #:pool-transaction-fee-balance-slot #:pool-transaction-fee-cost
            #:pool-transaction-fallback-fee-token-p
@@ -101,10 +101,11 @@ Only a genesis database may derive the sole beneficiary's token from current sta
             (state-mapping-slot nonce-key (state-mapping-slot sender 0))))))
 
 (defmethod state-reader-check ((reader database-state-reader) tx sender)
+  ;; OVERLAY: admission runs on RPC threads that share DB with other readers.
   (clempo.executor:check-transaction (state-reader-db reader) (state-reader-env reader)
                                     tx sender :skip-nonce-check t
                                     :skip-valid-after-check t :skip-base-fee-check t
-                                    :skip-liquidity-check t))
+                                    :skip-liquidity-check t :overlay t))
 
 (defstruct (entry (:constructor make-entry))
   tx hash sender lane nonce state-nonce replay-hash authorities

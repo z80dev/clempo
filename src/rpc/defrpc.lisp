@@ -154,14 +154,12 @@ error inside a method is a clempo bug or missing data: it answers -32603 with it
 notification."
   (let ((src (make-src text :start start :end end))
         (fields '()) (duplicate nil))
-    ;; jsonrpsee reads the envelope without serde's recursion limit; each param gets it afresh
-    (let ((*recursion-limit* nil))
-      (do-object (key src)
-        (skip-ws src)
-        (if (assoc key fields :test #'string=)
-            (setf duplicate t)
-            (push (list key (src-pos src)) fields))
-        (skip-value src)))
+    (do-object (key src)
+      (skip-ws src)
+      (if (assoc key fields :test #'string=)
+          (setf duplicate t)
+          (push (list key (src-pos src)) fields))
+      (skip-value src))
     (when duplicate
       (return-from handle-request-object (error-response nil +invalid-request+ "Invalid request")))
     (flet ((field-src (key)
@@ -210,7 +208,7 @@ notification."
 
 (defun value-spans (text start end)
   "Start and end positions of each element of the array in TEXT[START,END)."
-  (let ((src (make-src text :start start :end end)) (spans '()) (*recursion-limit* nil))
+  (let ((src (make-src text :start start :end end)) (spans '()))
     (incf (src-pos src))
     (unless (eql (peek src) #\])
       (loop (skip-ws src)
@@ -226,9 +224,7 @@ notification."
          (first (and (< start (length text)) (char text start))))
     (unless (member first '(#\{ #\[))
       (return-from handle-body (values 400 (error-response nil +parse-error+ "Parse error"))))
-    ;; nesting is bounded per typed param (serde's recursion limit), not for the whole body:
-    ;; the reference answers a deeply nested param a method ignores
-    (let ((parsed (handler-case (json:parse-json text :max-depth nil) (json:json-error () :invalid))))
+    (let ((parsed (handler-case (json:parse-json text) (json:json-error () :invalid))))
       (cond ((eq parsed :invalid) (values 200 (error-response nil +parse-error+ "Parse error")))
             ((char= first #\{)
              (values 200 (or (handle-request-object text start (length text)) "null")))

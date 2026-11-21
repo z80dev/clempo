@@ -3,37 +3,140 @@
   (:local-nicknames (#:follow #:clempo.follow) (#:rpc #:clempo.jsonrpc) (#:json #:clempo.json)
                     (#:consensus #:clempo.consensus) (#:headers #:clempo.headers)
                     (#:blocks #:clempo.blocks))
-  (:export #:make-mainnet-certifier))
+  (:export #:make-certifier #:certifier-anchor #:certifier-uncertified #:certify-from
+           #:network-identity))
 
 (in-package #:clempo.follow.certs)
 
-(defstruct (mainnet-certifier (:constructor %make-mainnet-certifier (verifier url epoch-length)))
-  verifier url epoch-length)
+;;; Trust. A finalization certificate for a block of epoch E verifies under E's group
+;;; identity: the chain's published network identity from its from-epoch on (tempo's
+;;; mainnet-network-identity.json and testnet-network-identity.json), or an identity
+;;; read from the DKG outcome in the certified boundary block that closes E-1.
+;;;
+;;; The follower's first epoch needs its identity before any block is certified. It is
+;;; taken from the anchor boundary (the last block of the previous epoch), and that block
+;;; is believed only when (a) it is a block the caller has itself executed (TRUSTED-HASH
+;;; returns its hash), or (b) its own finalization certificate verifies under the network
+;;; identity. The upstream alone is never believed for an identity: a forged boundary
+;;; block or a forged certificate fails closed.
+;;;
+;;; Certificate endpoints only serve finalizations from some height on (CERTIFY-FROM).
+;;; Blocks below it are admitted on their parent links and execution alone, as goempo's
+;;; -certify-from does; boundaries crossed there register their outcomes, so the first
+;;; certified epoch verifies under the identity the hash-linked chain carries.
 
-(defun make-mainnet-certifier (anchor &key (upstream (rpc:local-rpc-url)) (url rpc:+mainnet-rpc+))
-  "Trust the upstream's canonical DKG boundary before the first followed block.
-URL is a certificate-enabled RPC endpoint; it need not be the raw-block upstream."
-  (let* ((chain (clempo.chainspec:load-chainspec :mainnet))
-         (length (clempo.chainspec:chain-epoch-length chain))
+(defun network-identity (chain)
+  "The published network identity and its from-epoch for CHAIN."
+  (ecase chain
+    (:mainnet (values consensus:+mainnet-network-identity+ consensus:+mainnet-network-from-epoch+))
+    (:moderato
+     (values (load-time-value
+              (hex->octets "967ae1a6d3ddbe5cb0fe5e6fc58e74249787b4a277619b549fed6609d04660540dd2449cd7174def35e40f544e5ad72d15d064191a205ed6e0c49619c68f975108b614d0d51def9a8416a10a07c4193bea0cbbc4252ec1b33f21095a5d7aa590"))
+             1747))))
+
+(defun certify-from (chain)
+  "The first height the public certificate endpoint serves (probed 2026-11-21)."
+  (ecase chain (:mainnet 41166893) (:moderato 36627280)))
+
+(defstruct (certifier (:constructor %make-certifier (verifier url epoch-length from network-epoch)))
+  verifier url epoch-length from network-epoch
+  (anchor nil)          ; how the first epoch's identity was established
+  (uncertified 0 :type integer))
+
+(defun fetch-finalization (url height)
+  (let ((result (handler-case (rpc:rpc-call "consensus_getFinalization"
+                                            (list (json:jobject "height" height)) :url url
+                                            :retries 1)
+                  (rpc:rpc-error () :null))))
+    (and (json:jobject-p result) result)))
+
+(defun register-outcome (certifier height extra-data)
+  "Install the identity in boundary HEIGHT's EXTRA-DATA; check it names the next epoch and,
+at the network identity's from-epoch, that identity."
+  (let* ((verifier (certifier-verifier certifier))
+         (next (1+ (floor height (certifier-epoch-length certifier))))
+         (outcome (handler-case (clempo.dkg:decode-onchain-dkg-outcome extra-data)
+                    (error (c) (error "DKG outcome at boundary ~D does not decode: ~A" height c)))))
+    (unless (= next (clempo.dkg:outcome-epoch outcome))
+      (error "DKG outcome at boundary ~D names epoch ~D, expected ~D" height
+             (clempo.dkg:outcome-epoch outcome) next))
+    (when (= next (certifier-network-epoch certifier))
+      (unless (octets= (clempo.dkg:outcome-network-identity outcome)
+                       (nth-value 0 (consensus:verifier-network-identity verifier)))
+        (error "DKG outcome at boundary ~D is not the published network identity" height)))
+    (consensus:verifier-register-boundary-outcome verifier extra-data)))
+
+(defun make-certifier (anchor &key (chain :mainnet) (upstream (rpc:local-rpc-url))
+                                   (url (ecase chain (:mainnet rpc:+mainnet-rpc+)
+                                          (:moderato rpc:+moderato-rpc+)))
+                                   (from (certify-from chain)) trusted-hash)
+  "A certifier for following from ANCHOR (a FOLLOW:HEAD). URL serves consensus_getFinalization;
+UPSTREAM serves raw blocks. TRUSTED-HASH, if given, maps a block number to the hash of a
+block the caller executed itself (or NIL)."
+  (let* ((spec (clempo.chainspec:load-chainspec chain))
+         (length (clempo.chainspec:chain-epoch-length spec))
          (epoch (floor (1+ (follow:head-number anchor)) length))
-         (boundary (max 0 (1- (* epoch length))))
-         (expected (if (= boundary (follow:head-number anchor)) anchor
-                       (follow:rpc-head boundary :url upstream)))
-         (block (blocks:decode-block
+         (boundary (1- (* epoch length))))
+    (multiple-value-bind (identity network-epoch) (network-identity chain)
+      (let ((certifier (%make-certifier
+                        (consensus:make-finalization-verifier
+                         :epoch-length length :network-identity identity
+                         :network-from-epoch network-epoch)
+                        url length from network-epoch)))
+        (if (zerop epoch)
+            (setf (certifier-anchor certifier) :genesis-epoch)
+            (anchor-boundary certifier boundary anchor upstream trusted-hash))
+        certifier))))
+
+(defun anchor-boundary (certifier boundary anchor upstream trusted-hash)
+  (let* ((block (blocks:decode-block
                  (svref (clempo.archive:fetch-blocks boundary 1 :url upstream :batch 1) 0)))
          (header (blocks:block-header block))
-         (verifier (consensus:make-finalization-verifier
-                    :epoch-length length :network-identity consensus:+mainnet-network-identity+
-                    :network-from-epoch consensus:+mainnet-network-from-epoch+)))
-    (unless (and (= boundary (headers:header-number header))
-                 (octets= (follow:head-hash expected) (blocks:block-hash block)))
-      (error "Upstream DKG anchor at block ~D does not match the canonical hash" boundary))
-    (let ((outcome (consensus:verifier-register-boundary-outcome verifier
-                                                               (headers:header-extra-data header))))
-      (unless (= epoch (clempo.dkg:outcome-epoch outcome))
-        (error "DKG anchor at ~D has epoch ~D, expected ~D" boundary
-               (clempo.dkg:outcome-epoch outcome) epoch)))
-    (%make-mainnet-certifier verifier url length)))
+         (hash (blocks:block-hash block))
+         (local (and trusted-hash (funcall trusted-hash boundary))))
+    (unless (= boundary (headers:header-number header))
+      (error "Upstream returned block ~D for the DKG anchor ~D" (headers:header-number header) boundary))
+    (when (blocks:block-body-mismatches block)
+      (error "Upstream DKG anchor block ~D has a body that does not match its header" boundary))
+    (cond
+      (local
+       (unless (octets= local hash)
+         (error "Upstream DKG anchor at block ~D differs from the executed block" boundary))
+       (register-outcome certifier boundary (headers:header-extra-data header))
+       (setf (certifier-anchor certifier) :executed))
+      ((< boundary (certifier-from certifier))
+       ;; No certificate exists this low; the anchor is as trusted as the hash-linked
+       ;; blocks below CERTIFY-FROM, and must be the upstream's canonical block.
+       (let ((expected (if (= boundary (follow:head-number anchor)) anchor
+                           (follow:rpc-head boundary :url upstream))))
+         (unless (octets= (follow:head-hash expected) hash)
+           (error "Upstream DKG anchor at block ~D does not match the canonical hash" boundary)))
+       (register-outcome certifier boundary (headers:header-extra-data header))
+       (setf (certifier-anchor certifier) :hash-linked))
+      ((= (1+ (floor boundary (certifier-epoch-length certifier))) (certifier-network-epoch certifier))
+       ;; The boundary before the network identity's from-epoch: its certificate needs the
+       ;; previous committee's key, but the outcome is accepted only if it names the
+       ;; published network identity itself (REGISTER-OUTCOME), so nothing is believed.
+       (register-outcome certifier boundary (headers:header-extra-data header))
+       (setf (certifier-anchor certifier) :network-identity))
+      ((< (floor boundary (certifier-epoch-length certifier)) (certifier-network-epoch certifier))
+       (error "Cannot authenticate the DKG anchor at block ~D: its epoch precedes the network ~
+identity (from epoch ~D) and it is neither executed here nor below --certify-from ~D"
+              boundary (certifier-network-epoch certifier) (certifier-from certifier)))
+      (t
+       (let ((result (fetch-finalization (certifier-url certifier) boundary)))
+         (unless result
+           (error "No finalization certificate for the DKG anchor block ~D" boundary))
+         (let ((certificate (json:jget result "certificate")))
+           (unless (stringp certificate)
+             (error "Malformed finalization for the DKG anchor block ~D" boundary))
+           ;; Verified under the epoch it closes: the network identity, never the
+           ;; upstream's. CERTIFY-BLOCKS then registers the boundary's outcome.
+           (consensus:certify-blocks
+            (certifier-verifier certifier)
+            (list (list boundary hash (headers:header-parent-hash header)
+                        (headers:header-extra-data header) certificate)))
+           (setf (certifier-anchor certifier) :certificate)))))))
 
 (defun not-finalized-p (result)
   (or (eq :null result)
@@ -46,18 +149,39 @@ URL is a certificate-enabled RPC endpoint; it need not be the raw-block upstream
   ;; has not finalized yet. A trailing miss at the tip can be polled, but
   ;; fail closed rather than sleeping forever on a historical gap.
   (let* ((result (rpc:rpc-call "consensus_getFinalization" '("latest")
-                               :url (mainnet-certifier-url certifier)))
+                               :url (certifier-url certifier)))
          (height (hex->integer (json:jget* result "block" "header" "number"))))
-    (when (> (- height missing) (mainnet-certifier-epoch-length certifier))
+    (when (> (- height missing) (certifier-epoch-length certifier))
       (error "Certificate endpoint is missing block ~D (latest finalized ~D)" missing height))))
 
-(defmethod follow:certify-follow-batch ((certifier mainnet-certifier) blocks previous-hash)
+(defun admit-uncertified (certifier blocks)
+  "Admit the leading blocks below CERTIFY-FROM; returns how many."
+  (loop for block across blocks
+        for header = (blocks:block-header block)
+        for height = (headers:header-number header)
+        while (< height (certifier-from certifier))
+        count t
+        do (incf (certifier-uncertified certifier))
+           (when (consensus:boundary-height-p (consensus:make-fixed-epocher
+                                               (certifier-epoch-length certifier))
+                                              height)
+             (register-outcome certifier height (headers:header-extra-data header)))))
+
+(defmethod follow:certify-follow-batch ((certifier certifier) blocks previous-hash)
+  (let ((skipped (admit-uncertified certifier blocks)))
+    (when (plusp skipped)
+      ;; The rest certifies on the next call, from a batch starting at CERTIFY-FROM.
+      (return-from follow:certify-follow-batch
+        (values skipped (make-array skipped :initial-element nil))))
+    (certify-batch certifier blocks previous-hash)))
+
+(defun certify-batch (certifier blocks previous-hash)
   (let ((responses
           (rpc:rpc-batch
            (loop for block across blocks
                  for height = (headers:header-number (blocks:block-header block))
                  collect (list "consensus_getFinalization" (list (json:jobject "height" height))))
-           :url (mainnet-certifier-url certifier))))
+           :url (certifier-url certifier))))
     (let ((certified
             (loop for response in responses for block across blocks
                   for header = (blocks:block-header block)
@@ -76,7 +200,7 @@ URL is a certificate-enabled RPC endpoint; it need not be the raw-block upstream
                             (list height hash (headers:header-parent-hash header)
                                   (headers:header-extra-data header) certificate)))))
       (if certified
-          (let ((result (consensus:certify-blocks (mainnet-certifier-verifier certifier) certified
+          (let ((result (consensus:certify-blocks (certifier-verifier certifier) certified
                                                   :previous-hash previous-hash)))
             (invariant (= (length certified) (consensus:certification-verified result))
                        "incomplete certificate verification result")

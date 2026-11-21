@@ -53,12 +53,6 @@ everything that needs no execution.")
            (clempo.serde:serde-fail-here src "invalid value: string ~A, expected a valid hex string"
                                          (clempo.serde:rust-debug-string s))
            (hex->octets h))))
-    (:array (let ((bytes '()))
-              (clempo.serde:do-array (i src)
-                (push (clempo.serde:read-integer src 0 255 "u8") bytes))
-              (coerce (nreverse bytes) 'octets)))
-    (:object (clempo.serde:refuse-map
-              src "a variable number of bytes represented as a hex string, an array of u8, or raw bytes"))
     (t (clempo.serde:invalid-type
         src "a variable number of bytes represented as a hex string, an array of u8, or raw bytes"))))
 

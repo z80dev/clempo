@@ -180,27 +180,15 @@ senders and receipts, which are filled in on first use.")
                            "pubKeyY" (hexbytes (subseq sig (+ k 96) (+ k 128)))
                            "webauthnData" (hexbytes (subseq sig 1 k))))))))
 
-(defun configurable-signature-p (sig)
-  "SIG's wire octets are a ConfigurableAccount signature (type 0x05)."
-  (and (/= (length sig) 65) (= (aref sig 0) 5)))
-
-(defun account-signature-json (sig)
-  "AccountSignature serde (untagged): a primitive's tagged object, or a configurable account's
-witness as the hex of its RLP (the wire form without the 0x05 type byte)."
-  (if (configurable-signature-p sig) (hexbytes (subseq sig 1)) (primitive-signature-json sig)))
-
 (defun tempo-signature-json (sig &optional key-id)
-  "TempoSignature serde: an account signature, or a keychain envelope with its version and key
-id (none for a configurable delegate, whose key id is not recovered)."
+  "TempoSignature serde: a primitive, or a keychain envelope with its version and key id."
   (if (and (/= (length sig) 65) (member (aref sig 0) '(3 4)))
-      (let ((inner (subseq sig 21)))
-        (json:jobject "userAddress" (addr (octets->integer sig :start 1 :end 21))
-                      "signature" (account-signature-json inner)
-                      "version" (if (= (aref sig 0) 3) "v1" "v2")
-                      "keyId" (cond (key-id (addr key-id))
-                                    ((configurable-signature-p inner) :null)
-                                    (t (addr (nth-value 1 (clempo.signatures:recover-signature sig (make-octets 32))))))))
-      (account-signature-json sig)))
+      (json:jobject "userAddress" (addr (octets->integer sig :start 1 :end 21))
+                    "signature" (primitive-signature-json (subseq sig 21))
+                    "version" (if (= (aref sig 0) 3) "v1" "v2")
+                    "keyId" (if key-id (addr key-id)
+                                (addr (nth-value 1 (clempo.signatures:recover-signature sig (make-octets 32))))))
+      (primitive-signature-json sig)))
 
 (defun key-type-name (n) (case n (0 "secp256k1") (1 "p256") (2 "webAuthn") (3 "configurableAccount")))
 
@@ -238,7 +226,7 @@ id (none for a configurable delegate, whose key id is not recovered)."
        "witness" (opt (field 6) #'hex32)
        "isAdmin" (json:jbool (field 7))
        "account" (opt (field 8) #'item-addr)
-       "signature" (account-signature-json sig)))))
+       "signature" (primitive-signature-json sig)))))
 
 (defun effective-gas-price (tx base-fee)
   (let ((type (tx:transaction-type tx)))

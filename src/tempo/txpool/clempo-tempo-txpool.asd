@@ -3,7 +3,7 @@
   :depends-on ("clempo-types" "clempo-io" "clempo-tempo-forks"
                "clempo-tempo-precompiles" "clempo-tempo-executor")
   :serial t
-  :components ((:file "package") (:file "liquidity") (:file "validation") (:file "pool")))
+  :components ((:file "package") (:file "liquidity") (:file "validation") (:file "pool") (:file "service")))
 
 (defsystem "clempo-tempo-txpool/fixtures"
   :description "Recorded pool prestate and deterministic signed fixture scenarios"

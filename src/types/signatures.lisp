@@ -24,8 +24,7 @@
            #:configurable-commitment #:configurable-commitment-error
            #:configurable-account-address #:configurable-derivation-gas
            #:configurable-verification-gas #:verify-configurable-approvals
-           #:configurable-config-error #:make-configurable-signature
-           #:encode-configurable-signature #:signature-error-reason))
+           #:configurable-config-error))
 
 (in-package #:clempo.signatures)
 

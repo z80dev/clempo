@@ -14,7 +14,7 @@
            (anchor (if (= number (clempo.follow:head-number tip)) tip
                        (clempo.follow:rpc-head number :url url)))
            (certifier (when (arg-flag args :certify)
-                        (clempo.follow.certs:make-mainnet-certifier
+                        (clempo.follow.certs:make-certifier
                          anchor :upstream url
                          :url (arg args :cert-rpc clempo.jsonrpc:+mainnet-rpc+))))
            (follower (clempo.follow:make-follower

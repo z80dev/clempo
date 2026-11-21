@@ -80,16 +80,3 @@ first one's write.")
                                        :db (clempo.executor:genesis-db))))
     (is (json:json-equal (capabilities-json (head-json b 2000) (window 2000 0) (off) (from 0) (window 2000 0))
                          (capabilities b)))))
-
-;;; eth_fillTransaction's simulated configurable-account witnesses
-
-(deftest fill-builds-simulated-witnesses-as-reference ()
-  (let ((backend (archive-backend 20))
-        (path (asdf:system-relative-pathname "clempo-rpc" "../../tests/rpc/data/fill-simulation.jsonl")))
-    (with-open-file (in path)
-      (loop for line = (read-line in nil) while line
-            do (let* ((c (json:parse-json line))
-                      (request (json:jget c "request"))
-                      (got (json:parse-json
-                            (chain:with-backend-read (backend) (nth-value 1 (clempo.rpc:handle-body request))))))
-                 (is (json:json-equal (json:jget c "response") got) "~A" (subseq request 0 (min 400 (length request)))))))))

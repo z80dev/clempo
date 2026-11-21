@@ -21,7 +21,6 @@
                 trie (integer->octets address 20)
                 (clempo.trie:encode-account (mem-account-nonce a) (mem-account-balance a)
                                             (storage-root (mem-account-storage a))
-                                            (mem-account-code-hash a)
-                                            (mem-account-commitment a))))
+                                            (mem-account-code-hash a))))
              (memory-backend-accounts b))
     (clempo.trie:trie-root trie)))

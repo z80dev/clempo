@@ -70,7 +70,7 @@ The bet was that a node in Lisp could be smaller and easier to keep in step with
 
 ## Quick start
 
-Requirements: [SBCL](https://www.sbcl.org) 2.6.8 and `git`. The gate has passed on Apple Silicon macOS and Linux x86-64. Linux evidence also covers mainnet and Moderato genesis, 61,903 execution-spec-tests v5.4.0 state cases and mainnet replay to block 1,000,000. See [FRONTIER.md](FRONTIER.md#evidence) for commands and timings. clempo speaks TLS 1.3 itself (`src/net`), validating certificates against the system roots (macOS keychain or the Linux CA bundle; `CLEMPO_CA_FILE` overrides).
+Requirements: [SBCL](https://www.sbcl.org) 2.6.8 and `git`. The gate has passed on Apple Silicon macOS and Linux x86-64. Linux evidence also covers mainnet and Moderato genesis, 61,903 execution-spec-tests v5.4.0 state cases and mainnet replay to block 1,000,000. See [FRONTIER.md](FRONTIER.md#evidence) for commands and timings.
 
 ```sh
 git clone https://github.com/z80dev/clempo.git && cd clempo
@@ -99,7 +99,7 @@ Running the node, its RPC server and the REPL: [docs/NODE.md](docs/NODE.md). Val
 `layers.sexp` lists the layers in import order, and the gate enforces it. Each layer is a directory under `src/` with its own ASDF system and its own tests under `tests/`.
 
 ```
-base io crypto net codec trie types store state evm tempo consensus p2p sync rpc sim validator node dev
+base io crypto codec trie types store state evm tempo consensus p2p sync rpc sim validator node dev
 ```
 
 | Layer | Contents |

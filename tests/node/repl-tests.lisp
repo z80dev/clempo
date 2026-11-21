@@ -54,3 +54,40 @@
          (is-equalp #(0 1 4) result)))
      :threads 4)
     (is (null (clempo.node.workers:call-with-workers #'identity :threads 1)))))
+
+(deftest idle-repl-client-does-not-lock-out-others ()
+  ;; Before, sessions ran on the accept thread: one silent socket held the REPL for 300 s.
+  (let* ((token (make-string 64 :initial-element #\c))
+         (repl (repl:start-repl 0 token))
+         (idle (make-instance 'socket:inet-socket :type :stream :protocol :tcp)))
+    (unwind-protect
+         (progn
+           (socket:socket-connect idle #(127 0 0 1) (repl:repl-port repl))
+           (let ((start (get-internal-real-time)))
+             (call-repl repl token
+                        (lambda (s)
+                          (write-line "(+ 1 2)" s)
+                          (finish-output s)
+                          (is (string= "COMMON-LISP-USER> 3" (read-line s)))))
+             (is (< (- (get-internal-real-time) start) internal-time-units-per-second))))
+      (socket:socket-close idle)
+      (repl:stop-repl repl))))
+
+(deftest stop-repl-ends-live-sessions ()
+  (let* ((token (make-string 64 :initial-element #\d))
+         (repl (repl:start-repl 0 token))
+         (client (make-instance 'socket:inet-socket :type :stream :protocol :tcp)))
+    (unwind-protect
+         (progn
+           (socket:socket-connect client #(127 0 0 1) (repl:repl-port repl))
+           (let ((s (socket:socket-make-stream client :input t :output t :timeout 5 :buffering :line)))
+             (read-line s)
+             (write-line token s)
+             (finish-output s)
+             (read-char s)              ; the prompt: the session is live
+             (let ((start (get-internal-real-time)))
+               (repl:stop-repl repl)
+               (is (< (- (get-internal-real-time) start) (* 3 internal-time-units-per-second))))
+             (is (eq :closed (handler-case (loop (unless (read-line s nil nil) (return :closed)))
+                               (error () :closed))))))
+      (socket:socket-close client))))
