@@ -95,17 +95,13 @@ error paths of methods whose success needs a transaction pool.")
         ((/= (aref key 0) #x63) (rpc-fail +invalid-params+ "Key prefix must be 0x63"))
         (t (internal-error "code store unavailable"))))
 
-;;; A node with no local accounts and no transaction pool
-
-(defun no-pool () (internal-error "transaction pool unavailable"))
+;;; A node with no local accounts
 
 (defun decode-or-fail (data)
   (when (zerop (length data)) (rpc-fail +invalid-params+ "empty transaction data"))
   (handler-case (clempo.transactions:decode-transaction data)
     (error () (rpc-fail +invalid-params+ "failed to decode signed transaction"))))
 
-(defrpc "eth_sendRawTransaction" ((data bytes)) "decoded and refused: no pool" (decode-or-fail data) (no-pool))
-(defrpc "eth_sendRawTransactionSync" ((data bytes)) "decoded and refused: no pool" (decode-or-fail data) (no-pool))
 (defrpc "trace_rawTransaction" ((data bytes) (types any)) "decode, then trace"
   (decode-or-fail data) (internal-error "tracing unavailable"))
 (defrpc "eth_sign" ((address address) (data bytes)) "no local accounts" (rpc-fail +invalid-params+ "unknown account"))
@@ -127,17 +123,6 @@ error paths of methods whose success needs a transaction pool.")
   (if (zerop (length (json:jget bundle "txs" #())))
       (rpc-fail +invalid-params+ "bundle missing txs")
       (internal-error "bundle simulation unavailable")))
-
-(defrpc "admin_clearTxpool" ()
-  "Number of local transactions removed; archive and follower backends have no transaction pool."
-  0)
-
-(defrpc "eth_pendingTransactions" () "the pool is empty" #())
-(defrpc "txpool_status" () "the pool is empty" (json:jobject "pending" "0x0" "queued" "0x0"))
-(defrpc "txpool_content" () "the pool is empty" (json:jobject "pending" (json:jobject) "queued" (json:jobject)))
-(defrpc "txpool_inspect" () "the pool is empty" (json:jobject "pending" (json:jobject) "queued" (json:jobject)))
-(defrpc "txpool_contentFrom" ((address address)) "the pool is empty"
-  (json:jobject "pending" (json:jobject) "queued" (json:jobject)))
 
 ;;; Tempo extensions the reference leaves unimplemented
 

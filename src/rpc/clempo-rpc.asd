@@ -3,6 +3,7 @@
   :description "JSON-RPC server (HTTP and WebSocket) serving the reference node's method set"
   :depends-on ("clempo-base" "clempo-io" "clempo-crypto" "clempo-codec" "clempo-trie" "clempo-types"
                "clempo-sync" "clempo-consensus" "clempo-tempo-chainspec" "clempo-store" "clempo-tempo-executor"
+               "clempo-tempo-txpool"
                (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "serde")
@@ -27,7 +28,8 @@
                (:file "simulate")
                (:file "bal")
                (:file "filter")
-               (:file "fill")))
+               (:file "fill")
+               (:file "pool")))
 
 (defsystem "clempo-rpc/tests"
   :depends-on ("clempo-rpc")
@@ -39,4 +41,5 @@
                (:file "serde-tests")
                (:file "bal-tests")
                (:file "misc-tests")
-               (:file "aa-request-tests")))
+               (:file "aa-request-tests")
+               (:file "pool-tests")))

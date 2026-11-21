@@ -12,8 +12,10 @@ ARCHIVE-BACKEND serves the raw block archive (clempo.archive) with the hash inde
 BUILD-INDEX and a receipts store filled from an upstream node's debug_getRawReceipts,
 each block's receipts checked against its header's receipts root before they are stored.")
   (:export #:backend #:backend-head #:backend-block-raw #:backend-block-number
+           #:no-transaction-pool #:backend-submit-raw-transaction #:backend-pool-transactions
+           #:backend-clear-pool
            #:backend-tx-location #:backend-receipts-raw #:backend-chain-id
-           #:with-backend-read #:with-backend-write #:*backend* #:*head*
+           #:with-backend-read #:with-backend-write #:call-outside-backend-read #:*backend* #:*head*
            #:archive-backend #:make-archive-backend #:archive-backend-head #:backend-state
            #:history-dir #:backend-history
            #:build-index #:index-dir #:index-covered-height
@@ -44,6 +46,27 @@ each block's receipts checked against its header's receipts root before they are
 has none (historical state). State methods answer an error for NIL.")
   (:method (backend number) (declare (ignore backend number)) nil))
 
+;;; The transaction pool. A backend without one (the archive and a follower) serves an
+;;; empty pool and refuses submissions with NO-TRANSACTION-POOL.
+
+(define-condition no-transaction-pool (error) ()
+  (:report "transaction pool unavailable"))
+
+(defgeneric backend-submit-raw-transaction (backend raw)
+  (:documentation "Decode and admit the EIP-2718 octets RAW into the backend's pool and return
+the transaction's 32-octet hash. Signals CLEMPO.TXPOOL:POOL-ERROR when the pool rejects it.")
+  (:method (backend raw) (declare (ignore backend raw)) (error 'no-transaction-pool)))
+
+(defgeneric backend-pool-transactions (backend)
+  (:documentation "A snapshot of the pool: a list of (transaction sender pending-p), where
+SENDER is the recovered sender as an integer and PENDING-P is false for a queued
+\(nonce-gapped) transaction.")
+  (:method (backend) (declare (ignore backend)) nil))
+
+(defgeneric backend-clear-pool (backend)
+  (:documentation "Remove every transaction from the pool; return how many were removed.")
+  (:method (backend) (declare (ignore backend)) 0))
+
 ;;; Readers and writers: many concurrent requests, one writer at a time between them.
 
 (defun call-with-backend-read (backend thunk)
@@ -58,6 +81,18 @@ has none (historical state). State methods answer an error for NIL.")
 
 (defmacro with-backend-read ((backend) &body body)
   `(call-with-backend-read ,backend (lambda () ,@body)))
+
+(defun call-outside-backend-read (thunk)
+  "Run THUNK with the current request's read hold on *BACKEND* released, so a writer may commit
+blocks meanwhile (a request that waits for a block). The hold is taken again before returning
+and *HEAD* is snapshotted anew."
+  (let* ((backend *backend*) (lock (backend-lock backend)))
+    (sb-thread:with-mutex (lock)
+      (when (zerop (decf (backend-readers backend)))
+        (sb-thread:condition-broadcast (backend-queue backend))))
+    (unwind-protect (funcall thunk)
+      (sb-thread:with-mutex (lock) (incf (backend-readers backend)))
+      (setf *head* (backend-head backend)))))
 
 (defun call-with-backend-write (backend thunk)
   "Wait until no request is running, then run THUNK with new requests held back."
