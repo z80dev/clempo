@@ -43,7 +43,7 @@ samples.
 
 Three alternating pairs in an exclusive slot (host load average ~10, the
 reference node running), goempo `92e996c` first in each pair with
-BenchParityAgent's command (`goempo-dev replay -dir go-chunks -to 1000000
+the same replay command documented below (`goempo-dev replay -dir go-chunks -to 1000000
 -datadir FRESH -checkpoint 100000 -heal 0 -diagnose off`), then
 `CLEMPO_BUILD=release bin/clempo-dev bench -range early -datadir FRESH`
 (warm fasls, disk-backed store, `(:every-ms 1000)` log sync). Both checked
@@ -71,6 +71,17 @@ against 37.3 / 36.9 s with `3327105` reverted (paired), so the Early work
 costs Busy nothing; Busy's rise from ~23 s was `f5f79c5`'s store path, fixed by
 `6354034`: on `2cef7a8` one unpaired sample gives Busy 23.91 s (64.4 s CPU, 3.6 GB)
 and Early 3.00 s (load average ~13).
+
+### Disk-backed store, isolated change
+
+Two alternating pairs on the same Mac compared `824be08` with the same
+revision plus the store changes through `6354034`. Both builds checked
+every block root. Busy replay wall times were **23.04 / 22.27 s** with
+in-memory working state versus **23.32 / 23.00 s** with the disk-backed
+store; peak RSS was **3.46–3.51 GB** versus **3.31–3.59 GB**. Early replay
+wall times were **7.73 / 8.32 s** versus **8.25 / 7.93 s**. These pairs
+isolate the storage changes; they are not the per-block optimization
+comparison above.
 
 Raw local results: `logs/r7-parity/{clempo,rust}-{early,busy,recent}.{json,log}`
 and `logs/r7-parity/go-{early,busy}.{json,log}`. For Clempo use the commands below
@@ -234,14 +245,15 @@ in the disk-backed KV store; they do not produce a `checkpoint-N.state` file
 at each flush. The store can import stopped format-1 datadirs, and explicit
 exports via `clempo.store:write-checkpoint` remain available.
 
-Datadir `replay` and `bench` use group commit (`(:group 1024)`); replay
-acknowledges no work externally and can resume after a crash from its last
-durable block. This differs from the node's default `:block` sync policy.
+Datadir `replay` and `bench` use `(:every-ms 1000)`: the WAL syncs on
+the one-second interval, at a flush, and on close. The replay can resume
+from its last durable block (`clempo.store:store-durable-number`). This
+differs from the node's default `:block` sync policy.
 The measured interval includes archive reads, decoding, execution, WAL
 writes and final sync, but excludes state preparation, copying/opening the
 datadir and writing the result. CPU and GC are interval deltas; peak RSS
 includes initialization. Compare like persistence modes with interleaved
-fresh runs. The same-host rows above predate the disk-backed store migration.
+fresh runs. The original three-client table predates the disk-backed store.
 
 `replay`, `bench` and `history-build` default to eight sender-recovery
 participants. A producer thread reads blocks up to four ahead of the replay
@@ -384,7 +396,7 @@ python3 scripts/bench/rust-import.py --tempo "$tempo" \
 Rust's MDBX default is durable sync, but the staged import commits at stage
 execution boundaries (`Pipeline::execute_stage_to_completion`), not after
 each executed block. Its default execution commit limits are 500,000 blocks
-or 5,000,000 changes. Clempo's current 1,024-block replay/bench sync group
+or 5,000,000 changes. Clempo's current time-based replay/bench WAL sync
 and Rust's stage commits are different durability workloads.
 
 For the separate read-only Busy cross-check reported in `FRONTIER.md`:

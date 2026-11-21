@@ -66,6 +66,12 @@ datadirs are imported on open. The node syncs each block to stable storage befor
 commit returns. Recovery discards a torn final record; corruption preceding later
 valid records is an error, not a reason to discard committed history.
 
+Flushes hand batches to a background segment writer; reads see each batch
+in memory until it is installed. A separate worker merges one group of
+segments at a time, with backpressure at the segment limit. For a
+read-only trie state from a live datadir, use
+`clempo.store:open-datadir-snapshot`.
+
 `eth_sendRawTransaction` validates a transaction against an overlay of the
 committed head, queues valid transactions and forwards them asynchronously
 to the upstream. A refusal drops it locally; new heads revalidate the pool.
