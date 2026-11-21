@@ -8,4 +8,4 @@ exec sbcl --dynamic-space-size "${CLEMPO_HEAP:-16384}" --noinform --non-interact
   --no-userinit --no-sysinit --load "$root/scripts/build.lisp" \
   --eval '(asdf:load-system "clempo-dev")' \
   --eval '(clempo.chainspec:load-chainspec :mainnet)' \
-  --eval '(sb-ext:save-lisp-and-die (clempo.io:getenv "CLEMPO_DEV_OUTPUT") :executable t :save-runtime-options t :toplevel (lambda () (clempo.dev:main (rest sb-ext:*posix-argv*))))'
+  --eval '(sb-ext:save-lisp-and-die (clempo.io:getenv "CLEMPO_DEV_OUTPUT") :compression nil :executable t :save-runtime-options t :toplevel (lambda () (clempo.dev:main (rest sb-ext:*posix-argv*))))'

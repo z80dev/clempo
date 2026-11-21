@@ -51,9 +51,10 @@
       (values result secs cpu-secs gc-secs consed rss))))
 
 (defcommand "bench" (args)
-  "R7: bench -range busy|early|recent [-parent SAVED_DIR -datadir FRESH_DIR] [-sender-threads N] [-result FILE] [-profile FILE [-profile-mode cpu|alloc] [-profile-threads all|main]] [-cache-accounts N] [-cache-slots N] [-cache-trie-nodes N] [-cache-code-mb N] [-cache-dirty N]"
+  "R7: bench -range busy|early|recent [-datadir DIR [-parent SAVED_DIR | -prepared]] [-sender-threads N] [-result FILE] [-profile FILE [-profile-mode cpu|alloc] [-profile-threads all|main]] [-cache-accounts N] [-cache-slots N] [-cache-trie-nodes N] [-cache-code-mb N] [-cache-dirty N]"
   (let* ((range (arg args :range)) (spec (assoc range *bench-ranges* :test #'equal))
          (parent (arg args :parent)) (datadir (arg args :datadir)) (profile (arg args :profile))
+         (prepared (arg args :prepared))
          (profile-mode (if (equal (arg args :profile-mode "cpu") "alloc") :alloc :cpu))
          (profile-threads (if (equal (arg args :profile-threads "all") "main") :main :all))
          (sender-threads (arg-int args :sender-threads +default-sender-threads+)))
@@ -65,12 +66,17 @@
              (parent-block (clempo.blocks:decode-block (clempo.archive:raw-block parent-height)))
              (root (clempo.headers:header-state-root (clempo.blocks:block-header parent-block)))
              (store nil))
-        (when (and (plusp parent-height) (not (and parent datadir)))
-          (error "~A requires -parent and -datadir at block ~D" name parent-height))
+        (when (and (plusp parent-height) (not (and datadir (or parent prepared))))
+          (error "~A requires a copied or prepared -datadir at block ~D" name parent-height))
+        (when (and prepared (or parent (not datadir)))
+          (error "-prepared requires -datadir and cannot be combined with -parent"))
         (when (and parent (not datadir)) (error "-parent requires a fresh -datadir"))
         (when datadir
           (setf datadir (uiop:ensure-directory-pathname (expand-home datadir)))
-          (when (probe-file datadir) (error "Benchmark datadir must not exist: ~A" datadir))
+          (if prepared
+              (unless (probe-file (merge-pathnames "MANIFEST" datadir))
+                (error "Not a prepared clempo.store datadir: ~A" datadir))
+              (when (probe-file datadir) (error "Benchmark datadir must not exist: ~A" datadir)))
           (when parent
             (setf parent (uiop:ensure-directory-pathname (expand-home parent)))
             (unless (probe-file (merge-pathnames "MANIFEST" parent))

@@ -16,6 +16,95 @@ Busy is goempo's published Busy workload. Recent starts 1,084 blocks later than 
 
 ## Results on the shared dev host
 
+### Matched prepared-parent comparison
+
+Clempo `91ab4d2` plus the `-prepared` benchmark entry point and explicitly
+uncompressed saved executable; goempo `92e996c`; Rust `568b4fb4258c`.
+Same Mac and alternating order as below. Both replay clients' exact working
+parents (including genesis for Early) were APFS-cloned with `cp -cR` before
+timing each sample. Rust starts with an empty datadir on Early and a prepared
+parent on Busy and Recent. No samples were dropped.
+
+| Range / sample | Clempo replay wall / CPU s | goempo replay wall s | Clempo process wall / CPU s | goempo process wall / CPU s | Rust import wall / CPU s |
+|---|---:|---:|---:|---:|---:|
+| Early 1 | 2.734 / 6.595 | 2.974 | 2.83 / 6.66 | 2.98 / 9.75 | 58.159 / 37.347 |
+| Early 2 | 2.581 / 6.473 | 2.942 | 2.66 / 6.53 | 2.97 / 9.76 | 64.907 / 37.427 |
+| Busy 1 | 20.931 / 56.397 | 24.274 | 21.08 / 56.53 | 24.33 / 67.87 | 32.575 / 45.183 |
+| Busy 2 | 21.162 / 56.729 | 24.698 | 21.31 / 56.86 | 24.74 / 68.76 | 33.095 / 44.568 |
+| Recent 1 | 11.897 / 8.138 | 10.803 | 12.17 / 8.30 | 10.90 / 8.77 | 41.809 / 24.703 |
+| Recent 2 | 14.994 / 8.450 | 10.514 | 15.29 / 8.62 | 10.63 / 8.84 | 44.119 / 24.443 |
+
+Clempo used less process CPU in every pair against goempo, and had lower
+wall time on Early and Busy. Go won both Recent wall comparisons. Clempo
+spent only 0.27–0.30 s outside the Recent replay timer, so startup does
+not explain the wall-time difference.
+
+Clempo's `(:every-ms 1000)` policy syncs its WAL on the one-second
+interval, at a flush, and before returning; this run used synchronous
+Darwin `F_FULLFSYNC` on the replay path. Go used `-checkpoint "$last"`:
+the scored replay explicitly flushes at the terminal block and closes
+the store afterward; this is not a one-second WAL durability guarantee.
+Rust commits staged import transactions (up to 500,000 blocks per stage
+run), not each block or on a one-second interval.
+
+```sh
+scripts/build-dev.sh "$clempo_dev"
+# Early only: seed the two exact genesis parents outside the timer.
+"$clempo_dev" replay -datadir "$clempo_parent" -to 0 -result "$clempo_seed"
+"$goempo_dev" replay -dir "$go_chunks" -datadir "$go_parent" \
+  -to 0 -heal 0 -diagnose off -result "$go_seed"
+# All ranges: each work path must be a new, disposable clone.
+cp -cR "$clempo_parent" "$clempo_work"
+cp -cR "$go_parent" "$go_work"
+/usr/bin/time -l "$clempo_dev" bench -range "$range" -prepared \
+  -datadir "$clempo_work" -result "$clempo_result"
+/usr/bin/time -l "$goempo_dev" replay -dir "$go_chunks" -datadir "$go_work" \
+  -to "$last" -checkpoint "$last" -heal 0 -diagnose off -result "$go_result"
+```
+
+The executable build loads the dev system and Mainnet chainspec before
+saving the core. `help` took 0.02 s wall on the prior executable build;
+the 5.63 s historical Early sample below spent 5.54 s inside replay.
+Raw result and timing files:
+`logs/r7-parity/executable-prepared/{clempo,go,rust}-{early,busy,recent}-{1,2}.{json,log}`.
+An unscored Recent wall profile reproduced the slowdown (14.15 s wall,
+8.75 s CPU). See `logs/r7-parity/executable-prepared/recent-wall-sample.txt`;
+it did not identify a specific blocking cause.
+Synchronous `F_FULLFSYNC` is a plausible contributor to the Recent
+wall/CPU gap; `fcntl` appeared in the sample, but it did not identify
+the command or quantify the cost of syncing.
+
+### Earlier standalone comparison (`91ab4d2`)
+
+Same Mac, executable build, exact parents, persistence settings and
+alternating order as the earlier `3c43b9e` sweep below. This revision
+includes the KV lookup optimization `9a80d5b`. Each row is one unprofiled
+sample; no samples were dropped.
+
+| Range / sample | Clempo replay wall / CPU s | goempo replay wall s | Clempo process wall / CPU s | goempo process wall / CPU s | Rust import wall / CPU s |
+|---|---:|---:|---:|---:|---:|
+| Early 1 | 2.797 / 6.751 | 2.950 | 3.48 / 6.83 | 2.99 / 9.76 | 57.976 / 36.796 |
+| Early 2 | 5.544 / 6.478 | 2.945 | 5.63 / 6.52 | 2.99 / 9.63 | 77.058 / 37.112 |
+| Busy 1 | 22.273 / 58.230 | 27.226 | 22.91 / 58.80 | 27.31 / 71.45 | 33.546 / 45.764 |
+| Busy 2 | 20.931 / 56.484 | 24.971 | 21.50 / 57.02 | 25.05 / 68.13 | 33.502 / 45.336 |
+| Recent 1 | 6.701 / 8.000 | 11.411 | 8.08 / 9.03 | 11.52 / 9.09 | 40.716 / 24.238 |
+| Recent 2 | 7.182 / 7.903 | 10.578 | 8.61 / 8.92 | 10.70 / 8.88 | 41.244 / 24.667 |
+
+All matched checks passed and the three gas totals agreed on each range.
+Clempo won five of six paired replay wall comparisons. Go won both whole
+Early commands; Clempo won both whole Busy and Recent commands. Recent
+process CPU was within 0.06 s between the two clients in each pair.
+
+Clempo Recent process wall was 1.38–1.43 s above replay wall. A separate
+first-second macOS `sample PID 1 1` captured startup, including the parent
+copy subprocess launch (`wait_for_exec`). Clempo's process timer includes
+its `cp -R` of the 2.2 GB parent, which is outside the Go process timer.
+The startup sample is not a per-phase CPU breakdown.
+
+Raw logs and results:
+`logs/r7-parity/executable-91ab4d2/{clempo,go,rust}-{early,busy,recent}-{1,2}.{json,log}`;
+startup sample: `logs/r7-parity/executable-91ab4d2/profile-overhead-startup.txt`.
+
 ### Current main comparison (`3c43b9e`)
 
 Two back-to-back sequences per range on the Mac15,9: Clempo → goempo →
