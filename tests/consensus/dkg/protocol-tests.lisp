@@ -1,0 +1,86 @@
+(in-package #:clempo.dkg.tests)
+
+;;; rust_messages.json: 4 participants, a fresh round (epoch 1) and a reshare of the dealt
+;;; `output` (epoch 2), every dealer to every player, with Tempo's DKG channel framing
+;;; (epoch varint || Message) and each dealer's SignedDealerLog.
+
+(defvar *rust* nil)
+(defun rust ()
+  (or *rust* (setf *rust* (data-json "rust_messages.json"))))
+
+(defun rust-get (key) (clempo.json:jget (rust) key))
+(defun rust-keys () (map 'list #'hex->octets (rust-get "participants")))
+(defun rust-seeds () (map 'list #'hex->octets (rust-get "ed25519_private")))
+(defun rust-output ()
+  (let ((*max-participants* 4)) (cw-decode 'output (hex->octets (rust-get "output")))))
+(defun rust-shares ()
+  (map 'list (lambda (h) (cw-decode 'share (hex->octets h))) (rust-get "shares")))
+(defun rust-rounds () (coerce (rust-get "rounds") 'list))
+
+(defun rust-round-info (round)
+  (let ((keys (rust-keys)))
+    (make-round-info (string->octets (rust-get "namespace"))
+                     (clempo.json:jget round "epoch")
+                     :previous (when (eq (clempo.json:jget round "previous") :true) (rust-output))
+                     :reveal (if (eql (clempo.json:jget round "reveal") 1) :v1 :v0)
+                     :dealers keys :players keys)))
+
+(defun decode-channel (hex epoch)
+  "Tempo's DKG channel: the epoch mux varint, then the Message."
+  (let* ((octets (hex->octets hex))
+         (r (make-cw-reader octets)))
+    (is= epoch (read-varint r))
+    (let ((*max-participants* 4))
+      (values (cw-decode 'dkg-message octets :start (cw-reader-position r))))))
+
+(deftest dkg-rust-keys ()
+  ;; the private keys are ed25519 seeds of the participants
+  (is (every #'octets= (rust-keys) (mapcar #'clempo.ed25519:ed25519-public-key (rust-seeds))))
+  ;; the dealt shares match the dealt public polynomial
+  (let ((public (output-public (rust-output))))
+    (dolist (share (rust-shares))
+      (is= (hex (sharing-partial-public public (share-index share)))
+           (hex (clempo.dkg::g2-octets (clempo.dkg::g2-base-mul (share-private share))))))))
+
+(deftest dkg-rust-dealings-and-acks ()
+  ;; Lisp players accept every Rust dealing, and their acks (deterministic ed25519 over the
+  ;; ack transcript) equal Rust's byte for byte; Rust's signed logs check, decode and
+  ;; re-encode; observers and players agree on the output.
+  (dolist (round (rust-rounds))
+    (let* ((epoch (clempo.json:jget round "epoch"))
+           (info (rust-round-info round))
+           (keys (rust-keys))
+           (players (mapcar (lambda (seed) (make-player info seed)) (rust-seeds)))
+           (logs (make-logs info)))
+      (loop for m across (clempo.json:jget round "messages")
+            for dealer = (nth (clempo.json:jget m "dealer") keys)
+            do (if (clempo.json:jget m "signed_log")
+                   (let* ((octets (hex->octets (clempo.json:jget m "signed_log")))
+                          (signed (decode-signed-dealer-log octets 4 :strict t)))
+                     (is (octets= octets (cw-encode 'signed-dealer-log signed)))
+                     (multiple-value-bind (d log) (check-signed-dealer-log signed info)
+                       (is (and d (octets= d dealer)))
+                       (when d (logs-record logs d log))))
+                   (destructuring-bind (tag pub-msg priv-msg)
+                       (decode-channel (clempo.json:jget m "dealer_bytes") epoch)
+                     (is (eq :dealer tag))
+                     (let* ((player (nth (clempo.json:jget m "player") players))
+                            (ack (player-dealer-message player dealer pub-msg priv-msg))
+                            (rust-ack (decode-channel (clempo.json:jget m "ack_bytes") epoch)))
+                       (is (eq :ack (car rust-ack)))
+                       (is= (hex (cdr rust-ack)) (hex ack))
+                       ;; a duplicate dealing is ignored
+                       (is (null (player-dealer-message player dealer pub-msg priv-msg)))))))
+      (is= 4 (length (clempo.dkg::logs-entries logs)))
+      (let ((output (observe logs)))
+        (is (octets= (info-summary info) (output-summary output)))
+        (is= 3 (sharing-threshold (output-public output)))
+        (when (info-previous info)
+          (is (octets= (sharing-public (output-public (rust-output)))
+                       (sharing-public (output-public output)))))
+        (dolist (player players)
+          (multiple-value-bind (player-output share) (finalize-player player logs)
+            (is (equalp output player-output))
+            (is= (hex (sharing-partial-public (output-public output) (share-index share)))
+                 (hex (clempo.dkg::g2-octets (clempo.dkg::g2-base-mul
+                                              (share-private share)))))))))))

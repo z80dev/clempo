@@ -9,6 +9,8 @@
                (:file "field")
                (:file "transcript")
                (:file "info")
+               (:file "group")
+               (:file "protocol")
                (:file "tempo")))
 
 (defsystem "clempo-consensus-dkg/tests"
@@ -16,4 +18,7 @@
   :pathname "../../../tests/consensus/dkg/"
   :serial t
   :components ((:file "codec-tests")
-               (:file "info-tests")))
+               (:file "info-tests")
+               (:file "protocol-tests")
+               (:file "ceremony-tests")
+               (:file "tempo-tests")))

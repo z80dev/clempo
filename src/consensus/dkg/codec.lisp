@@ -50,18 +50,12 @@ RootsOfUnity. Tempo reads with v0.")
 (defun read-ed25519-public-key (r) (read-fixed r 32))
 (defcwtype ed25519-public-key :write write-ed25519-public-key :read read-ed25519-public-key)
 
-(defun check-g2-octets (octets)
-  "G2::read's checks on a compressed point: the compression flag is set and the point is
-not the identity."
-  (unless (logbitp 7 (aref octets 0)) (cw-fail "G2: bad encoding (not compressed)"))
-  (when (logbitp 6 (aref octets 0)) (cw-fail "G2: infinity")))
-
 (defun write-g2-point (w v)
   (invariant (= (length v) 96) "compressed G2 point must be 96 bytes")
   (write-raw w v))
 (defun read-g2-point (r)
   (let ((octets (read-fixed r 96)))
-    (check-g2-octets octets)
+    (g2-of octets)
     octets))
 (defcwtype g2-point :write write-g2-point :read read-g2-point)
 

@@ -29,7 +29,32 @@ Stable API for consensus:
   sharing-coefficients sharing-total sharing-mode sharing-threshold
   (sharing-public sharing) -> G2 octets, (sharing-partial-public sharing index) -> G2 octets
 
-Malformed bytes signal CW-ERROR (a subclass of ERROR); protocol failures signal DKG-ERROR.")
+Rounds and transcripts:
+  (make-round-info namespace round &key previous mode reveal dealers players) -> info
+    Info::new::<N3f1>; INFO-SUMMARY is the round's transcript summary (= the output's summary).
+  new-transcript resume-transcript transcript-commit transcript-fork transcript-summarize
+  transcript-noise transcript-sign transcript-verify: commonware's BLAKE3 Transcript.
+
+Protocol (signing keys are 32-byte ed25519 seeds; randomness from clempo.io:*entropy*):
+  (start-dealer info seed &key share) -> (values dealer pub-msg ((player . scalar) ...))
+  (dealer-receive-player-ack dealer player ack)   (finalize-dealer dealer) -> signed-dealer-log
+  (make-player info seed)   (player-dealer-message player dealer pub-msg scalar) -> ack | NIL
+  (check-signed-dealer-log signed info) -> (values dealer log) | NIL
+  (make-logs info) (logs-record logs dealer log) (logs-pre-verify logs)
+  (observe logs) -> output     (finalize-player player logs) -> (values output share)
+  (deal players &key mode) -> (values output ((player . share) ...))   the trusted dealer
+
+Tempo:
+  (round-info-from-outcome outcome &key namespace v1-active) -> info     Round::from_state
+  (extra-data-dealer-log octets info &key strict) -> (values dealer log)  read_dealer_log
+  (collect-dealer-logs info extra-datas) -> logs
+  (conclude-ceremony logs previous-output &key player) -> (values output share succeeded)
+  (boundary-outcome output next-players &key epoch next-full-dkg-epoch) -> outcome
+  height-epoch epoch-first-height epoch-last-height boundary-height-p
+
+Malformed bytes signal CW-ERROR (a subclass of ERROR); refused protocol input signals
+DKG-ERROR (reason keyword in DKG-ERROR-REASON); a round that cannot produce an output signals
+DKG-FAILURE (a DKG-ERROR).")
   (:export
    ;; conditions and read configuration
    #:dkg-error #:dkg-error-reason
@@ -66,4 +91,14 @@ Malformed bytes signal CW-ERROR (a subclass of ERROR); protocol failures signal 
    #:info #:make-round-info #:info-summary #:info-round #:info-previous #:info-mode
    #:info-reveal #:info-dealers #:info-players #:info=
    ;; Tempo
-   #:+tempo-namespace+ #:round-info-from-outcome))
+   #:+tempo-namespace+ #:round-info-from-outcome
+   ;; protocol
+   #:dkg-failure #:dkg-failure-required #:dkg-failure-found #:dkg-failure-faults
+   #:dkg-failure-unavailable
+   #:check-signed-dealer-log #:logs #:make-logs #:logs-info #:logs-record #:logs-pre-verify #:observe
+   #:dealer #:start-dealer #:dealer-receive-player-ack #:finalize-dealer
+   #:player #:make-player #:player-dealer-message #:finalize-player #:player-index
+   #:deal
+   ;; Tempo integration
+   #:height-epoch #:epoch-first-height #:epoch-last-height #:boundary-height-p
+   #:extra-data-dealer-log #:collect-dealer-logs #:conclude-ceremony #:boundary-outcome))
