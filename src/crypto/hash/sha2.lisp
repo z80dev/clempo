@@ -153,7 +153,10 @@ for SHA-256 on an arm64 core with FEAT_SHA256, COMPRESS runs clempo.sha256-arm64
        (dolist (part more) (,update inner part))
        (dotimes (i ,block) (setf (aref pad i) (logxor #x6a (aref pad i))))
        (,update outer pad)
-       (,final (,update outer (,final inner))))))
+       ;; The pads and the inner digest derive from the key: zero them once used.
+       (let ((digest (,final inner)))
+         (fill pad 0)
+         (prog1 (,final (,update outer digest)) (fill digest 0))))))
 
 (define-hmac hmac-sha256 make-sha256 sha256-update sha256-final sha256 64)
 (define-hmac hmac-sha512 make-sha512 sha512-update sha512-final sha512 128)

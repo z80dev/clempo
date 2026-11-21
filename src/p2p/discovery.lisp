@@ -489,7 +489,7 @@ signature, size, identity-scheme and sorted/unique key validation."
                         (octets= initial-nonce (v5-packet-nonce packet)))
                 do (setf challenge packet) (return))
         (unless challenge (return-from query-v5 (values nil nil)))
-        (let* ((ephemeral (1+ (clempo.io:random-below (1- ec:+secp256k1-n+))))
+        (let* ((ephemeral (ec:random-private-key))
                (public (compress-public (ec:private->public ephemeral)))
                (data (v5-packet-associated-data challenge)))
           (multiple-value-setq (write-key read-key)
@@ -579,7 +579,7 @@ use '(:V5) for independent v5 discovery. There is no port scanning or retransmis
 Only peers answering a signed matching v4 PONG or an identity-bound encrypted v5
 PONG are returned; referrals alone are never marked verified. TCP port zero peers
 can route a lookup but are not returned. No TCP connection or transaction is made.
-KEY optionally supplies a secp256k1 scalar; otherwise a fresh ephemeral identity is
+KEY optionally supplies a secp256k1 private key (32 octets); otherwise a fresh ephemeral identity is
 created. Invalid arguments/bootnodes signal P2P-ERROR; unreachable peers, malformed
 network packets and deadline exhaustion yield the verified subset (possibly NIL).
 This proves discovery identity/reachability only, not Tempo chain or validator status."
@@ -588,11 +588,11 @@ This proves discovery identity/reachability only, not Tempo chain or validator s
                (listp protocols) (<= 1 (length protocols) 2)
                (every (lambda (p) (member p '(:v4 :v5))) protocols)
                (= (length protocols) (length (remove-duplicates protocols)))
-               (or (null key) (typep key `(integer 1 ,(1- ec:+secp256k1-n+)))))
+               (or (null key) (ec:private-key-p key)))
     (protocol-error "invalid discovery bounds or key"))
   (when (zerop timeout) (return-from discover-peers nil))
   (let* ((deadline (+ (monotonic-seconds) timeout))
-         (key (or key (1+ (clempo.io:random-below (1- ec:+secp256k1-n+)))))
+         (key (or key (ec:random-private-key)))
          (target (ec:private->public key)) (target-hash (octets->integer (k:keccak256 target)))
          (queue nil) (seeds nil) (seen (make-hash-table :test 'equalp))
          (distances (make-hash-table :test 'equalp)) (results nil)

@@ -1,13 +1,16 @@
 ;;; The BLS12-381 scalar field (integers mod r): evaluation points, Lagrange weights,
 ;;; polynomials over scalars.
+;;;
+;;; Public scalars (evaluation points, roots of unity, Lagrange weights) are integers with
+;;; plain modular arithmetic. Secret scalars (shares, dealings, polynomial coefficients) are
+;;; 32-octet clempo.bls12-381:fr-octets with constant-time arithmetic, and never integers.
 
 (in-package #:clempo.dkg)
 
-;; Shares and polynomial coefficients are secret: constant-time Montgomery arithmetic.
 (declaim (inline fr+ fr- fr*))
-(defun fr+ (a b) (clempo.bls12-381:fr-add a b))
-(defun fr- (a b) (clempo.bls12-381:fr-sub a b))
-(defun fr* (a b) (clempo.bls12-381:fr-mul a b))
+(defun fr+ (a b) (mod (+ a b) +group-order+))
+(defun fr- (a b) (mod (- a b) +group-order+))
+(defun fr* (a b) (mod (* a b) +group-order+))
 
 (defun fr-expt (base exponent)
   (let ((result 1) (base (mod base +group-order+)))
@@ -51,19 +54,22 @@ of unity of order next_power_of_two(TOTAL)."
 
 (defun scalar-from-ikm (ikm)
   "Scalar::from_ikm (blst_keygen, the IETF BLS KeyGen / EIP-2333 HKDF_mod_r): a non-zero
-scalar from at least 32 bytes of input keying material."
+secret scalar (fr-octets) from at least 32 bytes of input keying material."
   (invariant (>= (length ikm) 32) "keygen needs at least 32 bytes of IKM")
   (loop for salt = *keygen-salt* then (clempo.sha2:sha256 salt)
-        for okm = (clempo.sha2:hkdf-sha256-expand
-                   (clempo.sha2:hkdf-sha256-extract salt (octets-concat ikm (octets-of 0)))
-                   (octets-of 0 48) 48)
-        for sk = (clempo.bls12-381:fr-reduce-octets okm)
-        unless (zerop sk) return sk))
+        for sk = (clempo.ct:with-wiped
+                     ((input (octets-concat ikm (octets-of 0)))
+                      (prk (clempo.sha2:hkdf-sha256-extract salt input))
+                      (okm (clempo.sha2:hkdf-sha256-expand prk (octets-of 0 48) 48)))
+                   (clempo.bls12-381:fr-reduce-octets okm))
+        ;; Zero has probability 2^-255; the verdict is the only public fact.
+        when (clempo.bls12-381:fr-octets-p sk :nonzero t) return sk))
 
 (defun random-scalar (&optional (rng #'clempo.io:random-octets))
   "Scalar::random: Scalar::from_ikm over 64 bytes from RNG (a function of a byte count, by
 default clempo.io:*entropy*'s random-octets)."
-  (scalar-from-ikm (funcall rng 64)))
+  (clempo.ct:with-wiped ((ikm (funcall rng 64)))
+    (scalar-from-ikm ikm)))
 
 (defun lagrange-weights (points)
   "Interpolator::new: for distinct evaluation POINTS, the weights w_i with
@@ -81,8 +87,23 @@ f(0) = sum w_i f(points_i) for every polynomial of degree < (length POINTS)."
                                          den (fr* den (fr- xj xi))))
                         (fr* num (fr-inverse den)))))))
 
+(defun scalar-lincomb (weights scalars)
+  "sum_i WEIGHTS_i * SCALARS_i for public integer WEIGHTS and secret fr-octets SCALARS,
+in constant time in the scalars: fresh fr-octets. Intermediate sums are zeroed."
+  (let ((acc (make-octets 32)))
+    (loop for weight in weights for scalar in scalars
+          do (clempo.ct:with-wiped
+                 ((w (clempo.bls12-381:fr-octets-from-integer weight))
+                  (term (clempo.bls12-381:fr-mul w scalar))
+                  (old acc))
+               (setf acc (clempo.bls12-381:fr-add old term))))
+    acc))
+
 (defun scalar-poly-eval (coefficients x)
-  "Horner evaluation of a scalar polynomial, constant first."
-  (let ((acc 0))
-    (dolist (c (reverse coefficients) acc)
-      (setf acc (fr+ (fr* acc x) c)))))
+  "Horner evaluation at the public point X of a polynomial whose secret fr-octets
+COEFFICIENTS come constant first: fresh fr-octets, constant-time in the coefficients."
+  (let ((xo (clempo.bls12-381:fr-octets-from-integer x)))
+    (let ((acc (make-octets 32)))
+      (dolist (c (reverse coefficients) acc)
+        (clempo.ct:with-wiped ((old acc) (product (clempo.bls12-381:fr-mul old xo)))
+          (setf acc (clempo.bls12-381:fr-add product c)))))))

@@ -2,9 +2,9 @@
 
 (deftest dkg-scalar-from-ikm ()
   ;; EIP-2333 test case 0: derive_master_SK(seed) = HKDF_mod_r(seed), blst_keygen's algorithm
-  (is= 6083874454709270928345386274498605044986640685124978867557563392430687146096
-       (scalar-from-ikm
-        (hex->octets "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"))))
+  (is-equalp (integer->octets 6083874454709270928345386274498605044986640685124978867557563392430687146096 32)
+             (scalar-from-ikm
+              (hex->octets "c55257c360c07c72029aebc1b53c05ed0362ada38ead3e3e9efa3708e53495531f09a6987599d18264c1e1c92f2cf141630c7a3c4ab7c81b2f001698e7463b04"))))
 
 (deftest dkg-persisted-codecs ()
   (let* ((output (rust-output))

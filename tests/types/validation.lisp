@@ -5,7 +5,7 @@
 (defun signed-grant (fields &optional (private-key 1))
   (let* ((normalized (clempo.signatures::key-authorization-fields fields))
          (hash (clempo.keccak:keccak256 (clempo.rlp:rlp-encode normalized))))
-    (multiple-value-bind (r s parity) (clempo.secp256k1:sign hash private-key)
+    (multiple-value-bind (r s parity) (clempo.secp256k1:sign hash (integer->octets private-key 32))
       (clempo.rlp:rlp-decode
        (clempo.rlp:rlp-encode
         (list normalized (octets-concat (integer->octets r 32)

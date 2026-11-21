@@ -17,7 +17,9 @@ use the NUL DST, not Commonware's normal POP message DST.
 
 This component explicitly exports its `bls-*` symbols from `clempo.bls12-381`.
 Every operation takes variant `:min-sig` (G2 public/G1 signature) or `:min-pk`
-(G1 public/G2 signature) first. Secret scalars are integers in `[1,r)`.
+(G1 public/G2 signature) first. Secret scalars are `fr-octets`: 32 big-endian
+octets of a scalar in `[1,r)` (Scalar's encoding), handled in constant time and
+never converted to integers.
 Public keys and signatures are compressed octet vectors; external points are
 always decoded and subgroup validated. Verification rejects infinity and returns
 NIL for invalid-point encodings. Invalid API shapes/scalars signal errors.

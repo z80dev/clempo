@@ -7,7 +7,9 @@ artifacts (crates/dkg-onchain-artifacts, consensus/src/dkg), byte-compatible wit
 Values at the API boundary:
   G2 points (public polynomial coefficients, partial public keys, the network identity)
     are 96-byte compressed octet vectors;
-  scalars (shares, dealings) are integers mod the BLS12-381 group order;
+  secret scalars (shares, dealings, polynomial coefficients) are 32-byte big-endian octet
+    vectors below the BLS12-381 group order (clempo.bls12-381:fr-octets), never integers;
+  public scalars (evaluation points, Lagrange weights) are integers mod the group order;
   ed25519 public keys are 32-byte octet vectors, signatures 64-byte octet vectors;
   sets of public keys (dealers, players, revealed) are lists sorted by octets;
   a transcript summary is a 32-byte octet vector.

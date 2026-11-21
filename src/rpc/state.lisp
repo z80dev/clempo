@@ -388,7 +388,7 @@ state root) and held for the call."
 (defun node-key ()
   (sb-thread:with-mutex (*node-key-lock*)
     (or *node-key*
-        (setf *node-key* (1+ (clempo.io:random-below (1- clempo.secp256k1:+secp256k1-n+)))))))
+        (setf *node-key* (clempo.secp256k1:random-private-key)))))
 
 (defun compressed-key (public)
   (let ((y (octets->integer public :start 32 :end 64)))

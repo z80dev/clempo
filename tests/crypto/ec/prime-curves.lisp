@@ -56,11 +56,12 @@
              (lambda (cols)
                (destructuring-bind (priv peer expected) cols
                  (is-equalp (hex->octets expected)
-                            (clempo.secp256k1:ecdh (hex->integer priv) (hex->octets peer)))))))
+                            (clempo.secp256k1:ecdh (integer->octets (hex->integer priv) 32)
+                                                   (hex->octets peer)))))))
 
 (deftest secp-rfc6979 ()
   ;; RustCrypto k256 0.13.4 src/ecdsa.rs, ethereum_end_to_end_example.
-  (let* ((priv #x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318)
+  (let* ((priv (hex->octets "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"))
          (hash (clempo.keccak:keccak256
                 (hex->octets "e9808504e3b29200831e848094f0109fc8df283027b6285cc889f5aa624eac1f55843b9aca0080018080"))))
     (multiple-value-bind (r s v) (clempo.secp256k1:sign hash priv)
@@ -80,9 +81,15 @@
     (dolist (v '(-1 4 27 28)) (is (null (clempo.secp256k1:ecrecover hash 1 1 v))))
     (is (null (clempo.secp256k1:ecrecover (make-octets 31) 1 1 0)))
     (is (null (clempo.secp256k1:ecrecover hash (1- n) 1 2)))
-    (is (null (clempo.secp256k1:private->public 0)))
-    (is (null (clempo.secp256k1:private->public n)))
-    (is (null (clempo.secp256k1:ecdh 1 (make-octets 64))))))
+    (is (null (clempo.secp256k1:private->public (make-octets 32))))
+    (is (null (clempo.secp256k1:private->public (integer->octets n 32))))
+    (is (null (clempo.secp256k1:private->public (integer->octets (1+ n) 32))))
+    (is (null (clempo.secp256k1:private->public 1)))   ; integers are not keys
+    (is (null (clempo.secp256k1:private->public (subseq (integer->octets 1 32) 1))))
+    (is (null (clempo.secp256k1:ecdh (integer->octets 1 32) (make-octets 64))))
+    (signals error (clempo.secp256k1:sign hash (integer->octets n 32)))
+    (is (clempo.secp256k1:private-key-p (integer->octets (1- n) 32)))
+    (is (not (clempo.secp256k1:private-key-p (integer->octets 0 32))))))
 
 (deftest p256-eip7951-corpus ()
   (each-line "p256/eest_p256verify.txt"
@@ -194,7 +201,7 @@
                          (clempo.secp256k1.native-group-tests::oracle-g) k)))
           (is-equalp (octets-concat (integer->octets (car expected) 32)
                                    (integer->octets (cdr expected) 32))
-                     (clempo.secp256k1:private->public k)))))))
+                     (clempo.secp256k1:private->public (integer->octets k 32))))))))
 
 (deftest secp-native-field-multiply ()
   (let ((p clempo.secp256k1:+secp256k1-p+))

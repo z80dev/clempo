@@ -17,7 +17,11 @@
   "When true, both classes draw random secrets: an A/A run that measures the test's own
 false-positive rate on this host.")
 
-(defun ct-random-scalar (limit) (1+ (clempo.io:random-below (1- limit))))
+(defun ct-random-key (limit)
+  "32 random big-endian octets of a scalar in [1, LIMIT). The harness draws inputs before
+timing starts, so it may compare integers."
+  (loop for key = (clempo.io:random-octets 32)
+        when (< 0 (octets->integer key) limit) return key))
 
 (defun ct-sparse-octets (n)
   "N octets with only the top and bottom bits set."
@@ -29,18 +33,19 @@ false-positive rate on this host.")
   (let* ((n clempo.secp256k1:+secp256k1-n+)
          (r clempo.bls12-381:+r+)
          (p256-n #xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551)
-         (sparse (+ (ash 1 254) 1))
+         (sparse (ct-sparse-octets 32))
          (hash (clempo.keccak:keccak256 (string->octets "clempo ct-timing")))
          (message (string->octets "clempo ct-timing message"))
-         (secp-peer (clempo.secp256k1:private->public (ct-random-scalar n)))
-         (p256-peer (clempo.ecdh:p256-ecdh-public-key (integer->octets (ct-random-scalar p256-n) 32)))
+         (secp-peer (clempo.secp256k1:private->public (ct-random-key n)))
+         (p256-peer (clempo.ecdh:p256-ecdh-public-key (ct-random-key p256-n)))
          (x-peer (clempo.x25519:x25519-public-key (clempo.io:random-octets 32)))
          (fixed-aes (clempo.aes:make-aes (clempo.io:random-octets 32)))
          (plain (clempo.io:random-octets 256)) (block (clempo.io:random-octets 16))
          (nonce (make-octets 12)))
-;; Every fixed-class input is a fresh object, allocated in the same interleaved order as
-    ;; the random ones: one shared object would stay cached and look faster.
-    (flet ((scalar (limit) (lambda (class) (if (zerop class) (+ (ash 1 254) 1) (ct-random-scalar limit))))
+    ;; Every fixed-class input is a fresh object, allocated in the same interleaved order as
+    ;; the random ones: one shared object would stay cached and look faster. Secret scalars
+    ;; are 32 octets; the fixed one is 2^254 + 1.
+    (flet ((scalar (limit) (lambda (class) (if (zerop class) (ct-sparse-octets 32) (ct-random-key limit))))
            (octets (k) (lambda (class) (if (zerop class) (ct-sparse-octets k) (clempo.io:random-octets k)))))
       (list
        (ct-case "secp256k1-sign" 20000 1 (scalar n)
@@ -53,7 +58,7 @@ false-positive rate on this host.")
                 (lambda (seed) (clempo.ed25519:ed25519-sign seed message)))
        (ct-case "x25519" 10000 1 (octets 32)
                 (lambda (secret) (clempo.x25519:x25519 secret x-peer)))
-       (ct-case "p256-ecdh" 10000 1 (lambda (class) (integer->octets (funcall (scalar p256-n) class) 32))
+       (ct-case "p256-ecdh" 10000 1 (scalar p256-n)
                 (lambda (secret) (clempo.ecdh:p256-ecdh-shared secret p256-peer)))
        (ct-case "bls-sign-g1" 3000 1 (scalar r)
                 (lambda (secret) (clempo.bls12-381:bls-sign :min-sig secret message)))
@@ -61,6 +66,11 @@ false-positive rate on this host.")
                 (lambda (secret) (clempo.bls12-381:bls-public-key :min-sig secret)))
        (ct-case "dkg-share-mul" 20000 50 (scalar r)
                 (lambda (a) (clempo.bls12-381:fr-mul a sparse)))
+       (ct-case "key-file-hex-decode" 20000 20
+                (lambda (class) (clempo.ct:octets-to-hex (funcall (octets 32) class)))
+                (lambda (text) (clempo.ct:hex-to-octets text)))
+       (ct-case "key-file-hex-encode" 20000 20 (octets 32)
+                (lambda (key) (clempo.ct:octets-to-hex key)))
        (ct-case "aes-key-schedule-and-block" 20000 1 (octets 32)
                 (lambda (key) (clempo.aes:aes-encrypt-block (clempo.aes:make-aes key) block)))
        (ct-case "aes-256-block" 20000 64 (octets 16)
@@ -77,7 +87,7 @@ false-positive rate on this host.")
        (ct-case "chacha20-poly1305" 20000 1 (octets 32)
                 (lambda (key) (clempo.chacha20poly1305:aead-encrypt key nonce plain)))
        (ct-case "control-variable-time-wnaf" 20000 1 (scalar n)
-                (lambda (k) (clempo.secp256k1::native-generator-mul k))
+                (lambda (k) (clempo.secp256k1::native-generator-mul (octets->integer k)))
                 t)))))
 
 (defun ct-welch (times classes keep)
@@ -105,11 +115,7 @@ false-positive rate on this host.")
     ;; the same way: generating random inputs leaves garbage between them, fixed
     ;; ones do not, and denser inputs run faster from the cache.
     (dotimes (i samples)
-      (let ((x (aref inputs i)))
-        (setf (aref inputs i) (typecase x
-                                (bignum (sb-bignum::copy-bignum x))
-                                (octets (copy-seq x))
-                                (t x)))))
+      (setf (aref inputs i) (copy-seq (aref inputs i))))
     (dotimes (i (min samples 200)) (funcall run (aref inputs i)))   ; warm up
     (dotimes (i samples)
       (let ((input (aref inputs i)) (start (clempo.io:monotonic-nanoseconds)))

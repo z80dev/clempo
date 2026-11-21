@@ -11,8 +11,12 @@
   (octets->integer (clempo.keccak:keccak256
                     (octets-concat (integer->octets key 32) (integer->octets slot 32)))))
 
+(defun fixture-key (private)
+  "The secp256k1 private key of the small fixture scalar PRIVATE."
+  (integer->octets private 32))
+
 (defun fixture-address (private)
-  (clempo.secp256k1:pubkey->address (clempo.secp256k1:private->public private)))
+  (clempo.secp256k1:pubkey->address (clempo.secp256k1:private->public (fixture-key private))))
 
 (defun fixture-fund (db address &optional (amount 1000000000000000000) (nonce 0))
   "Synthetic account funding, explicitly separate from the recorded prestate."
@@ -90,7 +94,7 @@ by the validation backend: each synthetic write below is ordinary committed stat
     (if (zerop type) rlp (octets-concat (octets-of type) rlp))))
 
 (defun signature-bytes (hash private)
-  (multiple-value-bind (r s parity) (clempo.secp256k1:sign hash private)
+  (multiple-value-bind (r s parity) (clempo.secp256k1:sign hash (fixture-key private))
     (octets-concat (integer->octets r 32) (integer->octets s 32) (octets-of parity))))
 
 (defun fixture-transaction (&key (type #x76) (private-key 1) key-private-key
@@ -134,9 +138,9 @@ No unchecked transaction constructors, mocked signatures or pool-validation over
               (setf (nth 11 payer-fields) (integer->octets sender 20))
               (multiple-value-bind (r s parity)
                   (clempo.secp256k1:sign (clempo.keccak:keccak256 (envelope #x78 payer-fields))
-                                         sponsor-private-key)
+                                         (fixture-key sponsor-private-key))
                 (setf (nth 11 fields) (list parity r s))))))
-        (multiple-value-bind (r s parity) (clempo.secp256k1:sign hash private-key)
+        (multiple-value-bind (r s parity) (clempo.secp256k1:sign hash (fixture-key private-key))
           (setf (nth (- (length fields) 3) fields)
                 (if (zerop type) (+ 35 (* chain-id 2) parity) parity)
                 (nth (- (length fields) 2) fields) r
@@ -154,7 +158,7 @@ No unchecked transaction constructors, mocked signatures or pool-validation over
   (let* ((fields (list chain-id (integer->octets #x5678 20) nonce))
          (hash (clempo.keccak:keccak256
                 (octets-concat (octets-of 5) (clempo.rlp:rlp-encode fields)))))
-    (multiple-value-bind (r s parity) (clempo.secp256k1:sign hash private-key)
+    (multiple-value-bind (r s parity) (clempo.secp256k1:sign hash (fixture-key private-key))
       (append fields (list parity r s)))))
 
 (defun recorded-transaction (label)

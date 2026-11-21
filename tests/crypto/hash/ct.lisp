@@ -153,3 +153,26 @@
     (is (not (logbitp 24 (clempo.ct::%read-dit))))
     (with-data-independent-timing (is (logbitp 24 (clempo.ct::%read-dit))))
     (is (not (logbitp 24 (clempo.ct::%read-dit))))))
+
+(deftest ct-hex-round-trips-and-rejects ()
+  ;; Every octet value both ways, both digit cases, and every non-hex character rejected.
+  (let ((all (make-octets 256)))
+    (dotimes (i 256) (setf (aref all i) i))
+    (is= (octets->hex all :prefix nil) (octets-to-hex all))
+    (is-equalp all (hex-to-octets (octets-to-hex all)))
+    (is-equalp all (hex-to-octets (string-upcase (octets-to-hex all)))))
+  (is-equalp (make-octets 0) (hex-to-octets ""))
+  (is (null (hex-to-octets "abc")))
+  (dotimes (code 256)
+    (let ((c (code-char code)))
+      (unless (digit-char-p c 16)
+        (is (null (hex-to-octets (coerce (list #\a c) 'string))))))))
+
+(deftest ct-wipe-zeroes-on-exit ()
+  (let ((kept nil))
+    (catch 'out
+      (with-wiped ((o (octets-of 1 2 3)) (w (make-words 2)) (none nil))
+        (setf (aref w 0) 9 kept (list o w))
+        (throw 'out nil)))
+    (is-equalp (make-octets 3) (first kept))
+    (is= 0 (aref (second kept) 0))))

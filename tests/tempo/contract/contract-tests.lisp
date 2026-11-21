@@ -144,7 +144,7 @@
   ;; alloy's secp256k1::recover_signer (TIP-20 permit, storage/mod.rs): the malleated twin
   ;; (n - s, flipped parity) of a valid signature recovers the same key, and EIP-2 rejects it
   ;; after charging the 3,000 gas.
-  (let* ((key #x4646464646464646464646464646464646464646464646464646464646464646)
+  (let* ((key (make-array 32 :element-type '(unsigned-byte 8) :initial-element #x46))
          (digest (clempo.keccak:keccak256-integer (string->octets "permit digest")))
          (owner (clempo.secp256k1:pubkey->address (clempo.secp256k1:private->public key))))
     (multiple-value-bind (r s recid) (clempo.secp256k1:sign (integer->octets digest 32) key)

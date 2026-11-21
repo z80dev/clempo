@@ -20,15 +20,18 @@
   (string-trim '(#\Space #\Tab #\Newline #\Return #\Page #.(code-char 11)) string))
 
 (defun strict-hex (string &optional length what)
-  (let ((h (if (and (>= (length string) 2) (string= "0x" string :end2 2)) (subseq string 2) string)))
-    (unless (and (evenp (length h)) (every (lambda (c) (digit-char-p c 16)) h))
-      (keys-fail "~A is not valid hex" (or what "input")))
-    (let ((o (make-octets (/ (length h) 2))))
-      (dotimes (i (length o))
-        (setf (aref o i) (parse-integer h :start (* 2 i) :end (+ 2 (* 2 i)) :radix 16)))
-      (when (and length (/= (length o) length))
-        (keys-fail "~A must be ~D bytes, got ~D" (or what "input") length (length o)))
-      o)))
+  "STRING's octets, decoded like const_hex (optional 0x, even length, hex digits only) but in
+constant time: key files hold secrets."
+  (let* ((h (if (and (>= (length string) 2) (string= "0x" string :end2 2)) (subseq string 2) string))
+         (o (or (clempo.ct:hex-to-octets h) (keys-fail "~A is not valid hex" (or what "input")))))
+    (when (and length (/= (length o) length))
+      (clempo.ct:wipe o)
+      (keys-fail "~A must be ~D bytes, got ~D" (or what "input") length (length o)))
+    o))
+
+(defun secret-hex-file-octets (octets)
+  "The 0x-hex text of the secret OCTETS as file octets, encoded in constant time."
+  (string->octets (concatenate 'string "0x" (clempo.ct:octets-to-hex octets))))
 
 (defun read-text-file (path what)
   (let ((octets (handler-case (clempo.io:read-file-octets path)
@@ -97,7 +100,7 @@ under the passphrase in PASSPHRASE-FILE."
   (write-new-file path (if passphrase-file
                            (clempo.age:age-encrypt seed (read-secret passphrase-file)
                                                    :work-factor work-factor)
-                           (string->octets (octets->hex seed)))))
+                           (secret-hex-file-octets seed))))
 
 (defun signing-public-key (seed) (clempo.ed25519:ed25519-public-key seed))
 
@@ -105,13 +108,16 @@ under the passphrase in PASSPHRASE-FILE."
 
 (defun read-signing-share (path)
   "The clempo.dkg:share in PATH (SigningShare::read_from_file)."
-  (let ((octets (strict-hex (rust-trim (read-text-file path "signing share")) nil "signing share")))
+  (clempo.ct:with-wiped ((octets (strict-hex (rust-trim (read-text-file path "signing share"))
+                                             nil "signing share")))
     (handler-case (clempo.cwcodec:cw-decode 'clempo.dkg:share octets)
       (error (e) (keys-fail "signing share is not a valid BLS12-381 share: ~A" e)))))
 
 (defun write-signing-share (path share)
   "Create PATH (mode 0600, never overwriting) holding SHARE as 0x-hex."
-  (write-new-file path (string->octets (octets->hex (clempo.cwcodec:cw-encode 'clempo.dkg:share share)))))
+  (clempo.ct:with-wiped ((encoded (clempo.cwcodec:cw-encode 'clempo.dkg:share share))
+                         (text (secret-hex-file-octets encoded)))
+    (write-new-file path text)))
 
 ;;; ValidatorConfigV2 registration (crates/precompiles validator_config_v2): Ed25519 over
 ;;; commonware union_unique(namespace, keccak256(chainId u64 || precompile || validator ||
@@ -211,8 +217,11 @@ IPv4-mapped IPv6."
                     "data" (or (clempo.jsonrpc:rpc-error-data e) :null)))))
 
 (defun read-owner-key (path)
-  (let ((key (octets->integer (strict-hex (rust-trim (read-text-file path "owner key")) 32 "owner key"))))
-    (unless (< 0 key clempo.secp256k1:+secp256k1-n+) (keys-fail "owner key is not a valid secp256k1 scalar"))
+  "The secp256k1 private key (32 octets) in PATH, as 0x-hex."
+  (let ((key (strict-hex (rust-trim (read-text-file path "owner key")) 32 "owner key")))
+    (unless (clempo.secp256k1:private-key-p key)
+      (clempo.ct:wipe key)
+      (keys-fail "owner key is not a valid secp256k1 scalar"))
     key))
 
 (defun encode-1559 (chain-id nonce tip max-fee gas to data &optional signature)

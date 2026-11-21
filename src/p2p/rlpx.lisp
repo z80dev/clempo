@@ -12,7 +12,7 @@
 (define-constant +ecies-overhead+ 113) ; public key (65), IV (16), MAC (32)
 (define-constant +frame-limit+ #xffffff)
 
-(defun random-key () (1+ (clempo.io:random-below (1- ec:+secp256k1-n+))))
+(defun random-key () (ec:random-private-key))
 
 (defun shared-x (key public)
   (or (ec:ecdh key public) (protocol-error "invalid secp256k1 public key")))

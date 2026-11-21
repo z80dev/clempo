@@ -9,7 +9,7 @@
 ;;; eip7702.rs apply_auth_list (see src/tempo/executor/authorizations.lisp).
 
 (defparameter *chain-id* 4217)
-(defparameter *key* #x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318)
+(defparameter *key* (hex->octets "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"))
 (defparameter *authority* (secp:pubkey->address (secp:private->public *key*)))
 (defparameter *target* #xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb)
 

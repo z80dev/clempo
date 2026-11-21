@@ -57,7 +57,7 @@
 
 (deftest signature-verifier-secp256k1 ()
   (with-keychain (:t11)
-    (let* ((private 12345)
+    (let* ((private (integer->octets 12345 32))
            (hash (clempo.keccak:keccak256-integer (string->octets "clempo")))
            (signer (clempo.secp256k1:pubkey->address (clempo.secp256k1:private->public private))))
       (multiple-value-bind (r s recid) (clempo.secp256k1:sign (integer->octets hash 32) private)

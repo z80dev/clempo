@@ -30,7 +30,8 @@ whose dealings are all wrong (its players do not ack). Returns (values output sh
                        do (if (eql corrupt d)
                               (signals dkg-error
                                 (player-dealer-message player me pub-msg
-                                                       (mod (1+ priv) +group-order+)))
+                                                       (clempo.bls12-381:fr-add
+                                                        priv (clempo.bls12-381:fr-octets-from-integer 1))))
                               (dealer-receive-player-ack
                                dealer (seed-key (nth p player-seeds))
                                (player-dealer-message player me pub-msg priv))))

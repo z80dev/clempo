@@ -78,7 +78,7 @@ without UDP discovery. ON-PEER, if supplied, receives a peer and the ETH version
     (error "Provide between one and 64 bootstrap peers"))
   (let* ((chain-profile (eth:tempo-eth-chain (if (eq chain :presto) :mainnet chain)))
          (seeds (mapcar (lambda (e) (etypecase e (string (discovery:parse-enode e)) (discovery:peer e))) bootnodes))
-         (key (1+ (clempo.io:random-below (1- clempo.secp256k1:+secp256k1-n+))))
+         (key (clempo.secp256k1:random-private-key))
          (peers nil)
          (link nil)
          (closed nil))

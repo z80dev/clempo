@@ -7,10 +7,13 @@
 ;;; Transactions signed this way and executed by the Rust reference are checked end to end
 ;;; in tests/tempo/executor (the T14 devnet blocks).
 
-(defun owner-address (key) (clempo.secp256k1:pubkey->address (clempo.secp256k1:private->public key)))
+(defun owner-key (key) "The private key of the small scalar KEY." (integer->octets key 32))
+
+(defun owner-address (key)
+  (clempo.secp256k1:pubkey->address (clempo.secp256k1:private->public (owner-key key))))
 
 (defun sign-digest (key digest)
-  (multiple-value-bind (r s recid) (clempo.secp256k1:sign digest key)
+  (multiple-value-bind (r s recid) (clempo.secp256k1:sign digest (owner-key key))
     (octets-concat (integer->octets r 32) (integer->octets s 32) (octets-of recid))))
 
 (defparameter *keys* '(#x1111 #x2222 #x3333))

@@ -57,7 +57,9 @@
   ("src/crypto/ec/secp256k1-native-scalar.lisp"
    ("SC-INV!" 3 "Inversion consumes fixed exponent windows.")
    ("SG-WNAF!" 3 "Finite-width signed window decomposition."))
-  ("src/crypto/ec/secp256k1.lisp" ("SIGN" 1 "RFC6979 nonce rejection must retry unusable nonces."))
+  ("src/crypto/ec/secp256k1.lisp"
+   ("RANDOM-PRIVATE-KEY" 1 "Rejection sampling retries an out-of-range draw (probability below 2^-127).")
+   ("SIGN" 1 "RFC6979 nonce rejection must retry unusable nonces."))
   ("src/crypto/hash/aes.lisp"
    ("ENCRYPT-PLANES" 1 "Runs the cipher's fixed round count (10 or 14)."))
   ("src/crypto/hash/ct.lisp"

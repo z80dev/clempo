@@ -22,7 +22,7 @@ and the four shares (varint index || 32-byte scalar)."
            (coefficients (loop repeat (read-length r) collect (read-raw r 96)))
            (shares (loop for s across (clempo.json:jget g "shares")
                          collect (let ((o (hex->octets s)))
-                                   (cons (aref o 0) (octets->integer o :start 1))))))
+                                   (cons (aref o 0) (subseq o 1))))))
       (values coefficients total shares))))
 
 (defun num (v key)

@@ -30,8 +30,8 @@
                             (octets-concat (b:g1-encode p) (integer->octets s 32)))))
 (defparameter *namespace* (string->octets "tempo"))
 (defparameter *message* (string->octets "benchmark"))
-(defparameter *public* (b:bls-public-key :min-sig 11))
-(defparameter *signature* (b:bls-sign :min-sig 11 *message* :namespace *namespace*))
+(defparameter *public* (b:bls-public-key :min-sig (integer->octets 11 32)))
+(defparameter *signature* (b:bls-sign :min-sig (integer->octets 11 32) *message* :namespace *namespace*))
 (measure "BLS pairing 2, byte API" 300 (lambda () (assert (b:pairing-check *pairs*))))
 (measure "BLS G1 MSM 128, byte API" 100
          (lambda () (multiple-value-bind (result valid) (b:g1-msm-precompile *msm*)

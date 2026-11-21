@@ -12,13 +12,15 @@
 ;;; perform no socket operations and do not use public endpoints as transports.
 (defun bytes (&rest chunks) (hex->octets (apply #'concatenate 'string chunks)))
 
+(defun sk (n) "The private key of scalar N." (integer->octets n 32))
+
 (defun test-peer (&optional (key 2) (host "8.8.8.8"))
-  (d:make-peer :host host :udp-port 30303 :tcp-port 30303 :public-key (ec:private->public key)))
+  (d:make-peer :host host :udp-port 30303 :tcp-port 30303 :public-key (ec:private->public (sk key))))
 
 (defun test-enr (key &optional (ip (octets-of 9 9 9 9)))
   (let* ((content (list 1 "id" "v4" "ip" ip "secp256k1"
-                        (d::compress-public (ec:private->public key)) "tcp" 30303 "udp" 30303))
-         (signature (d::signature-bytes (k:keccak256 (rlp:rlp-encode content)) key)))
+                        (d::compress-public (ec:private->public (sk key))) "tcp" 30303 "udp" 30303))
+         (signature (d::signature-bytes (k:keccak256 (rlp:rlp-encode content)) (sk key))))
     (rlp:rlp-encode (cons signature content))))
 
 (deftest discovery-public-address-policy ()
@@ -37,7 +39,7 @@
   (is (not (d:public-ip-p nil))))
 
 (deftest discovery-enode-endpoints ()
-  (let* ((public (ec:private->public 1))
+  (let* ((public (ec:private->public (sk 1)))
          (uri (format nil "enode://~A@8.8.8.8:30303?discport=30301" (octets->hex public :prefix nil)))
          (peer (d:parse-enode uri)))
     (is-equalp "8.8.8.8" (d:peer-host peer))
@@ -57,7 +59,7 @@
     (signals p2p-error (d:parse-enode (format nil "enode://~A@8.8.8.8:1" (make-string 128 :initial-element #\z))))))
 
 (deftest discovery-v4-eip8-pings ()
-  (let ((public (ec:private->public #xb71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291)))
+  (let ((public (ec:private->public (bytes "b71c71a67e1177ad4e901695e1b4b9ee17ae16c6668d313eac2f96dbcda3f291"))))
     (dolist (vector
              (list
               (bytes "e9614ccfd9fc3e74360018522d30e1419a143407ffcce748de3e22116b7e8dc92ff74788c0b6663a"
@@ -79,8 +81,8 @@
       (signals p2p-error (d::decode-v4 vector :now #xffffffff)))))
 
 (deftest discovery-v4-typed-and-authenticated-codec ()
-  (let* ((key 1) (endpoint (list (octets-of 8 8 8 8) 30303 30303))
-         (target (ec:private->public 2)) (token (make-octets 32))
+  (let* ((key (sk 1)) (endpoint (list (octets-of 8 8 8 8) 30303 30303))
+         (target (ec:private->public (sk 2))) (token (make-octets 32))
          (messages (list (cons 1 (list 555 endpoint endpoint 2000 '(1 (2 (3)))))
                          (cons 2 (list endpoint token 2000 '(1 (2 (3)))))
                          (cons 3 (list target 2000 '(1 (2 (3)))))
@@ -119,17 +121,17 @@
                (push (d::v4-packet-type packet) sent)
                (case (d::v4-packet-type packet)
                  (1 (setf queue
-                          (list (d::encode-v4 1 (list 4 (list (octets-of 8 8 8 8) 30303 30303) local 1020) 2)
-                                (d::encode-v4 2 (list local (subseq wire 0 32) 1020) 2))))
+                          (list (d::encode-v4 1 (list 4 (list (octets-of 8 8 8 8) 30303 30303) local 1020) (sk 2))
+                                (d::encode-v4 2 (list local (subseq wire 0 32) 1020) (sk 2)))))
                  (2 (setf incoming t))
                  (3 (is incoming)
                     (setf queue (list (d::encode-v4 4
                                                   (list (list (list (octets-of 9 9 9 9) 30303 30303
-                                                                    (d:peer-public-key referral))) 1020) 2)))))))
+                                                                    (d:peer-public-key referral))) 1020) (sk 2))))))))
            (receive (until) (declare (ignore until)) (pop queue)))
       (multiple-value-bind (proved peers)
-          (d::query-v4 remote 1 (first local) (second local) #'send #'receive
-                       (+ (d::monotonic-seconds) 10) (ec:private->public 1))
+          (d::query-v4 remote (sk 1) (first local) (second local) #'send #'receive
+                       (+ (d::monotonic-seconds) 10) (ec:private->public (sk 1)))
         (is proved) (is-equalp '(1 2 3) (reverse sent)) (is= 1 (length peers))
         (is (octets= (d:peer-public-key referral) (d:peer-public-key (first peers))))))))
 
@@ -138,25 +140,25 @@
          (local (list (octets-of 1 1 1 1) 20000 0)))
     (flet ((send (wire)
              (incf sent)
-             (setf queue (list (d::encode-v4 2 (list local (subseq wire 0 32) 1020) 3)
-                               (d::encode-v4 2 (list local (make-octets 32) 1020) 2)
-                               (d::encode-v4 4 (list nil 1020) 2))))
+             (setf queue (list (d::encode-v4 2 (list local (subseq wire 0 32) 1020) (sk 3))
+                               (d::encode-v4 2 (list local (make-octets 32) 1020) (sk 2))
+                               (d::encode-v4 4 (list nil 1020) (sk 2)))))
            (receive (until) (declare (ignore until)) (pop queue)))
       (multiple-value-bind (proved peers)
-          (d::query-v4 (test-peer) 1 (first local) (second local) #'send #'receive
-                       (+ (d::monotonic-seconds) 10) (ec:private->public 1))
+          (d::query-v4 (test-peer) (sk 1) (first local) (second local) #'send #'receive
+                       (+ (d::monotonic-seconds) 10) (ec:private->public (sk 1)))
         (is (null proved)) (is (null peers)) (is= 1 sent)))))
 
 (deftest discovery-v4-bounded-malformed-input ()
   (let ((received 0) (sent 0))
     (flet ((send (wire) (declare (ignore wire)) (incf sent))
            (receive (until) (declare (ignore until)) (incf received) (octets-of 0)))
-      (is (null (d::query-v4 (test-peer) 1 (octets-of 1 1 1 1) 20000 #'send #'receive
-                            (+ (d::monotonic-seconds) 10) (ec:private->public 1))))
+      (is (null (d::query-v4 (test-peer) (sk 1) (octets-of 1 1 1 1) 20000 #'send #'receive
+                            (+ (d::monotonic-seconds) 10) (ec:private->public (sk 1)))))
       (is= 64 received) (is= 1 sent))))
 
 (deftest discovery-v5-cryptographic-standard-vectors ()
-  (let* ((secret #xfb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736)
+  (let* ((secret (bytes "fb757dc581730490a1d7a00deea65e9b1936924caaea8f44d476014856b68736"))
          (public (bytes "039961e4c2356d61bedb83052c115d311acb3a96f5777296dcf297351130266231"))
          (a (bytes "aaaa8419e9f49d0083561b48287df592939a8d19947d8c0ef88f2a4856a69fbb"))
          (b (bytes "bbbb9d047f0488c0b5a93c1c3f2d8bafc7c8ff337024a55434a0d0555de64db9"))
@@ -223,7 +225,7 @@
     (signals p2p-error (d::decode-enr (d::item-at record 0 (length record)))))
   (let* ((record (test-enr 3)))
     (multiple-value-bind (public sequence peer) (d::decode-enr (d::item-at record 0 (length record)))
-      (is (octets= public (ec:private->public 3))) (is= 1 sequence)
+      (is (octets= public (ec:private->public (sk 3)))) (is= 1 sequence)
       (is-equalp "9.9.9.9" (d:peer-host peer)) (is (not (d:peer-verified-p peer))))
     (dolist (fields (list (list (make-octets 64) 1 "id" "v4" "id" "v4")
                           (list (make-octets 64) 1 "secp256k1" (make-octets 33) "id" "v4")
@@ -235,7 +237,7 @@
 
 (deftest discovery-v5-client-handshake-and-findnode ()
   (let* ((clempo.io:*entropy* (clempo.io:make-seeded-entropy 4217))
-         (self (k:keccak256 (ec:private->public 1))) (remote (k:keccak256 (ec:private->public 2)))
+         (self (k:keccak256 (ec:private->public (sk 1)))) (remote (k:keccak256 (ec:private->public (sk 2))))
          (queue nil) (challenge-data nil) (write-key nil) (read-key nil)
          (response-counter 0) (sent 0) (pong-wire nil) (candidate nil))
     (labels ((reply (type fields)
@@ -258,7 +260,7 @@
                             (is= 3 (aref plain 0))
                             (setf candidate
                                   (loop for key from 3 to 100
-                                        when (member (d::log-distance remote (k:keccak256 (ec:private->public key))) distances)
+                                        when (member (d::log-distance remote (k:keccak256 (ec:private->public (sk key)))) distances)
                                           return key))
                             (is candidate)
                             (setf queue (list pong-wire
@@ -269,12 +271,12 @@
                         (is (d::signature-matches-p
                              (clempo.sha2:sha256
                               (octets-concat (string->octets "discovery v5 identity proof")
-                                             challenge-data ephemeral remote)) signature (ec:private->public 1)))
+                                             challenge-data ephemeral remote)) signature (ec:private->public (sk 1))))
                         (multiple-value-bind (public seq peer)
                             (d::decode-enr (d::item-at auth 131 (length auth)))
-                          (declare (ignore seq peer)) (is (octets= public (ec:private->public 1))))
+                          (declare (ignore seq peer)) (is (octets= public (ec:private->public (sk 1)))))
                         (multiple-value-setq (write-key read-key)
-                          (d::v5-keys 2 (d::decompress-public ephemeral) challenge-data self remote))
+                          (d::v5-keys (sk 2) (d::decompress-public ephemeral) challenge-data self remote))
                         (let* ((plain (d::gcm-decrypt write-key (d::v5-packet-nonce packet)
                                                      (d::v5-packet-message packet) (d::v5-packet-associated-data packet)))
                                (fields (d::v5-message-fields plain 2)))
@@ -285,15 +287,15 @@
                             (setf queue (list bad pong-wire)))))))))
              (receive (until) (declare (ignore until)) (pop queue)))
       (multiple-value-bind (proved peers)
-          (d::query-v5 (test-peer) 1 #'send #'receive (+ (d::monotonic-seconds) 10) (ec:private->public 1))
+          (d::query-v5 (test-peer) (sk 1) #'send #'receive (+ (d::monotonic-seconds) 10) (ec:private->public (sk 1)))
         (is proved) (is= 3 sent) (is= 1 (length peers))
-        (is (octets= (ec:private->public candidate) (d:peer-public-key (first peers))))))))
+        (is (octets= (ec:private->public (sk candidate)) (d:peer-public-key (first peers))))))))
 
 (deftest discovery-no-network-zero-budget-and-option-bounds ()
   (is (null (d:discover-peers (list (test-peer)) :timeout 0)))
-  (is (null (d:discover-peers nil :timeout 1 :key 1)))
-  (is (null (d:discover-peers nil :timeout 1 :key 1 :protocols '(:v5))))
-  (is (null (d:discover-peers nil :timeout 1 :key 1 :protocols '(:v5 :v4))))
+  (is (null (d:discover-peers nil :timeout 1 :key (sk 1))))
+  (is (null (d:discover-peers nil :timeout 1 :key (sk 1) :protocols '(:v5))))
+  (is (null (d:discover-peers nil :timeout 1 :key (sk 1) :protocols '(:v5 :v4))))
   (signals p2p-error (d:discover-peers nil :timeout -1))
   (signals p2p-error (d:discover-peers nil :timeout 301))
   (signals p2p-error (d:discover-peers nil :max-queries 0))
@@ -301,4 +303,5 @@
   (signals p2p-error (d:discover-peers nil :protocols nil))
   (signals p2p-error (d:discover-peers nil :protocols '(:v4 :v4)))
   (signals p2p-error (d:discover-peers nil :protocols '(:v6)))
-  (signals p2p-error (d:discover-peers nil :key 0)))
+  (signals p2p-error (d:discover-peers nil :key 1))
+  (signals p2p-error (d:discover-peers nil :key (make-octets 32))))

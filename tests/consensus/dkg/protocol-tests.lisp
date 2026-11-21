@@ -115,6 +115,7 @@
       (dkg-error (e) (is (eq :missing-player-dealing (dkg-error-reason e)))))
     (handler-case (progn (resume-player info seed logs
                                         (list (destructuring-bind (d p s) (first messages)
-                                                (list d p (mod (1+ s) +group-order+)))))
+                                                (list d p (clempo.bls12-381:fr-add
+                                                           s (clempo.bls12-381:fr-octets-from-integer 1))))))
                          (is nil))
       (dkg-error (e) (is (eq :invalid-persisted-dealing (dkg-error-reason e)))))))

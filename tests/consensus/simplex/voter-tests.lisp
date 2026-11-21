@@ -14,7 +14,7 @@
       (values coefficients total
               (loop for s across (clempo.json:jget g "shares")
                     collect (let ((o (hex->octets s)))
-                              (cons (aref o 0) (octets->integer o :start 1))))
+                              (cons (aref o 0) (subseq o 1))))
               (map 'list #'hex->octets (clempo.json:jget g "participants"))))))
 
 (defclass chain-app () ()

@@ -49,8 +49,8 @@
   (funcall (bls-group-function variant public #'g1-generator #'g2-generator)))
 
 (defun bls-secret (secret)
-  (unless (and (integerp secret) (< 0 secret +r+))
-    (error "BLS secret must be an integer in [1,r)."))
+  (unless (fr-octets-p secret :nonzero t)
+    (error "BLS secret must be 32 big-endian octets of a scalar in [1,r)."))
   secret)
 
 (defun bls-dst (variant proof)

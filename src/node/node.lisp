@@ -524,24 +524,30 @@ or NIL."
 ;;; Serving the chain to devp2p peers (--p2p-listen): only local data, never the upstream.
 
 (defun node-key (dir)
-  "The node's secp256k1 key from DIR/p2p.key, created once (exclusively, mode 600)."
+  "The node's secp256k1 private key (32 octets) from DIR/p2p.key, created once (exclusively,
+mode 600). The file holds the key as 64 hex digits, encoded and decoded in constant time."
   (let ((path (namestring (merge-pathnames "p2p.key" dir))))
     (unless (probe-file path)
-      (let ((key (1+ (clempo.io:random-below (1- clempo.secp256k1:+secp256k1-n+)))))
+      (clempo.ct:with-wiped ((key (clempo.secp256k1:random-private-key))
+                             (text (string->octets (format nil "~A~%" (clempo.ct:octets-to-hex key)))))
         (handler-case
             (let ((fd (sb-posix:open path (logior sb-posix:o-wronly sb-posix:o-creat sb-posix:o-excl)
                                      #o600)))
               (unwind-protect
-                   (let ((text (string->octets (format nil "~64,'0X~%" key))))
-                     (sb-posix:write fd (sb-sys:vector-sap text) (length text))
-                     (sb-posix:fsync fd))
+                   (progn (sb-posix:write fd (sb-sys:vector-sap text) (length text))
+                          (sb-posix:fsync fd))
                 (sb-posix:close fd)))
           (sb-posix:syscall-error (e)
             (unless (probe-file path) (error e))))))
     (let ((stat (sb-posix:stat path)))
       (unless (zerop (logand #o077 (sb-posix:stat-mode stat)))
         (error "~A must be private (chmod 600)" path)))
-    (parse-integer (string-trim '(#\Newline #\Space) (clempo.io:read-file-string path)) :radix 16)))
+    (let ((key (clempo.ct:hex-to-octets
+                (string-trim '(#\Newline #\Space) (clempo.io:read-file-string path)))))
+      (unless (clempo.secp256k1:private-key-p key)
+        (clempo.ct:wipe key)
+        (error "~A does not hold a secp256k1 private key (64 hex digits)" path))
+      key)))
 
 (defun local-block-raw (node height)
   (let ((entry (recent-block node height)))

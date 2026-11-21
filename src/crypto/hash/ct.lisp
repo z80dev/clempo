@@ -13,7 +13,8 @@
   (:use #:cl)
   (:export #:with-data-independent-timing #:words #:make-words
            #:+digits+ #:digits #:make-digits #:recode-odd! #:bit-mask #:equal-mask #:nonzero-bit
-           #:words-from-octets! #:words-to-octets!
+           #:words-from-octets! #:words-to-octets! #:wipe #:with-wiped
+           #:hex-to-octets #:octets-to-hex
            #:define-ct-field #:define-ct-quadratic-field #:define-ct-curve))
 (in-package #:clempo.ct)
 
@@ -129,6 +130,65 @@ CPU has FEAT_DIT; a no-op elsewhere), restoring the previous mode afterwards."
                                (+ start (* 8 (- n 1 i)) (- 7 j))))
               (ldb (byte 8 (* 8 j)) w)))))
   (values))
+
+;;; Secret octets at the edges: wiping, and hex for key files without a table index or a
+;;; branch on a secret digit.
+
+(defun wipe (&rest vectors)
+  "Overwrite each octet or word vector in VECTORS (NIL allowed) with zeros."
+  (dolist (v vectors)
+    (etypecase v
+      (null)
+      (clempo.base:octets (fill v 0))
+      (words (fill v 0))))
+  (values))
+
+(defmacro with-wiped ((&rest bindings) &body body)
+  "Bind each (VAR FORM) like LET*, and wipe every VAR's vector when BODY exits."
+  `(let* ,bindings
+     (unwind-protect (progn ,@body)
+       (wipe ,@(mapcar #'first bindings)))))
+
+(declaim (inline negative-bit))
+(defun negative-bit (x)
+  "1 when the fixnum X is negative, else 0, from its sign bit."
+  (declare #.clempo.base:*hot* (type fixnum x))
+  (logand 1 (ash x -62)))
+
+(defun hex-to-octets (string)
+  "STRING's hex digits (no prefix, either case) as octets, or NIL unless STRING is an even
+count of hex digits. Every digit is decoded with arithmetic masks; only the public verdict
+on the whole string branches."
+  (let ((n (length string)))
+    (when (oddp n) (return-from hex-to-octets nil))
+    (let ((out (clempo.base:make-octets (floor n 2))) (bad 0))
+      (declare (type bit bad))
+      (flet ((nibble (char)
+               (let* ((c (char-code char))
+                      (d (- c 48))
+                      (l (- (logior c 32) 97))
+                      (digit (logxor 1 (logior (negative-bit d) (negative-bit (- 9 d)))))
+                      (letter (logxor 1 (logior (negative-bit l) (negative-bit (- 5 l))))))
+                 (declare (type fixnum c d l) (type bit digit letter))
+                 (setf bad (logior bad (logxor 1 (logior digit letter))))
+                 (logand 15 (logior (logand d (- digit)) (logand (+ l 10) (- letter)))))))
+        (dotimes (i (length out))
+          (setf (aref out i) (logior (ash (nibble (char string (* 2 i))) 4)
+                                     (nibble (char string (1+ (* 2 i))))))))
+      (if (zerop bad) out (progn (wipe out) nil)))))
+
+(defun octets-to-hex (octets)
+  "Lowercase hex of OCTETS, each digit computed with arithmetic rather than a table."
+  (declare (type clempo.base:octets octets))
+  (let ((s (make-string (* 2 (length octets)))))
+    (flet ((digit (v)
+             (declare (type (integer 0 15) v))
+             ;; '0' + v, plus 39 more when v > 9 to land on 'a'.
+             (code-char (+ 48 v (logand 39 (- (negative-bit (- 9 v))))))))
+      (dotimes (i (length octets) s)
+        (let ((b (aref octets i)))
+          (setf (char s (* 2 i)) (digit (ash b -4))
+                (char s (1+ (* 2 i))) (digit (logand b 15))))))))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defun ct-name (prefix suffix)

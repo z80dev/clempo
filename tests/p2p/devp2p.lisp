@@ -100,7 +100,7 @@
 (deftest rlpx-eip8-vectors ()
   (let ((vectors (fixtures "handshake.txt")))
     (flet ((v (name) (gethash name vectors)))
-      (let ((key-a (octets->integer (v "key_a"))) (key-b (octets->integer (v "key_b"))))
+      (let ((key-a (v "key_a")) (key-b (v "key_b")))
         (dolist (name '("auth_eip8_v4" "auth_eip8_v56" "ack_eip8_v4" "ack_eip8_v57"))
           (let* ((auth-p (equal "auth" (subseq name 0 4)))
                  (packet (v (concatenate 'string name "_message")))
@@ -115,7 +115,7 @@
                   (is (octets= (v "eph_b_public") ephemeral))
                   (is (octets= (v "nonce_b") nonce))))))
         (multiple-value-bind (aes mac)
-            (rlpx::derive-secrets (octets->integer (v "eph_a")) (v "eph_b_public") (v "nonce_a") (v "nonce_b"))
+            (rlpx::derive-secrets (v "eph_a") (v "eph_b_public") (v "nonce_a") (v "nonce_b"))
           (is (octets= (v "want_aes") aes))
           (is (octets= (v "want_mac") mac))
           (let ((state (rlpx::make-frame-state aes mac (clempo.p2p-wire:xor-octets mac (v "nonce_b"))
@@ -168,7 +168,8 @@
     (clempo.eth-source:call-with-public-block-source
      (lambda (fetch) (declare (ignore fetch)) (error "accepted a loopback seed"))
      :bootnodes (list (format nil "enode://~A@127.0.0.1:30303"
-                             (octets->hex (clempo.secp256k1:private->public 1) :prefix nil)))))
+                             (octets->hex (clempo.secp256k1:private->public (integer->octets 1 32))
+                                          :prefix nil)))))
   (let ((closed (clempo.eth-source:call-with-public-block-source #'identity :discovery-timeout 0)))
     (signals error (funcall closed 50 1))))
 
@@ -191,10 +192,10 @@
                (:receipts (case value (3 (values nil t))
                                       (5 (values (list legacy typed) t)))))))
       (eth:call-with-eth-listener
-       "127.0.0.1" 0 1 #'source (lambda () (values 0 5 (svref hashes 5) 505))
+       "127.0.0.1" 0 (integer->octets 1 32) #'source (lambda () (values 0 5 (svref hashes 5) 505))
        (lambda (port)
          (dolist (v '(68 69))
-           (let ((peer (eth:eth-dial "127.0.0.1" port (clempo.secp256k1:private->public 1)
+           (let ((peer (eth:eth-dial "127.0.0.1" port (clempo.secp256k1:private->public (integer->octets 1 32))
                                      :versions (list v) :timeout 2)))
              (unwind-protect
                   (progn
@@ -244,11 +245,11 @@
                           (eth:encode-message :get-receipts 1 (make-list 1025 :initial-element hash))))))
 
 (deftest eth-listener-caps-and-drains-connections ()
-  (let ((key (clempo.secp256k1:private->public 1)) (peer nil) (genesis (make-octets 32)))
+  (let ((key (clempo.secp256k1:private->public (integer->octets 1 32))) (peer nil) (genesis (make-octets 32)))
     (unwind-protect
          (sb-ext:with-timeout 5
            (eth:call-with-eth-listener
-            "127.0.0.1" 0 1 (constantly nil) (lambda () (values 0 0 genesis 0))
+            "127.0.0.1" 0 (integer->octets 1 32) (constantly nil) (lambda () (values 0 0 genesis 0))
             (lambda (port)
               (setf peer (eth:eth-dial "127.0.0.1" port key :timeout 1))
               (signals (or p2p-error stream-error sb-bsd-sockets:socket-error)

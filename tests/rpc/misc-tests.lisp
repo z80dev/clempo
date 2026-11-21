@@ -80,7 +80,7 @@
 
 (deftest admin-peer-parameters ()
   (let* ((id (make-string 128 :initial-element #\b))
-         (key 12345)
+         (key (integer->octets 12345 32))
          (public (clempo.secp256k1:private->public key))
          (enr (clempo.rpc.state::node-enr key public (octets-of 127 0 0 1) (integer->octets-minimal 30303)
                                           (integer->octets-minimal 30303))))

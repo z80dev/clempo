@@ -5,12 +5,13 @@ System: `clempo-crypto-ec`; tests: `clempo-crypto-ec/tests`. All arithmetic is p
 ## Prime curves
 
 - `clempo.secp256k1:ecrecover(hash32,r,s,recid)` returns 64-byte x||y or NIL; scalar ranges are strict and high-s is accepted. Recovery IDs are 0..3, not 27/28. Ethereum's caller accepts only v=27/28 and subtracts 27.
-- `private->public(private-integer)` returns x||y or NIL; `pubkey->address(pub64)` returns the low 160 bits of Keccak256 as an integer.
-- `sign(hash32,private-integer)` returns r, low-s, recid using RFC6979/HMAC-SHA256. Hash inputs are already 32-byte digests; no implicit rehash.
-- `ecdh(private-integer,peer64)` validates the peer and returns the raw 32-byte shared x, not libsecp256k1's hashed ECDH output.
+- Private keys are `private-key`s: 32 big-endian octets of a scalar in [1, n), never integers. `private-key-p` checks one in constant time; `random-private-key` draws one from `clempo.io` entropy.
+- `private->public(private-key)` returns x||y or NIL; `pubkey->address(pub64)` returns the low 160 bits of Keccak256 as an integer.
+- `sign(hash32,private-key)` returns r, low-s, recid using RFC6979/HMAC-SHA256. Hash inputs are already 32-byte digests; no implicit rehash.
+- `ecdh(private-key,peer64)` validates the peer and returns the raw 32-byte shared x, not libsecp256k1's hashed ECDH output.
 - `clempo.p256:p256-verify(hash32,r,s,qx,qy)` has EIP-7951 semantics, including high-s acceptance and x modulo n comparison. `p256-verify-low-s` adds Tempo's transaction/WebAuthn requirement s<=n/2 (`crates/primitives/src/transaction/tt_signature.rs::verify_p256_signature_internal`). The caller constructs the pre_hash or WebAuthn digest.
 
-Coordinates and scalars remain plain integers at every API boundary. `define-prime-curve` generates specialised Jacobian formulas, signed-window multiplication, and batch-normalised odd tables. P256 and secp256k1 field products use unboxed 64-bit SBCL digit intrinsics with prime-specific reduction and no scratch vectors. P256 folds signed radix-2^32 coefficients; secp256k1 folds with its pseudo-Mersenne constant and additionally uses the GLV endomorphism (four approximately 128-bit components for recovery) and a fixed square-root addition chain. Odd-point tables require one field inversion.
+Public coordinates and scalars (recovery, verification) remain plain integers at the API boundary; secret scalars are octets. `define-prime-curve` generates specialised Jacobian formulas, signed-window multiplication, and batch-normalised odd tables. P256 and secp256k1 field products use unboxed 64-bit SBCL digit intrinsics with prime-specific reduction and no scratch vectors. P256 folds signed radix-2^32 coefficients; secp256k1 folds with its pseudo-Mersenne constant and additionally uses the GLV endomorphism (four approximately 128-bit components for recovery) and a fixed square-root addition chain. Odd-point tables require one field inversion.
 
 This choice was measured rather than assumed. For one million dependent 256-bit products on this Apple Silicon host:
 
@@ -22,7 +23,7 @@ This choice was measured rather than assumed. For one million dependent 256-bit 
 
 `sb-sprof` then showed multiplication, zeroing and normalisation dominating recovery. Generating the four-word product and field add/subtract/scale directly removed the temporary product and most normalisation calls. Recovery improved from 734.7 us CPU / 2.67 MB per call (initial bignum/window implementation) to 89.3 us CPU / 295.8 KB per call (10,000-call release run). SBCL 2.6.8 arm64's four-argument `%multiply-and-add` VOP can alias an input with its high output; the implementation deliberately uses the three-argument VOP plus a carry addition instead. Tests cover carries, canonical boundaries, 10,000 independent deterministic product/reduction comparisons and GLV identities.
 
-**Secret-key operations are variable-time**, including bignum inversion, signed windows and table access. This is not a side-channel-hardened signing/HSM implementation; do not expose a long-lived secret to a hostile co-resident timing observer.
+**Secret-key operations are constant-time** (signing, public keys, ECDH): they run on the fixed-width Montgomery arithmetic of `clempo.ct` (`src/crypto/hash/ct.lisp`) with masked table reads, a fixed-exponent inversion, and no secret-dependent branch, and the key never becomes a bignum. Recovery and verification, whose inputs are public, keep the fast variable-time kernels described above. `clempo-dev ct-timing` measures the secret paths.
 
 ## Pairing curves and KZG
 

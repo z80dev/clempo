@@ -21,7 +21,7 @@
 (defun run-benchmarks ()
   (let ((hash (clempo.keccak:keccak256 (string->octets "benchmark"))))
     (multiple-value-bind (r s recid)
-        (clempo.secp256k1:sign hash #x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318)
+        (clempo.secp256k1:sign hash (hex->octets "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"))
       (measure "secp256k1 ecrecover" 10000
                (lambda () (clempo.secp256k1:ecrecover hash r s recid)))))
   (let* ((gx #x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296)
@@ -48,8 +48,9 @@
                         (clempo.bls12-381:g1-encode (clempo.bls12-381:g1-mul g1 i))
                         (clempo.keccak:keccak256 (integer->octets i 32))))))
          (namespace (string->octets "tempo")) (message (string->octets "benchmark"))
-         (public (clempo.bls12-381:bls-public-key :min-sig 11))
-         (signature (clempo.bls12-381:bls-sign :min-sig 11 message :namespace namespace)))
+         (public (clempo.bls12-381:bls-public-key :min-sig (integer->octets 11 32)))
+         (signature (clempo.bls12-381:bls-sign :min-sig (integer->octets 11 32) message
+                                               :namespace namespace)))
     (measure "BLS12-381 pairing, 2 pairs (byte API)" 30
              (lambda () (clempo.bls12-381:pairing-precompile input)))
     (measure "BLS12-381 G1 MSM, 128 points (byte API)" 10

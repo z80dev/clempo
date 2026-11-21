@@ -264,7 +264,7 @@
 
 (deftest owner-transaction-envelope ()
   ;; The signed EIP-1559 envelope decodes with clempo.transactions and recovers the owner.
-  (let* ((key #x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318)
+  (let* ((key (hex->octets "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"))
          (data (octets-of 1 2 3)))
     (multiple-value-bind (r s y)
         (clempo.secp256k1:sign (clempo.keccak:keccak256 (v::encode-1559 1337 5 2 30 100000 #xcc data)) key)

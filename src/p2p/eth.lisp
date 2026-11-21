@@ -533,7 +533,7 @@ Only a bounded batch is retained; capped responses are continued from their last
                                &key (chain (tempo-eth-chain)) (versions '(69 68))
                                  (max-peers 16) on-peer on-error)
   "Listen on numeric HOST and PORT (zero selects a free port), and call THUNK
-with the bound port. KEY is a private secp256k1 scalar. STATUS returns
+with the bound port. KEY is a secp256k1 private key (32 octets). STATUS returns
 (values earliest latest head-hash timestamp) for the current local chain.
 SOURCE (:number hash) returns a canonical height or NIL; (:block height)
 returns raw block octets or NIL; (:receipts height) returns (values list known-p)

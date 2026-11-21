@@ -65,17 +65,20 @@ RootsOfUnity. Tempo reads with v0.")
 (defcwtype g2-point :write write-g2-point :read read-g2-point)
 
 (defun write-scalar (w v)
-  (invariant (and (integerp v) (<= 0 v) (< v +group-order+)) "scalar out of range")
-  (write-uint w v 32))
+  (invariant (clempo.bls12-381:fr-octets-p v) "scalar must be 32 octets below the group order")
+  (write-raw w v))
 (defun read-scalar (r)
-  "Scalar with ScalarReadCfg::AllowZero: 32 big-endian bytes below r."
-  (let ((v (read-uint r 32)))
-    (unless (< v +group-order+) (cw-fail "Scalar: not below the group order"))
+  "Scalar with ScalarReadCfg::AllowZero: 32 big-endian bytes below r, kept as octets (the
+range check is constant-time)."
+  (let ((v (read-fixed r 32)))
+    (unless (clempo.bls12-381:fr-octets-p v)
+      (clempo.ct:wipe v)
+      (cw-fail "Scalar: not below the group order"))
     v))
 (defun read-nonzero-scalar (r)
   "Scalar with ScalarReadCfg::RejectZero (private keys, shares, dealings)."
   (let ((v (read-scalar r)))
-    (when (zerop v) (cw-fail "Scalar: zero"))
+    (unless (clempo.bls12-381:fr-octets-p v :nonzero t) (cw-fail "Scalar: zero"))
     v))
 (defcwtype scalar :write write-scalar :read read-scalar)
 (defcwtype dealer-priv-msg :write write-scalar :read read-nonzero-scalar)

@@ -222,10 +222,10 @@ when the logs cannot produce one."
 
 (defun start-dealer (info seed &key share (rng #'clempo.io:random-octets))
   "Dealer::start: deal a polynomial of the round's degree whose constant is SHARE (this
-dealer's previous share, an integer or a SHARE struct; required for a reshare, random for a
+dealer's previous share, fr-octets or a SHARE struct; required for a reshare, random for a
 fresh DKG). RNG (a function of a byte count) supplies the polynomial's randomness exactly as
 Rust draws it from its CryptoRng. Returns (values dealer pub-msg priv-msgs), PRIV-MSGS
-\((player . scalar) ...)."
+\((player . scalar) ...). The polynomial's random coefficients are zeroed once dealt."
   (let ((me (clempo.ed25519:ed25519-public-key seed)))
     (unless (info-dealer-index info me)
       (dkg-fail :dealer-not-in-round "~A" (octets->hex me)))
@@ -237,6 +237,7 @@ Rust draws it from its CryptoRng. Returns (values dealer pub-msg priv-msgs), PRI
            (priv-msgs (mapcar (lambda (p) (cons p (scalar-poly-eval poly (info-player-scalar info p))))
                               (info-players info)))
            (pub-msg (make-dealer-pub-msg :commitment (commit-scalars poly))))
+      (mapc #'clempo.ct:wipe (if share (rest poly) poly))
       (values (%make-dealer :seed seed :public-key me :info info :pub-msg pub-msg
                             :results (mapcar (lambda (m) (list* (car m) :reveal (cdr m))) priv-msgs)
                             :transcript (ack-transcript (round-transcript info) me pub-msg))
@@ -288,7 +289,7 @@ and return the ack signature; NIL when this dealer was already processed. Signal
     (unless (info-dealer-index info dealer) (dkg-fail :unexpected-dealer))
     (let ((problem (dealer-pub-msg-problem info dealer pub-msg)))
       (when problem (dkg-fail problem)))
-    (unless (and (integerp priv-msg) (< 0 priv-msg +group-order+)
+    (unless (and (clempo.bls12-381:fr-octets-p priv-msg :nonzero t)
                  (dealing-matches-p pub-msg (mode-scalar (info-mode info)
                                                          (length (info-players info))
                                                          (player-index player))
@@ -348,8 +349,9 @@ matches the log's commitment, else the log's reveal of it."
     (multiple-value-bind (output weights) (reckon (player-info player) selected)
       (values output
               (make-share :index (player-index player)
-                          :private (reduce #'fr+ (if weights (mapcar #'fr* weights dealings) dealings)
-                                           :initial-value 0))))))
+                          :private (scalar-lincomb (or weights (make-list (length dealings)
+                                                                          :initial-element 1))
+                                                   dealings))))))
 
 ;;; The trusted dealer.
 
@@ -361,9 +363,10 @@ protocol. Returns (values output shares), SHARES ((player . share) ...)."
          (poly (loop repeat (quorum n) collect (random-scalar rng)))
          (shares (loop for p in players for i from 0
                        collect (cons p (make-share :index i
-                                                   :private (scalar-poly-eval poly (mode-scalar mode n i)))))))
+                                                   :private (scalar-poly-eval poly (mode-scalar mode n i))))))
+         (coefficients (commit-scalars poly)))
+    (mapc #'clempo.ct:wipe poly)
     (values (make-output :summary (funcall rng 32)
-                         :public (make-sharing :mode mode :total n
-                                               :coefficients (commit-scalars poly))
+                         :public (make-sharing :mode mode :total n :coefficients coefficients)
                          :dealers players :players players :revealed '())
             shares)))
