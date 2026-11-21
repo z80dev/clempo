@@ -11,7 +11,7 @@
 | R4 Follow | partial: certificates 20,001/20,001 consecutive mainnet finalizations across epochs 2314/2315; live `follow -certify` 91/91 at zero lag; public devp2p follow 3,350 finalized blocks byte-identical at zero lag; node binary with RPC and REPL. The executed one-hour run waits for R3 to reach the tip | `bba3dfe`, `37a9c7a`, `3ab8073` | 2026-11-21 |
 | R5 RPC | **154/154 methods, 14,287/14,287 cases (100%)**: blocks 5,126/5,126, calls 853/853, consensus 9/9, envelope 50/50, logs 508/508, state 3,542/3,542, static 119/119, success 25/25, tempo-params 101/101, traces 2,927/2,927, txs 1,027/1,027; 152/156 reference methods served. 37 debug_intermediateRoots cases whose recorded answer is the reference's own MDBX read timeout (-96000) are classed reference-timeout (every one of 19 re-sent at 1 thread answered in 60–284 s and clempo matched it; see evidence) | `4c2db4d` | 2026-11-21 |
 | R6 Validator | Sims: 4, 5 and 7 validators, three epochs each, every reshare concluded through per-node DKG managers. Live Rust devnet: one Clempo signer necessary through two reshares, two Clempo signers necessary through three | `b680aaf`, `dbe14d1` | 2026-11-21 |
-| R7 Speed | Clempo vs Rust, wall / CPU seconds: **Early** 1..1,000,000 **9.01 / 12.73 vs 58.22 / 37.25** (paired, 6.46× wall throughput); **Busy** 9,890,000..9,909,999 **22.59–22.77 / 58.14–58.87 vs 36.00 / 43.22** (historical, unpaired between clients, 1.58–1.59×); **Recent** 49,410,000..49,449,999 **29.66–32.68 / 35.30–37.46 vs 47.22 / 21.41** (unpaired, 1.44–1.59× timed wall throughput, 1.65–1.75× CPU). Clempo checks every root; Rust checks import-chunk terminal roots. [RSS, GC, commands, and profiles](docs/BENCH.md#results-on-the-shared-dev-host). | `40521c1`, `15c118d`, `b81e3e5` | 2026-11-21 |
+| R7 Speed | Clempo vs Rust, wall / CPU seconds: **Early** 1..1,000,000 **9.01 / 12.73 vs 58.22 / 37.25** (paired, 6.46× wall throughput); **Busy** 9,890,000..9,909,999 **22.59–22.77 / 58.14–58.87 vs 36.00 / 43.22** (historical, unpaired between clients, 1.58–1.59×); **Recent** 49,410,000..49,449,999 **16.76–17.24 / 22.39–22.85 vs 47.22 / 21.41** (historical Rust unpaired, 2.74–2.82× timed wall throughput, 1.05–1.07× CPU). Native P-384 is 198 µs/zero consing with scratch. Clempo checks every root; Rust checks import-chunk terminal roots. [RSS, GC, commands, and profiles](docs/BENCH.md#results-on-the-shared-dev-host). | `40521c1`, `15c118d`, `b81e3e5`, `828674f` | 2026-11-21 |
 
 ## Evidence
 
@@ -508,3 +508,16 @@ R5 = 154/154 methods, 14,287/14,287 cases (2026-11-21, `4c2db4d`): `CLEMPO_HEAP=
 - debug_stateRootWithUpdates: reth's TrieUpdates (account_nodes/removed_nodes/storage_tries) emulated from reth's walker and alloy's HashBuilder store rules over `trie:trie-node-at`; both recorded cases identical.
 - debug_executionWitness*: a recording backend (reth CacheDB's reads), proofs, codes, keys, headers (live, shape); debug_traceBlock over raw RLP; trace_replayTransaction of an unknown hash answers null.
 - Reference timeouts: 56 debug_intermediateRoots cases were recorded as the reference's `read transaction has been timed out (-96000)` (recorded at 16 threads; blocks 1..30,383,385 while blocks 20.6M+ answered). Re-sent one at a time (read-only, 1 thread) the reference answered all 19 tried in 60–284 s; those answers replaced the errors in corpus-traces.jsonl (`"rerecorded"`, raw in ~/cache/clempo/rpc/rerecord-intermediateRoots-20261121.jsonl). The remaining 37 (≈2 h of reference time) are classed `reference-timeout` in src/dev/rpcdiff.lisp: they match an answer with a result, since the reference recorded none.
+
+R7 native P-384 (`828674f`): uncached verification **1,476.173 -> 198.248 µs CPU**
+and **2,930,154 -> zero bytes/call** with caller scratch. The bounded opt-in
+positive math cache was justified by 9,030 original verifications of 1,854
+distinct tuples (6,093 potential hits in 64 slots); validity/policy/gas are
+still evaluated every time. All 280 Wycheproof and NIST vectors remain.
+Isolated Recent pairs against parent `4c2db4d` completed every comparison on
+40,000 blocks: A **29.809/30.797 s wall, 35.525/35.349 s CPU**, B
+**16.763/17.243 s wall, 22.388/22.852 s CPU**. Means improve 43.9% wall,
+36.2% CPU, 72.8% allocated bytes; peak RSS/GC rose (reported in
+[BENCH](docs/BENCH.md#native-p-384-and-repeated-nitro-signatures)).
+Sampled inclusive P384 share fell 37.3% -> 0.8%. Evidence:
+`~/scratch/clempo/p384/recent-{A1,A2,B1,B2}/replay.json`.

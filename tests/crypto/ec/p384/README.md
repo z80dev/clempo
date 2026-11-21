@@ -18,6 +18,19 @@ Use `speed.lisp` in this directory for the uncached arithmetic microbenchmark; i
 
 The release native kernel measured **198.248 µs CPU / 198.261 µs wall, zero bytes consed** over 1,000 uncached calls with scratch (7.45× less CPU than the generic baseline). A first full-product Montgomery version took 470.645 µs; carry-safe seven-word CIOS plus register-constrained word MACs reduced it to 248.148 µs. Binary inversion and special all-ones modulus products reduced width-8 G to 205.480 µs; width 12 measured 200.839 µs and width 14 measured 198.248 µs. The final read-only G table is 589,824 bytes shared across contexts; mutable arithmetic storage remains caller-owned. These are CPU and wall observations on the shared Apple Silicon host, not cache-hit timings.
 
+Recent isolation (`828674f` versus parent `4c2db4d`, B-A-A-B order): B wall
+16.763/17.243 s, CPU 22.388/22.852 s; A wall 29.809/30.797 s, CPU
+35.525/35.349 s. Every root, gas, receipt and bloom matched for all 40,000
+blocks (18,733 transactions, 3,768,403,621 gas). Mean wall/CPU fell 43.9%/36.2%;
+allocation fell 72.8%, while peak RSS and GC increased in these observations.
+Full process/replay metrics are in [BENCH](../../../../docs/BENCH.md#native-p-384-and-repeated-nitro-signatures)
+and `~/scratch/clempo/p384/recent-{A1,A2,B1,B2}/replay.json`.
+
+The real portable field source branch was also recompiled with `:arm64`
+disabled; all 28 P384 tests passed, including uncached, cold-cache and warm-cache
+zero-consing properties. This tests that arithmetic path on the host, not a
+claim of execution on a different CPU architecture.
+
 ## Fixtures
 
 - Every one of the 280 C2SP Wycheproof P384/SHA384/P1363 records is retained in `wycheproof.sexp`, with original tcId and wire-validity expectation, public coordinates, r/s and the SHA-384 digest. Source: <https://github.com/C2SP/wycheproof/blob/main/testvectors_v1/ecdsa_secp384r1_sha384_p1363_test.json>, retrieved 2026-11-21; raw JSON SHA-256 `e27344bf6daae75fa19663620883809f91c79fc4b4420eff9eae8036b34476be`. Messages were hashed independently with Python standard-library `hashlib.sha384` while preparing fixture data, not at test/runtime. Signatures are split into equal-width halves, preserving oversized scalars rather than truncating them. No record or original expected result was removed or rewritten.
@@ -25,4 +38,4 @@ The release native kernel measured **198.248 µs CPU / 198.261 µs wall, zero by
 - Embedded known answers are the NIST P-384 SHA-384 `sample` and `test` signatures and public key from [RFC6979 appendix A.2.6](https://www.rfc-editor.org/rfc/rfc6979#appendix-A.2.6). Their already-computed digests were independently recorded with `hashlib.sha384`.
 - Curve parameters are [SEC 2 secp384r1](https://www.secg.org/sec2-v2.pdf), the NIST P-384 curve. No reference implementation code was incorporated.
 
-Tests exercise every Wycheproof record, high-/low-s twins of valid signatures, both RFC known answers, modified signatures/digests, and scalar/key/digest-length boundaries. Run through `scripts/verify.sh` or load `clempo-crypto-ec/tests` and run tests with package prefix `CLEMPO.P384.TESTS`.
+Tests exercise every Wycheproof record, high-/low-s twins of valid signatures, both RFC known answers, modified signatures/digests, scalar/key/digest-length boundaries, native carry/alias/group properties, and positive-cache isolation/mutation/eviction cases. Run through `scripts/verify.sh` or load `clempo-crypto-ec/tests` and run tests with package prefix `CLEMPO.P384` (including the field-test package).

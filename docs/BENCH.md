@@ -22,7 +22,7 @@ stages. The timings compare these two workflows, not isolated executors.
 |---|---:|---:|---:|---:|---:|---|
 | Early | 9.01 / 12.73 | 2.33 / 0.083 | 58.22 / 37.25 | 7.22 | 110,986 / 17,176 | 6.46× wall throughput, paired |
 | Busy (`b81e3e5`) | 22.59–22.77 / 58.14–58.87 | 3.1 / 1.39–1.50 | 36.00 / 43.22 | 3.89 | 878–885 / 556 | 1.58–1.59× wall throughput, historical and unpaired between clients |
-| Recent (`b81e3e5`) | 29.66–32.68 / 35.30–37.46 | 5.58–7.11 / 2.57–4.04 | 47.22 / 21.41 | 3.72 | 1,224–1,349 / 847 | 1.44–1.59× wall throughput, historical Rust baseline (unpaired) |
+| Recent (`828674f`) | 16.76–17.24 / 22.39–22.85 | 6.42–7.31 / 2.79–3.41 | 47.22 / 21.41 | 3.72 | 2,320–2,386 / 847 | 2.74–2.82× wall throughput, historical Rust baseline (unpaired); CPU 1.05–1.07× Rust |
 
 RSS is in decimal GB; the Rust runner has no GC metric. No other benchmark ran
 during the new scored trials. The reference node and the certified Clempo
@@ -66,6 +66,52 @@ After `b81e3e5` (batched pipeline handoff, bulk-built storage tries; paired agai
 trie builds fell to 5.0% and the pipeline notify to 6.2%; P-384 is 37%
 (`~/scratch/clempo/busy/es/recent/prof-17b8646.txt`).
 Early was faster in both wall and CPU and needed no diagnostic profile.
+
+### Native P-384 and repeated Nitro signatures
+
+Two alternating pairs (B, A, A, B) isolate `828674f` from its parent `4c2db4d`
+on the same host, with no overlapping benchmark. All four used the exact parent
+`~/scratch/clempo/bench/r7-early-recent/recent-parent`, persistent WAL and eight
+recovery participants. Every gas/receipt/bloom/state-root comparison passed:
+40,000 blocks, 18,733 transactions, 3,768,403,621 gas through 49,449,999.
+
+| Arm | Replay wall s | Replay CPU s | Allocated GB | Peak RSS GB | GC s |
+|---|---:|---:|---:|---:|---:|
+| B1, native P-384 | 16.763226 | 22.387755 | 9.874 | 6.418 | 2.792 |
+| A1, generic P-384 | 29.809454 | 35.525380 | 36.297 | 5.587 | 2.585 |
+| A2, generic P-384 | 30.796571 | 35.349221 | 36.297 | 5.580 | 2.545 |
+| B2, native P-384 | 17.243408 | 22.851747 | 9.875 | 7.306 | 3.411 |
+
+Mean replay wall falls **30.303 -> 17.003 s (43.9%)**, CPU
+**35.437 -> 22.620 s (36.2%)**, allocation **36.297 -> 9.875 GB (72.8%)**.
+Peak RSS and GC increased in these observations despite lower allocation;
+they must not be inferred from the consing reduction. JSONs and process logs
+are under `~/scratch/clempo/p384/recent-{A1,A2,B1,B2}/`.
+
+The uncached RFC6979 microbenchmark (`tests/crypto/ec/p384/speed.lisp`) measures
+**1,476.173 -> 198.248 µs CPU**, **1,475.947 -> 198.261 µs wall** and
+**2,930,154 -> zero bytes per call** with scratch. It does not memoize its
+repeated signature. The read-only width-14 G table is 589,824 bytes; six-word
+Montgomery arithmetic and native binary inverses keep hot intermediates unboxed.
+
+The separate repetition diagnostic still executed all original verifications:
+9,030 calls, 1,854 distinct complete (pubkey,digest,r,s) tuples, and identical
+answers on every repeat. A bounded positive-only 64-entry FIFO would hit 6,093
+times (67.5%). Production opts into that cache only in private replay contexts.
+Digest bytes are copied; certificate expiry, pinned roots, path/policy checks
+and gas are never cached. See [contracts and vectors](../tests/crypto/ec/p384/README.md).
+
+A separate post-change all-thread 5-ms CPU profile records **28/3,361 samples
+(0.8%) inclusive P384-VERIFY**, versus **1,789/4,801 (37.3%)** in the prior
+`prof-17b8646.txt`. It completed the full range but is excluded from throughput
+results. Evidence: `~/scratch/clempo/p384/recent-profile/{profile.txt,replay.json}`.
+The profile command adds `-profile FILE -profile-mode cpu` to:
+
+```sh
+CLEMPO_BUILD=release bin/clempo-dev bench -range recent \
+  -parent ~/scratch/clempo/bench/r7-early-recent/recent-parent \
+  -datadir FRESH_DIR -result FILE
+```
 
 ## Clempo
 
