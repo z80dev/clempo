@@ -1,6 +1,6 @@
 (defpackage #:clempo.node
   (:use #:cl #:clempo.base)
-  (:local-nicknames (#:follow #:clempo.follow)
+  (:local-nicknames (#:follow #:clempo.follow) (#:certs #:clempo.follow.certs)
                     (#:rpc #:clempo.jsonrpc) (#:json #:clempo.json)
                     (#:backend #:clempo.rpc.chain) (#:server #:clempo.rpcserver)
                     (#:archive #:clempo.archive) (#:store #:clempo.store)
@@ -133,7 +133,7 @@
 (defun run-node (datadir &key (upstream (rpc:local-rpc-url))
                            (archive-dir (archive:archive-dir))
                            (rpc-port 8545) (bind "127.0.0.1")
-                           certifier
+                           certify (cert-rpc rpc:+mainnet-rpc+)
                            repl-port repl-token-file (checkpoint-interval 0)
                            (batch-size 32) once seconds)
   "Open a checked mainnet replay datadir, follow it with execution, and serve committed state.
@@ -158,6 +158,8 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
                   (initial-number (follow:head-number head))
                   (initial-target (if (> initial-number (follow:head-number tip))
                                       (follow:rpc-head :latest :url upstream) tip))
+                  (certifier (when certify (certs:make-mainnet-certifier head :upstream upstream
+                                                                             :url cert-rpc)))
                   (follower (follow:make-follower head :rpc-url upstream :executor node :certifier certifier
                                                        :archive-dir archive-dir :use-archive t :write-archive t
                                                        :batch-size batch-size))
@@ -211,7 +213,7 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
 
 (defun node-usage ()
   (format t "Usage: clempo --datadir DIR [--upstream URL] [--archive DIR]~%
-              [--rpc-port N] [--bind IP]~%
+              [--rpc-port N] [--bind IP] [--certify] [--cert-rpc URL]~%
               [--repl-port N --repl-token-file FILE] [--once | --seconds N]~%
               [--batch N] [--checkpoint-interval N]~%"))
 
@@ -220,10 +222,11 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
         while words
         for flag = (pop words)
         do (cond ((string= flag "--help") (return-from node-options :help))
+                 ((string= flag "--certify") (setf (getf options :certify) t))
                  ((string= flag "--once") (setf (getf options :once) t))
                  (t (let* ((entry (assoc flag '(("--datadir" :datadir) ("--upstream" :upstream)
                                                   ("--archive" :archive-dir) ("--rpc-port" :rpc-port t)
-                                                  ("--bind" :bind)
+                                                  ("--bind" :bind) ("--cert-rpc" :cert-rpc)
                                                   ("--repl-port" :repl-port t) ("--repl-token-file" :repl-token-file)
                                                   ("--seconds" :seconds t) ("--batch" :batch-size t)
                                                   ("--checkpoint-interval" :checkpoint-interval t))

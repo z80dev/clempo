@@ -1,7 +1,7 @@
 (in-package #:clempo.dev)
 
 (defcommand "follow" (args)
-  "verify upstream blocks and follow live: follow [-last N] [-upstream URL] [-once | -seconds N] [-archive DIR | -no-archive] [-json]"
+  "follow [-last N] [-upstream URL] [-certify [-cert-rpc URL]] [-once | -seconds N] [-archive DIR | -no-archive] [-json]"
   (let* ((url (arg args :upstream (clempo.jsonrpc:local-rpc-url)))
          (tip (clempo.follow:rpc-head :latest :url url))
          (distance (arg-int args :last 1000))
@@ -14,15 +14,19 @@
     (let* ((number (max 0 (- (clempo.follow:head-number tip) distance)))
            (anchor (if (= number (clempo.follow:head-number tip)) tip
                        (clempo.follow:rpc-head number :url url)))
+           (certifier (when (arg-flag args :certify)
+                        (clempo.follow.certs:make-mainnet-certifier
+                         anchor :upstream url
+                         :url (arg args :cert-rpc clempo.jsonrpc:+mainnet-rpc+))))
            (follower (clempo.follow:make-follower
-                      anchor :rpc-url url :archive-dir archive
+                      anchor :rpc-url url :archive-dir archive :certifier certifier
                       :write-archive (not (arg-flag args :no-archive))
                       :batch-size (arg-int args :batch 32)))
            (next-report start)
            (max-lag 0)
            (caught-up nil))
-      (log-line "follow: anchor ~D, initial tip ~D (headers and bodies, no execution)"
-                number (clempo.follow:head-number tip))
+      (log-line "follow: anchor ~D, initial tip ~D (headers and bodies~:[~; and certificates~], no execution)"
+                number (clempo.follow:head-number tip) certifier)
       (let* ((head (clempo.follow:follow-live
                     follower :tip tip :once once :seconds seconds
                     :on-poll (lambda (f remote)

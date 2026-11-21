@@ -140,6 +140,16 @@ in 1.312 s and wrote two complete 10,000-block chunks. These runs checked
 canonical linkage and transaction, ommer, and withdrawal roots; they did
 not execute blocks or check finalization.
 
+`CLEMPO_BUILD=release CLEMPO_RPC=http://127.0.0.1:8545 bin/clempo-dev follow -certify -last 64 -seconds 12 -no-archive -json`
+verified all 91 real mainnet finalization certificates through block
+50,062,027, with zero sampled tip lag. Raw blocks came from the private
+node; certificates came from `https://rpc.tempo.xyz`. Separately, `bin/clempo`
+reopened a verified replay datadir at block 4, executed through a pinned
+canonical block 8, and served the committed hash, state root, and a pathUSD
+balance that matched the Rust RPC. The standalone image and authenticated
+loopback REPL were tested. These are independent checks; the one-hour
+executed-and-certified live run still depends on R3 reaching the tip.
+
 Crypto EC (2026-11-21): secp256k1 recovery/signing/ECDH, EIP-7951 P256,
 BN254 EIP-196/197, all seven BLS EIP-2537 operations, RFC9380, commonware
 MinSig/MinPk/threshold signatures, KZG point evaluation and modular

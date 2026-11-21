@@ -1,10 +1,12 @@
 (defsystem "clempo-sync"
   :description "Upstream JSON-RPC, raw block archive and authenticated follower"
-  :depends-on ("clempo-base" "clempo-io" "clempo-codec" "clempo-types")
+  :depends-on ("clempo-base" "clempo-io" "clempo-codec" "clempo-types"
+               "clempo-consensus" "clempo-tempo-chainspec")
   :serial t
   :components ((:file "jsonrpc")
                (:file "archive")
-               (:file "follow")))
+               (:file "follow")
+               (:file "finalizations")))
 
 (defsystem "clempo-sync/tests"
   :depends-on ("clempo-sync")
