@@ -530,7 +530,7 @@ Returns (values cblock state)."
   "debug_executionWitness by block hash"
   (execution-witness (known-block (list :hash hash))))
 
-(defrpc "debug_intermediateRoots" ((hash hash) (options raw :optional t))
+(defrpc "debug_intermediateRoots" ((hash hash) (options call-tracing-options :optional t))
   "the state root after each transaction of a block"
   (parent-state (known-block (list :hash hash)) "debug_intermediateRoots"))
 
@@ -564,8 +564,233 @@ Returns (values cblock state)."
           (blocks:decode-block raw))
       (clempo.rlp:rlp-error (e) (fail (rlp-error-text e))))))
 
-(defrpc "debug_traceBlock" ((raw hex-data) (options raw :optional t))
+(defrpc "debug_traceBlock" ((raw hex-data) (options tracing-options :optional t))
   "trace every transaction of an RLP-encoded block on its parent's state"
-  (let ((block (decode-raw-block raw)))
-    (state-at (list :hash (h:header-parent-hash (blocks:block-header block))))
+  (let* ((block (decode-raw-block raw))
+         (parent (list :hash (h:header-parent-hash (blocks:block-header block)))))
+    (state-block parent)
+    (check-tracer options)
+    (state-at parent)
     (replay-unavailable "debug_traceBlock")))
+
+;;; Tracing: geth's debug_trace* and parity's trace_* families. Parameters and every error that
+;;; depends only on the request are answered here; the replay itself needs the executor's
+;;; overlay replay and EvmAgent's tracers.
+
+(defun tracing-unavailable (what)
+  (internal-error (format nil "~A: tracing needs the executor's overlay replay and EvmAgent's tracers, which have not landed yet" what)))
+
+(defparam plain-u64 (src) "Rust u64 from a JSON number"
+  (if (eq (serde:peek-kind src) :number)
+      (let ((n (serde:read-number src)))
+        (if (and (integerp n) (<= 0 n +u64-max+)) n
+            (serde:serde-fail-here src "invalid value: ~A, expected u64" (number-unexpected n))))
+      (serde:invalid-type src "u64")))
+
+(defparam tracer-type (src) "alloy GethDebugTracerType (untagged: a built-in tracer name or JavaScript)"
+  (if (eq (serde:peek-kind src) :string)
+      (serde:read-string src)
+      (progn (serde:skip-value src)
+             (serde:serde-fail-here src "data did not match any variant of untagged enum GethDebugTracerType"))))
+
+(defparameter +tracing-option-fields+
+  '((:tracer "tracer" tracer-type) (:tracer-config "tracerConfig" raw) (:timeout "timeout" string)))
+
+(defparameter +default-tracing-fields+
+  '((:enable-memory "enableMemory" bool) (:disable-memory "disableMemory" bool)
+    (:disable-stack "disableStack" bool) (:disable-storage "disableStorage" bool)
+    (:enable-return-data "enableReturnData" bool) (:disable-return-data "disableReturnData" bool)
+    (:debug "debug" bool) (:limit "limit" plain-u64))
+  "alloy GethDefaultTracingOptions, flattened into the tracing options.")
+
+(defun content-tracing-options (src end entries)
+  "GethDebugTracingOptions from buffered ENTRIES (it is itself flattened in the call options)."
+  (multiple-value-bind (options left) (read-content-fields src end entries +tracing-option-fields+)
+    (append options (read-content-fields src end left +default-tracing-fields+))))
+
+(defparam tracing-options (src) "alloy GethDebugTracingOptions as a plist"
+  (let ((options '()) (seen '()))
+    (multiple-value-bind (rest end)
+        (read-flattened src "struct GethDebugTracingOptions" (mapcar #'second +tracing-option-fields+)
+                        (lambda (key src)
+                          (destructuring-bind (kw nil type) (find key +tracing-option-fields+ :key #'second :test #'string=)
+                            (when (member kw seen) (serde:serde-fail-after-key src "duplicate field `~A`" key))
+                            (push kw seen)
+                            (unless (and (not (eq kw :tracer-config)) (serde:read-null-p src))
+                              (setf (getf options kw) (read-param type src))))))
+      (append options (read-content-fields src end rest +default-tracing-fields+)))))
+
+(defparam call-tracing-options (src) "alloy GethDebugTracingCallOptions as a plist"
+  (let ((options '()) (seen '())
+        (fields '(("stateOverrides" :state-overrides state-override) ("blockOverrides" :block-overrides block-overrides)
+                  ("txIndex" :tx-index q64))))
+    (multiple-value-bind (rest end)
+        (read-flattened src "struct GethDebugTracingCallOptions" (mapcar #'first fields)
+                        (lambda (key src)
+                          (destructuring-bind (kw type) (rest (assoc key fields :test #'string=))
+                            (when (member kw seen) (serde:serde-fail-after-key src "duplicate field `~A`" key))
+                            (push kw seen)
+                            (unless (serde:read-null-p src)
+                              (setf (getf options kw) (read-param type src))))))
+      (append options (content-tracing-options src end rest)))))
+
+(defparameter +builtin-tracers+
+  '("4byteTracer" "callTracer" "flatCallTracer" "prestateTracer" "stateGasTracer" "noopTracer"
+    "muxTracer" "erc7562Tracer"))
+
+(defparameter +tracer-config-fields+
+  '(("callTracer" "onlyTopCall" "withLog")
+    ("prestateTracer" "diffMode" "disableCode" "disableStorage")
+    ("flatCallTracer" "convertParityErrors" "includePrecompiles"))
+  "The boolean fields of each tracer's config (alloy CallConfig, PreStateConfig, FlatCallConfig).")
+
+(defun invalid-tracer-config () (rpc-fail +invalid-params+ "invalid tracer config"))
+
+(defun check-tracer-config (name config)
+  "evm2-inspectors DebugInspector::new's config parsing for tracer NAME."
+  (let ((fields (rest (assoc name +tracer-config-fields+ :test #'string=))))
+    (cond ((or (null config) (eq config :null)))
+          (fields
+           (unless (json:jobject-p config) (invalid-tracer-config))
+           (loop for (k . v) in (cdr config)
+                 when (and (member k fields :test #'string=) (not (member v '(:true :false :null))))
+                   do (invalid-tracer-config)))
+          ((string= name "muxTracer")
+           (unless (json:jobject-p config) (invalid-tracer-config))
+           (loop for (k . v) in (cdr config)
+                 do (unless (member k +builtin-tracers+ :test #'string=) (invalid-tracer-config))
+                    (check-tracer-config k v))))))
+
+(defun check-tracer (options)
+  "Reject what DebugInspector::new rejects before any execution."
+  (let ((name (getf options :tracer)))
+    (when (and name (plusp (length name)))
+      (cond ((member name +builtin-tracers+ :test #'string=)
+             (check-tracer-config name (getf options :tracer-config)))
+            (t (internal-error "JS Tracer is not enabled"))))))
+
+(defparam trace-types (src) "HashSet<parity TraceType>: a list of :trace :vm-trace :state-diff"
+  (let ((out '()))
+    (serde:do-array (i src)
+      (if (eq (serde:peek-kind src) :string)
+          (let* ((s (serde:read-string src))
+                 (kind (cdr (assoc s '(("trace" . :trace) ("vmTrace" . :vm-trace) ("stateDiff" . :state-diff))
+                                   :test #'string=))))
+            (unless kind
+              (serde:serde-fail-here src "unknown variant `~A`, expected one of `trace`, `vmTrace`, `stateDiff`" s))
+            (pushnew kind out))
+          (progn (serde:peek src) (incf (serde:src-pos src)) (serde:serde-fail-here src "expected value"))))
+    (nreverse out)))
+
+(defun tx-block (hash)
+  "(values cblock index) of a transaction at or below the head, or NIL."
+  (multiple-value-bind (n i) (chain:backend-tx-location chain:*backend* hash)
+    (when (and n (<= n chain:*head*)) (values (chain-block n) i))))
+
+(defun tracing-block-not-found (id)
+  "reth TracingBlockNotFound: code -32000, the hash or number without a prefix word."
+  (rpc-fail -32000 (format nil "block ~A not found"
+                           (if (hash-id-p* id) (hex32 (second id)) (block-id-text id)))))
+
+(defun hash-id-p* (id) (and (consp id) (eq (first id) :hash)))
+
+(defun trace-block-replay (b options what)
+  "debug_traceBlockBy*: the genesis block has no parent state to trace on."
+  (when (zerop (cblock-number b)) (rpc-fail -32000 "genesis is not traceable"))
+  (check-tracer options)
+  (state-at (1- (cblock-number b)))
+  (tracing-unavailable what))
+
+(defrpc "debug_traceTransaction" ((hash hash) (options tracing-options :optional t))
+  "replay a transaction under a geth tracer"
+  (multiple-value-bind (b i) (tx-block hash)
+    (declare (ignore i))
+    (unless b (rpc-fail -32000 "transaction not found"))
+    (check-tracer options)
+    (state-at (1- (cblock-number b)))
+    (tracing-unavailable "debug_traceTransaction")))
+
+(defrpc "debug_traceBlockByNumber" ((id block-number-or-tag) (options tracing-options :optional t))
+  "replay a block under a geth tracer"
+  (let* ((n (block-id-number id))
+         (b (and n (<= n chain:*head*) (chain-block n))))
+    (unless b (tracing-block-not-found id))
+    (trace-block-replay b options "debug_traceBlockByNumber")))
+
+(defrpc "debug_traceBlockByHash" ((hash hash) (options tracing-options :optional t))
+  "replay a block under a geth tracer"
+  (let ((b (let ((n (block-id-number (list :hash hash)))) (and n (<= n chain:*head*) (chain-block n)))))
+    (unless b (tracing-block-not-found (list :hash hash)))
+    (trace-block-replay b options "debug_traceBlockByHash")))
+
+(defrpc "debug_traceCall" ((request tx-request) (block block-id :optional t)
+                           (options call-tracing-options :optional t))
+  "trace a call on the state after BLOCK"
+  (let ((b (call-block block)))
+    (check-state-overrides (getf options :state-overrides))
+    (convert-request request (or (getf (getf options :block-overrides) :base-fee) (header-base-fee b)))
+    (check-tracer options)
+    (state-at (list :hash (cblock-hash b)))
+    (tracing-unavailable "debug_traceCall")))
+
+(defrpc "debug_traceCallMany" ((bundles bundles) (context state-context :optional t)
+                               (options call-tracing-options :optional t))
+  "trace bundles of calls one after another at a block position"
+  (when (null bundles) (rpc-fail +invalid-params+ "bundles are empty."))
+  (let* ((target (or (getf context :block-number) :latest))
+         (n (block-id-number target)))
+    (unless (and n (<= n chain:*head*)) (header-not-found target))
+    (check-tracer options)
+    (state-at n)
+    (tracing-unavailable "debug_traceCallMany")))
+
+(defrpc "trace_call" ((request tx-request) (types trace-types) (block block-id :optional t)
+                      (state-overrides state-override :optional t) (block-overrides block-overrides :optional t))
+  "parity traces of a call"
+  (prepare-call request block "trace_call" :state-overrides state-overrides :block-overrides block-overrides)
+  (tracing-unavailable "trace_call"))
+
+(defparam traced-call (src) "(TxReq, HashSet<TraceType>), a JSON pair"
+  (let ((request nil) (types nil) (n 0))
+    (serde:do-array (j src :expected "a tuple of size 2")
+      (case j
+        (0 (setf request (read-param 'tx-request src)))
+        (1 (setf types (read-param 'trace-types src)))
+        (t (serde:peek src) (incf (serde:src-pos src)) (serde:serde-fail-here src "trailing characters")))
+      (setf n (1+ j)))
+    (when (< n 2) (serde:serde-fail-here src "invalid length ~D, expected a tuple of size 2" n))
+    (cons request types)))
+(defvec traced-calls traced-call)
+
+(defrpc "trace_callMany" ((calls traced-calls) (block block-id :optional t))
+  "parity traces of calls executed one after another"
+  (let ((b (call-block block)))
+    (state-at (list :hash (cblock-hash b)))
+    (tracing-unavailable "trace_callMany")))
+
+(defmacro deftx-trace (name (&rest params) doc)
+  "A trace_* method over one transaction: null for an unknown hash."
+  `(defrpc ,name ((hash hash) ,@params) ,doc
+     (let ((b (tx-block hash)))
+       (if (null b)
+           :null
+           (progn (state-at (1- (cblock-number b)))
+                  (tracing-unavailable ,name))))))
+
+(deftx-trace "trace_transaction" () "parity traces of a transaction")
+(deftx-trace "trace_get" ((indices any)) "one parity trace of a transaction by trace address")
+(deftx-trace "trace_replayTransaction" ((types trace-types)) "replay a transaction with parity tracers")
+(deftx-trace "trace_transactionOpcodeGas" () "opcode counts and gas of a transaction")
+
+(defmacro defblock-trace (name (&rest params) doc)
+  "A trace_* method over one block: \"block not found\" for an unknown block."
+  `(defrpc ,name ((id block-id) ,@params) ,doc
+     (let* ((n (block-id-number id))
+            (b (and n (<= n chain:*head*) (chain-block n))))
+       (unless b (header-not-found id))
+       (state-at (max 0 (1- (cblock-number b))))
+       (tracing-unavailable ,name))))
+
+(defblock-trace "trace_block" () "parity traces of every transaction of a block")
+(defblock-trace "trace_replayBlockTransactions" ((types trace-types)) "replay a block with parity tracers")
+(defblock-trace "trace_blockOpcodeGas" () "opcode counts and gas of every transaction of a block")

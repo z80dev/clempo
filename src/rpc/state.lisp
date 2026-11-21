@@ -333,3 +333,60 @@ quantity."
                   (progn (state-block block) (make-octets 0))
                   (code-by-hash (state-at block) hash))))
     (if code (hexbytes code) :null)))
+
+;;; This node: admin_nodeInfo describes clempo itself. Its devp2p identity is a secp256k1 key
+;;; made for the process (as reth makes one for a datadir without a key file); the RPC server
+;;; runs no devp2p listener, so it reports loopback with ports 0.
+
+(defvar *node-key* nil "This process's devp2p secret key, made on first use.")
+(defvar *node-key-lock* (sb-thread:make-mutex :name "node key"))
+
+(defun node-key ()
+  (sb-thread:with-mutex (*node-key-lock*)
+    (or *node-key*
+        (setf *node-key* (1+ (clempo.io:random-below (1- clempo.secp256k1:+secp256k1-n+)))))))
+
+(defun compressed-key (public)
+  (let ((y (octets->integer public :start 32 :end 64)))
+    (octets-concat (octets-of (if (evenp y) 2 3)) (subseq public 0 32))))
+
+(defun base64url (octets)
+  (let ((s (clempo.websocket:base64-encode octets)))
+    (substitute #\_ #\/ (substitute #\- #\+ (string-right-trim "=" s)))))
+
+(defun node-enr (key public ip tcp udp)
+  "EIP-778 record (sequence 1, identity scheme v4) signed with KEY."
+  (let* ((pairs (list (string->octets "id") (string->octets "v4")
+                      (string->octets "ip") ip
+                      (string->octets "secp256k1") (compressed-key public)
+                      (string->octets "tcp") tcp
+                      (string->octets "udp") udp))
+         (content (cons 1 pairs)))
+    (multiple-value-bind (r s) (clempo.secp256k1:sign (clempo.keccak:keccak256 (clempo.rlp:rlp-encode content)) key)
+      (concatenate 'string "enr:"
+                   (base64url (clempo.rlp:rlp-encode
+                               (cons (octets-concat (integer->octets r 32) (integer->octets s 32)) content)))))))
+
+(defun chain-config-json ()
+  "debug_chainConfig's answer, the chain config reth reports in the node's eth protocol info."
+  (funcall (clempo.rpc::rpc-method-function (find-method* "debug_chainConfig")) nil))
+
+(defrpc "admin_nodeInfo" () "clempo's own node record"
+  (let* ((key (node-key))
+         (public (clempo.secp256k1:private->public key))
+         (ip "127.0.0.1")
+         (genesis (chain-block 0))
+         (head (chain-block chain:*head*)))
+    (json:jobject "id" (octets->hex (clempo.keccak:keccak256 public) :prefix nil)
+                  "name" clempo.rpc.eth:*client-version*
+                  "enode" (format nil "enode://~A@~A:0" (octets->hex public :prefix nil) ip)
+                  "enr" (node-enr key public (octets-of 127 0 0 1) 0 0)
+                  "ip" ip
+                  "ports" (json:jobject "discovery" 0 "listener" 0)
+                  "listenAddr" (format nil "~A:0" ip)
+                  "protocols" (json:jobject
+                               "eth" (json:jobject "network" (chain:backend-chain-id chain:*backend*)
+                                                   "difficulty" :null
+                                                   "genesis" (if genesis (hex32 (cblock-hash genesis)) :null)
+                                                   "config" (chain-config-json)
+                                                   "head" (if head (hex32 (cblock-hash head)) :null))))))
