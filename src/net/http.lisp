@@ -166,7 +166,8 @@ http://, clempo.tls for https://. Connects and reads time out, and responses are
     (loop for (k . v) in headers
           when (find-if (lambda (c) (member c '(#\Return #\Newline))) (concatenate 'string k v))
             do (http-fail "header ~S contains a line break" k))
-    (let ((key (format nil "~A://~A:~D" scheme host port))
+    ;; a pooled stream keeps the read timeout it was opened with: reuse it only under that one
+    (let ((key (format nil "~A://~A:~D ~A" scheme host port *read-timeout*))
           (head (string->octets
                  (with-output-to-string (h)
                    (format h "~A ~A HTTP/1.1~C~CHost: ~A~@[:~D~]~C~C" method path

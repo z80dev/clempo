@@ -238,24 +238,45 @@ answers compare by value, their map orders aside (WITNESS-EQUAL)."
 
 (defun verified-case-p (c) (equal "verified" (clempo.json:jget c "class")))
 
+(defparameter *trie-cursor-methods*
+  '("debug_intermediateRoots" "debug_executionWitness" "debug_executionWitnessByBlockHash"
+    "debug_stateRootWithUpdates")
+  "Methods clempo answers on its one trie-state cursor (clempo.rpc.tries:with-trie-state), one
+caller at a time. rpcdiff replays them one after another, with an hour's read timeout. At 16
+threads they queue on the cursor past the client's 120 s timeout (12 of the success suite's 48
+value cases, all client timeouts, on 54fc44d). The reference behaves the same way: at 16
+recording threads it failed 56 debug_intermediateRoots cases with MDBX's read-transaction
+timeout (-96000), and answered each one when it was re-sent alone. Every answer is still
+compared by value; only the concurrency differs.")
+
+(defun trie-cursor-case-p (c)
+  (member (clempo.json:jget c "method") *trie-cursor-methods* :test #'string=))
+
+(defun replay-case (url server c)
+  "(list c status response matches) for the non-verified case C."
+  (multiple-value-bind (status response)
+      (cond ((and (not server) (unsafe-probe-p (clempo.json:jget c "method")))
+             (values nil "mutation not sent to external URL"))
+            ((equal "ws" (clempo.json:jget c "transport"))
+             (handler-case (replay-ws-case url server c)
+               (error (e) (values nil (princ-to-string e)))))
+            ((clempo.json:jget c "filterSetup")
+             (call-with-filter url (clempo.json:jget c "filterSetup") (clempo.json:jget c "request")))
+            (t (post-raw url (clempo.json:jget c "request") :retries 0)))
+    (list c status response (case-matches c status response))))
+
 (defun run-rpcdiff (url server cases &key (threads 16))
-  "Replay CASES. Mutating requests are only sent to the server rpcdiff owns. Verified proof
-cases run last, against the owned server with its proof window opened (the reference's
-window is 0; an external URL keeps its own and fails them)."
+  "Replay CASES. Mutating requests are only sent to the server rpcdiff owns. Cases of
+*TRIE-CURSOR-METHODS* run after the others, one at a time. Verified proof cases run last,
+against the owned server with its proof window opened (the reference's window is 0; an
+external URL keeps its own and fails them)."
   (append
-   (parallel-map
-    (lambda (c)
-      (multiple-value-bind (status response)
-          (cond ((and (not server) (unsafe-probe-p (clempo.json:jget c "method")))
-                 (values nil "mutation not sent to external URL"))
-                ((equal "ws" (clempo.json:jget c "transport"))
-                 (handler-case (replay-ws-case url server c)
-                   (error (e) (values nil (princ-to-string e)))))
-                ((clempo.json:jget c "filterSetup")
-                 (call-with-filter url (clempo.json:jget c "filterSetup") (clempo.json:jget c "request")))
-                (t (post-raw url (clempo.json:jget c "request") :retries 0)))
-        (list c status response (case-matches c status response))))
-    (remove-if #'verified-case-p cases) threads)
+   (parallel-map (lambda (c) (replay-case url server c))
+                 (remove-if (lambda (c) (or (verified-case-p c) (trie-cursor-case-p c))) cases)
+                 threads)
+   (let ((clempo.http:*read-timeout* 3600))
+     (mapcar (lambda (c) (replay-case url server c))
+             (remove-if-not #'trie-cursor-case-p (remove-if #'verified-case-p cases))))
    (let ((verified (remove-if-not #'verified-case-p cases))
          (window clempo.rpc.state:*eth-proof-window*))
      (unwind-protect
