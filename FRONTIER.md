@@ -8,7 +8,7 @@
 | R3 Replay | **50,049,999** (the archive tip; goempo's frontier 49,399,999): every mainnet block 1..50,049,999 executed from genesis matches gas used, receipts root, logs bloom and state root, state on disk, no heals, no skips, through every fork T0..T13 | `d1d277e` (replay), `0fad06f` | 2026-11-21 |
 | R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `750c66b` | 2026-11-21 |
 | R3p Precompiles | 4,986/4,992 (goempo's frontier; every Tempo precompile T0..T14; the 6 differences are T14 keychain grants where clempo follows tempo c8b89f9, newer than the corpus: +2,600 gas root-retirement probe) | `fd2d4cf` | 2026-11-21 |
-| R4 Follow | partial: certificates 20,001/20,001 consecutive mainnet finalizations across epochs 2314/2315; live `follow -certify` 91/91 at zero lag; public devp2p follow 3,350 finalized blocks byte-identical at zero lag; node binary with RPC and REPL. The executed one-hour run waits for R3 to reach the tip | `bba3dfe`, `37a9c7a`, `3ab8073` | 2026-11-21 |
+| R4 Follow | yes: 47,451 mainnet blocks executed and certified through 50,097,450 from the unhealed R3 checkpoint; 62m10s of independently sampled live RPC after reaching the moving tip, peak lag 4 blocks, p95 3, no incorrect responses | `15c118d` | 2026-11-21 |
 | R5 RPC | **154/154 methods, 14,287/14,287 cases (100%)**: blocks 5,126/5,126, calls 853/853, consensus 9/9, envelope 50/50, logs 508/508, state 3,542/3,542, static 119/119, success 25/25, tempo-params 101/101, traces 2,927/2,927, txs 1,027/1,027; 152/156 reference methods served. 37 debug_intermediateRoots cases whose recorded answer is the reference's own MDBX read timeout (-96000) are classed reference-timeout (every one of 19 re-sent at 1 thread answered in 60–284 s and clempo matched it; see evidence) | `4c2db4d` | 2026-11-21 |
 | R6 Validator | Sims: 4, 5 and 7 validators, three epochs each, every reshare concluded through per-node DKG managers. Live Rust devnet: one Clempo signer necessary through two reshares, two Clempo signers necessary through three | `b680aaf`, `dbe14d1` | 2026-11-21 |
 | R7 Speed | Clempo vs Rust, wall / CPU seconds: **Early** 1..1,000,000 **9.01 / 12.73 vs 58.22 / 37.25** (paired, 6.46× wall throughput); **Busy** 9,890,000..9,909,999 **22.59–22.77 / 58.14–58.87 vs 36.00 / 43.22** (historical, unpaired between clients, 1.58–1.59×); **Recent** 49,410,000..49,449,999 **16.76–17.24 / 22.39–22.85 vs 47.22 / 21.41** (historical Rust unpaired, 2.74–2.82× timed wall throughput, 1.05–1.07× CPU). Native P-384 is 198 µs/zero consing with scratch. Clempo checks every root; Rust checks import-chunk terminal roots. [RSS, GC, commands, and profiles](docs/BENCH.md#results-on-the-shared-dev-host). | `40521c1`, `15c118d`, `b81e3e5`, `828674f` | 2026-11-21 |
@@ -81,6 +81,26 @@ reset during SAKE authentication; an unregistered identity did not join and
 no transaction was sent. `score -rung R2 -json` also matched the Moderato
 genesis state root and block hash against live RPC. The JSON report is in
 `~/scratch/clempo/public-p2p/moderato-3000.log`; see `docs/DEVNET.md`.
+
+R4 live hour (`15c118d`): `CLEMPO_RPC=http://127.0.0.1:8545
+~/scratch/clempo/r4/run-hour.sh ~/scratch/clempo/r3/dd
+~/scratch/clempo/r4/run-20261121-093831` cloned the unhealed R3 datadir
+at 50,049,999 and built a standalone release node. It served local JSON-RPC
+on port 18545 while following the archive RPC with `--certify --seconds 3840`,
+verifying the public mainnet RPC's finalization certificates. The node
+executed and certified all 47,451 blocks through 50,097,450, checking gas used,
+receipts root, logs bloom and state root at each block.
+
+An independent 5 s RPC probe first matched the moving tip at 50,090,509.
+Over the next 3,730.456 s, 744 of 746 attempts matched the canonical block
+hash, state root and live EIP-2935 parent-hash storage slot; two attempts
+returned errors, none returned an incorrect value, and the longest gap
+between successful samples was 10.020 s. Observed lag was at most 4 blocks
+(p95 3). The raw `r4.json` says `no` solely because the harness imposed a
+final-sample lag limit of 2 blocks that GOAL does not require: that sample
+saw 3, and the node finished at 50,097,450, one block past the sample's
+upstream head. The node exited on its timer. Raw `r4.json`, `node.json`,
+`node.log` and `rpc.jsonl` are in that run directory.
 
 R4 certificates (bba3dfe): `CLEMPO_RPC=http://127.0.0.1:8545 CLEMPO_BUILD=release bin/clempo-dev certify -from 49995000 -to 50015000 -threads 16`
 verified all 20,001 consecutive mainnet finalization certificates across the epoch 2314/2315
