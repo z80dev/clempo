@@ -1,6 +1,6 @@
 # Agents: how to work on clempo
 
-clempo is a Common Lisp (SBCL) implementation of the Tempo blockchain node. Its reference implementation is the Rust node at `github.com/tempoxyz/tempo`, checked out at `~/dev/tempo`. `GOAL.md` defines the rungs, `LOOP.md` the iteration, `FRONTIER.md` the current results and `FRONTIER.jsonl` the measurement history.
+clempo is a Common Lisp (SBCL) implementation of the Tempo blockchain node. Its reference implementation is the Rust node at [tempoxyz/tempo](https://github.com/tempoxyz/tempo) (keep a checkout next to this one; the dev tools look in `~/dev/tempo` by default). `GOAL.md` defines the rungs, `LOOP.md` the iteration, `FRONTIER.md` the current results and `FRONTIER.jsonl` the measurement history.
 
 ## Rules
 
@@ -57,11 +57,11 @@ Warnings and undefined functions fail the strict build. Style warnings other tha
 
 - Mainnet block archive, R1 sample, RPC corpus and other large inputs live under `~/cache/clempo/` (never in git). Agents add files and never delete other agents' files.
 - `CLEMPO_RPC` names a private mainnet node without rate limits (`http://127.0.0.1:8545` when the local reference node runs). The public RPC allows about 60 `debug_getRawBlock` per second.
-- Reference test data: execution-spec-tests fixtures under `~/cache/clempo/fixtures/`, goempo's checked-in fixtures (recorded from mainnet or from the Rust node) under `~/clempo-infra/goempo-ref/`; reuse those data files with their provenance, not their code.
+- Reference test data: execution-spec-tests fixtures under `~/cache/clempo/fixtures/`; data reused from goempo's repository (recorded from mainnet or the Rust node) is copied into `tests/**/data/` with its provenance (see `NOTICE.md`), never its code.
 
 ## Working in parallel
 
 - One directory, one agent. Shared files (`layers.sexp`, `FRONTIER.*`, `README.md`, `docs/DEVIATIONS.md`) take small edits; on rebase conflicts keep both sides.
-- Clone `~/clempo.git` into `~/clempo-wt/<role>`, commit small verified slices, then `git pull --rebase origin main && scripts/verify.sh && git push origin main`. If origin moved during the gate and the rebase is clean, push without re-gating, then run the gate on what you pushed and fix forward at once if it fails. Unpushed work dies with the agent.
+- Work in your own clone, commit small verified slices, then `git pull --rebase origin main && scripts/verify.sh && git push origin main`. If origin moved during the gate and the rebase is clean, push without re-gating, then run the gate on what you pushed and fix forward at once if it fails. Unpushed work dies with the agent.
 - Ask the owner of another directory for an interface instead of editing their code.
 - The host is shared: at most one long-running replay-class job per agent, no overlapping benchmarks, `sysctl vm.swapusage` checked before anything above 4 GB RSS, and every server or background job you start (`rpc-serve`, recorders, followers) stopped before you finish. Heavy tracing against the private node (`rpc-record -suite traces`) runs with `-threads 4` or fewer: memory pressure has killed that node.

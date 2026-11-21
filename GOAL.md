@@ -22,8 +22,8 @@ The headline number is R3's height. Climb in order: a rung above an unmet one do
 clempo implements what the reference node does. Where it is unclear, these say it, in order of trust:
 
 1. The reference node's behaviour on the network: RPC results, `debug_traceBlockByNumber`, `debug_traceTransaction` with the prestate tracer.
-2. The reference's code: `tempoxyz/tempo` (checked out at `~/dev/tempo`), with reth and revm.
-3. goempo's documents (`~/clempo-infra/goempo-ref/docs`, `FRONTIER.md`): a tested reading of the reference that says where to look. Never copy its code.
+2. The reference's code: [tempoxyz/tempo](https://github.com/tempoxyz/tempo), with reth and revm.
+3. goempo's documents ([gakonst/goempo](https://github.com/gakonst/goempo) `docs/`, `FRONTIER.md`): a tested reading of the reference that says where to look. Never copy its code.
 
 Every difference from the reference goes in `docs/DEVIATIONS.md`.
 

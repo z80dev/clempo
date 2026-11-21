@@ -10,4 +10,4 @@ Each iteration moves the frontier up by one measured step, and never down.
 6. **Prove it went up.** Run the score again. If a rung went down, revert.
 7. **Record and push.** Append the score as one JSON line to `FRONTIER.jsonl`, update `FRONTIER.md`, commit with a message that names the rung, the old and new score and the cause, then `git pull --rebase origin main && scripts/verify.sh && git push origin main`.
 
-Work in parallel by rung or by directory, never two agents in one directory. Each agent works in its own clone under `~/clempo-wt/<role>` of the bare origin `~/clempo.git`. Long runs (replay over millions of blocks, fetches, fuzzing) run in the background with their log and result JSON under `~/scratch/clempo/`.
+Work in parallel by rung or by directory, never two agents in one directory, each in its own clone. Long runs (replay over millions of blocks, fetches, fuzzing) run in the background with their log and result JSON under a scratch directory, cited in `FRONTIER.md`.
