@@ -605,3 +605,53 @@ against Rust before timing). Clempo/Rust req/s, medians of 5 interleaved rounds:
 the HTTP path only: within 2-9% of Rust at 1 and 16 clients, behind at 64, where Rust's
 16 kqueue workers beat clempo's thread per connection. Not done: an event-loop server, a
 low-load pinned rerun on newphy.
+
+### Event-loop server (`ce7e7e6`)
+
+The RPC server no longer runs a thread per connection. It runs a worker per available CPU,
+each with its own kqueue (Darwin) or epoll (Linux) poller (`clempo.poll`, in `src/io`).
+Accepted sockets are handed to the workers in turn and watched edge-triggered, so a request
+costs one read and one send between waits. Requests are parsed from the octets in the
+connection's buffer as they arrive, so a slow client never holds a worker. A reaper
+thread enforces the idle, request and write deadlines, and a websocket upgrade still
+gets a thread of its own. Answers are byte-identical to the old server on 116 hostile,
+edge-case and pipelined HTTP and websocket inputs, on macOS and Linux. rpcdiff gives
+envelope 50/50 and static 102/102.
+
+Per-request consing went down. An ASCII body becomes a base string, and the response head
+and body go straight into a per-worker octet buffer. The response text is written into a
+per-thread reusable buffer (`rpc:*response-buffer*`). eth_getBalance went from 6.2 KB to
+2.4 KB consed per request, and eth_getBlockByNumber from 43 KB to 1.8 KB. GC is under 0.5%
+of server CPU on both (nursery ~860 MB). On the Mac the server is kernel-bound: sendto,
+read and kevent are about 90% of its CPU.
+
+Command, both hosts: `rpc-load -from 50049000 -to 50049999 -n 400 -total 20000 -rounds 5
+-concurrency 1,16,64`. 2,400 of 2,400 answers identical on each host. Medians of 5
+interleaved rounds, clempo/Rust req/s:
+
+| Method | newphy pinned 1 | 16 | 64 | Mac 1 | 16 | 64 |
+|---|---:|---:|---:|---:|---:|---:|
+| `eth_getBalance` | 0.78 | **1.29** | 0.93 | **1.03** | 0.96 | **1.01** |
+| `eth_call` | **1.93** | **1.36** | **1.01** | **1.63** | **1.52** | **1.53** |
+| `eth_getBlockByNumber` | **1.44** | **1.96** | **1.42** | **1.31** | **1.03** | **1.09** |
+| `eth_getLogs` | **4.19** | **4.10** | **3.43** | **2.83** | **2.52** | **2.36** |
+| `debug_traceTransaction` | **2.29** | **3.86** | **3.96** | **1.72** | **2.21** | **2.23** |
+| `eth_getProof` | **4.90** | **3.77** | **4.15** | **3.01** | **3.72** | **4.15** |
+
+- **newphy** (`rpc-load-pinned-1`): Ryzen 7 9700X, 8 cores and 16 threads, Linux.
+  - Pinning with taskset: Rust on CPUs 0,1,8,9, clempo on 2,3,10,11 (4 workers each), the
+    load client on 4-7,12-15.
+  - Load average was 10.8 at the start and 15.9 at the end, from other agents' SBCL jobs
+    that taskset does not keep off the pinned CPUs.
+  - Latency columns there are in whole milliseconds (SBCL's clock unit on that build), so
+    only req/s is meaningful.
+- **Mac** (`rpc-load-5`): M-series, 16 cores, nothing pinned. Load average was 19-22
+  from other agents.
+
+Still short of 1.0: `eth_getBalance` at 1 client on newphy (0.78) and at 64 clients there
+(0.93, within run noise), and at 16 clients on the Mac (0.96). Its answer is constant, so
+it measures only per-request overhead. On Linux clempo spends 4.6 µs of user CPU per
+request against Rust's 2.2. That is the JSON-RPC envelope: handle-body's validating
+parse-json pass and then handle-request-object, about 3 µs. The HTTP layer accounts for
+about 0.5 µs. Next lever: a single-pass envelope that keeps the reference's
+error choice for malformed bodies.
