@@ -574,3 +574,26 @@ Open: `debug_traceTransaction` spends ~40% in per-op tracer hooks (CLOS dispatch
 no-steps interpreter path would put it well above Rust (EvmJitAgent agreed to the edit
 in `src/evm/tracing.lisp`; not done). At 64 clients thread-per-connection loses to
 Rust's 16 kqueue workers.
+
+### With lean tracing (`3877df7`)
+
+Tracers that keep no steps (callTracer, flatCallTracer, prestate, 4byte, mux of those)
+now run an interpreter that reports only the halting op. Same setup, `-rounds 5`
+(`rpc-load-4`), load average 10-12 during the run (other agents' jobs; nothing pinned),
+2,400 of 2,400 answers identical (plus 1,000 callTracer traces and 76 transactions each
+of prestate, prestate diff, 4byte, callTracer withLog, flatCallTracer and mux checked
+against Rust before timing). Clempo/Rust req/s, medians of 5 interleaved rounds:
+
+| Method | 1 client | 16 clients | 64 clients | goempo (1) |
+|---|---:|---:|---:|---:|
+| `eth_getBalance` | 0.98 | 0.91 | 0.81 | |
+| `eth_call` | **1.40** | **1.49** | **1.34** | 1.28 |
+| `eth_getBlockByNumber` | 1.06 | 0.99 | 0.90 | |
+| `eth_getLogs` | **2.59** | **2.14** | 1.91 | 2.01 |
+| `debug_traceTransaction` | **1.88** | **1.91** | **1.83** | |
+| `eth_getProof` | 2.42 | 3.65 | 1.89 | |
+
+`eth_getBalance` (a constant answer) and `eth_getBlockByNumber` (a cached text) measure
+the HTTP path only: within 2-9% of Rust at 1 and 16 clients, behind at 64, where Rust's
+16 kqueue workers beat clempo's thread per connection. Not done: an event-loop server, a
+low-load pinned rerun on newphy.
