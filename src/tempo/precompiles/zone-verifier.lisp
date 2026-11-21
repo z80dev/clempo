@@ -8,6 +8,10 @@
 (defconstant +nitro-batch-type-hash+
   #xb6f39555cba9bf38842c669ea0c90bca6aad793881d75a0034e33352fbecb25e)
 
+;; The parser structs are defined by later, alphabetically loaded components.
+(declaim (notinline nitro-attestation-pcrs nitro-attestation-timestamp
+                   nitro-attestation-user-data))
+
 (defun batch-commitment (parent-chain-id &rest args)
   "EIP-712 hashStruct of NitroBatchAttestation, as 32 octets (not an EIP-712 domain hash).
 ARGS are the twelve verify ABI arguments, in ABI order; proof is not part of the statement."
@@ -57,7 +61,7 @@ Production dispatch always supplies the AWS pinned root and fork-approved measur
 
 (defun verify (portal &rest args)
   "ZoneVerifier::verify. PORTAL is msg.sender; ARGS follow the exact IZoneVerifier ABI."
-  (verify-with-policy portal args +aws-nitro-root-der+ (approved-pcrs)))
+  (verify-with-policy portal args (aws-nitro-root) (approved-pcrs)))
 
 (defcall zone-verifier verify*
     (zone-id tempo-block-number anchor-block-number anchor-block-hash

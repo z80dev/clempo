@@ -230,3 +230,12 @@
                              (make-string 96 :initial-element #\2))))
     (is (handler-case (progn (clempo.zone-verifier:parse-pcrs values) nil)
           (clempo.zone-verifier::pcr-policy-error () t)))))
+
+(deftest zone-verifier-serial-length ()
+  ;; x509-cert SerialNumber's 21-octet bound includes the leading sign octet.
+  (let ((der (make-octets 24)))
+    (setf (aref der 0) 2 (aref der 1) 22 (aref der 3) 128)
+    (is (nitro-invalid-p
+         (lambda ()
+           (clempo.zone-verifier::nitro-der-integer
+            (clempo.zone-verifier::nitro-reader der) 21 t))))))

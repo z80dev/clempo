@@ -27,6 +27,7 @@
       (is= 42 (clempo.zone-factory:owner))
       (is (clempo.zone-factory:is-zone-portal (clempo.zone-factory:portal-address 2)))
       (is (not (clempo.zone-factory:is-zone-portal (clempo.zone-factory:portal-address 3))))
+      (is (not (clempo.zone-factory:is-zone-portal (clempo.zone-factory:portal-address 0))))
       (is (not (clempo.zone-factory:is-zone-portal 2)))
       (is (handler-case (progn (clempo.zone-factory:transfer-ownership 41 99) nil)
             (precompile-revert (e) (eq (precompile-revert-name e) 'clempo.zone-factory::not-owner))))
