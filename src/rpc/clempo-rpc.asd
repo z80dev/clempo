@@ -19,6 +19,7 @@
                (:file "sender")
                (:file "subscribe")
                (:file "state")
+               (:file "revert")
                (:file "calls")
                (:file "simulate")))
 

@@ -524,7 +524,7 @@ halt rpc_invalid_transaction_error's text."
         (halt (executor:tx-outcome-halt outcome)))
     (cond ((executor:tx-outcome-status outcome) output)
           ((null halt)
-           (let ((reason (revert-reason output)))
+           (let ((reason (or (clempo.rpc.revert:precompile-error-text output) (revert-reason output))))
              (rpc-fail 3 (if reason (format nil "execution reverted: ~A" reason) "execution reverted")
                        (hexbytes output))))
           (t (rpc-fail -32003
