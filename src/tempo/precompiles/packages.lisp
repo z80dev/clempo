@@ -95,13 +95,17 @@ rewards, permits, memos, transfer policies, virtual addresses.")
   (:documentation "TIP403Registry (tip403.lisp): transfer and receive policies.")
   (:export #:tip403-registry #:authorized-p #:authorized-as-p #:policy-exists-p #:create-policy
            #:set-token-transfer-policy #:set-receive-policy #:modify-policy-blacklist
-           #:registered-token-transfer-policy-id #:check-receive-policy))
+           #:registered-token-transfer-policy-id #:check-receive-policy #:policy-lookup-error-p
+           #:auth-role #:token-transfer-policy-id #:validate-receive-policy
+           #:modify-policy-whitelist #:create-policy-with-accounts #:create-compound-policy
+           #:set-policy-admin #:migrate-transfer-policy-ids))
 
 (defpackage #:clempo.receive-policy-guard
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
   (:shadowing-import-from #:clempo.contract #:read #:write #:delete)
   (:documentation "ReceivePolicyGuard (receive-policy-guard.lisp): TIP-1028 blocked receipts.")
-  (:export #:receive-policy-guard #:balance-of #:store-blocked))
+  (:export #:receive-policy-guard #:balance-of #:store-blocked #:claim
+           #:burn-blocked-receipt #:address-reserved))
 
 (defpackage #:clempo.fee-manager
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
