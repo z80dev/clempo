@@ -20,6 +20,15 @@ serve the `consensus` namespace. For certified startup, use a checkpoint within
 the certificate provider's retention window. A missing newest certificate
 pauses progress; a bad certificate or state root stops the node.
 
+Use `--source devp2p` to fetch missing raw blocks over authenticated public
+ETH connections instead of raw-block RPC. `--peers FILE` tries explicit
+enodes (one per line, blank/comment lines ignored) before the official
+bootnodes, without UDP discovery. Without the file, the source uses public
+discovery. `--upstream` still supplies the canonical header commitments, and
+`--certify` still checks finalization; peer status alone proves neither.
+For a header/body-only probe, run
+`bin/clempo-dev follow -source devp2p -peers FILE -last 10 -once -no-archive`.
+
 `--once` exits at the initial target, and `--seconds N` exits after N seconds
 of live following, starting when the initial target is reached. Both print a
 JSON run summary. Without either, the node runs until interrupted. Build a

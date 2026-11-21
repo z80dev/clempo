@@ -1,7 +1,7 @@
 (defsystem "clempo-node"
   :description "Execute, archive and serve the live Tempo chain"
   :depends-on ("sb-bsd-sockets" "sb-posix" "clempo-sync" "clempo-rpc"
-               "clempo-store" "clempo-tempo-executor")
+               "clempo-store" "clempo-tempo-executor" "clempo-p2p")
   :serial t
   :components ((:file "repl") (:file "workers") (:file "node")))
 

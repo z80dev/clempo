@@ -6,8 +6,9 @@
                     (#:archive #:clempo.archive) (#:store #:clempo.store)
                     (#:executor #:clempo.executor) (#:blocks #:clempo.blocks)
                     (#:trie #:clempo.trie) (#:workers #:clempo.node.workers)
-                    (#:headers #:clempo.headers) (#:repl #:clempo.node.repl))
-  (:export #:run-node #:main #:*node-backend*))
+                    (#:headers #:clempo.headers) (#:repl #:clempo.node.repl)
+                    (#:eth-source #:clempo.eth-source))
+  (:export #:run-node #:main #:*node-backend* #:call-with-block-source))
 
 (in-package #:clempo.node)
 
@@ -223,8 +224,23 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
                (when rpc-server (server:stop-server rpc-server)))
           (store:close-store datastore))))))
 
+(defun call-with-block-source (source function &key peers)
+  "Run FUNCTION with the selected raw block transport, or NIL for RPC."
+  (cond ((string= source "rpc")
+         (when peers (error "A peer list requires the devp2p block source"))
+         (funcall function nil))
+        ((string= source "devp2p")
+         (if peers
+             (let ((explicit (eth-source:read-enodes peers)))
+               (unless explicit (error "No enodes in ~A" peers))
+               (eth-source:call-with-public-block-source
+                function :discovery-timeout 0 :bootnodes (append explicit (eth-source:tempo-bootnodes))))
+             (eth-source:call-with-public-block-source function)))
+        (t (error "Unknown block source ~S; expected rpc or devp2p" source))))
+
 (defun node-usage ()
   (format t "Usage: clempo --datadir DIR [--upstream URL] [--archive DIR]~%
+              [--source rpc|devp2p] [--peers FILE]~%
               [--rpc-port N] [--bind IP] [--certify] [--cert-rpc URL]~%
               [--repl-port N --repl-token-file FILE] [--once | --seconds N]~%
               [--batch N] [--checkpoint-interval N] [--root-workers N]~%"))
@@ -237,6 +253,7 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
                  ((string= flag "--certify") (setf (getf options :certify) t))
                  ((string= flag "--once") (setf (getf options :once) t))
                  (t (let* ((entry (assoc flag '(("--datadir" :datadir) ("--upstream" :upstream)
+                                                  ("--source" :source) ("--peers" :peers)
                                                   ("--archive" :archive-dir) ("--rpc-port" :rpc-port t)
                                                   ("--bind" :bind) ("--cert-rpc" :cert-rpc)
                                                   ("--repl-port" :repl-port t) ("--repl-token-file" :repl-token-file)
@@ -256,9 +273,18 @@ Returns a JSON report after ONCE or SECONDS; otherwise runs until interrupted."
               (let ((options (node-options argv)))
                 (cond ((eq options :help) (node-usage) 0)
                       ((not (getf options :datadir)) (node-usage) 2)
-                      (t (let ((dir (getf options :datadir)))
+                      (t (let ((dir (getf options :datadir))
+                               (source (getf options :source "rpc"))
+                               (peers (getf options :peers)))
                            (remf options :datadir)
-                           (write-line (json:to-json-string (apply #'run-node dir options))))
+                           (remf options :source)
+                           (remf options :peers)
+                           (call-with-block-source
+                            source
+                            (lambda (fetch)
+                              (write-line (json:to-json-string
+                                           (apply #'run-node dir :block-source fetch options))))
+                            :peers peers))
                          0)))
             (sb-sys:interactive-interrupt () 130)
             (error (c) (format *error-output* "~&clempo: ~A~%" c) 1))))

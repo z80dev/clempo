@@ -1,7 +1,6 @@
 (in-package #:clempo.dev)
 
-(defcommand "follow" (args)
-  "follow [-last N] [-upstream URL] [-certify [-cert-rpc URL]] [-once | -seconds N] [-archive DIR | -no-archive] [-json]"
+(defun run-follow-command (args block-source)
   (let* ((url (arg args :upstream (clempo.jsonrpc:local-rpc-url)))
          (tip (clempo.follow:rpc-head :latest :url url))
          (distance (arg-int args :last 1000))
@@ -20,6 +19,7 @@
                          :url (arg args :cert-rpc clempo.jsonrpc:+mainnet-rpc+))))
            (follower (clempo.follow:make-follower
                       anchor :rpc-url url :archive-dir archive :certifier certifier
+                      :block-source block-source
                       :write-archive (not (arg-flag args :no-archive))
                       :batch-size (arg-int args :batch 32)))
            (next-report start)
@@ -57,3 +57,10 @@
                     (clempo.follow:follower-blocks follower) (clempo.follow:head-number head)
                     (octets->hex (clempo.follow:head-hash head) :prefix t))))
       0)))
+
+(defcommand "follow" (args)
+  "follow [-last N] [-upstream URL] [-source rpc|devp2p] [-peers FILE] [-certify [-cert-rpc URL]] [-once | -seconds N] [-archive DIR | -no-archive] [-json]"
+  (clempo.node:call-with-block-source
+   (arg args :source "rpc")
+   (lambda (fetch) (run-follow-command args fetch))
+   :peers (arg args :peers)))
