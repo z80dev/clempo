@@ -40,7 +40,7 @@
       (let ((key (integer->octets i 2)))
         (clempo.trie:trie-put serial key value)
         (clempo.trie:trie-put parallel key value)))
-    (clempo.node.hash-workers:call-with-root-workers
+    (clempo.node.workers:call-with-workers
      (lambda (mapper)
        (is-equalp (clempo.trie:trie-root serial)
                   (clempo.trie:call-with-trie-hashing
@@ -48,7 +48,9 @@
        ;; An error must return to the submitter without killing its worker.
        (signals error (funcall mapper (lambda (i) (when (= i 2) (error "test error")))
                                        '(1 2 3)))
+       (signals error (funcall mapper #'identity (make-list 17)))
        (let ((result (make-array 3)))
          (funcall mapper (lambda (i) (setf (aref result i) (* i i))) '(0 1 2))
          (is-equalp #(0 1 4) result)))
-     :threads 4)))
+     :threads 4)
+    (is (null (clempo.node.workers:call-with-workers #'identity :threads 1)))))

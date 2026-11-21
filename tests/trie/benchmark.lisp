@@ -1,7 +1,7 @@
 ;;; Run from the checkout root:
 ;;; CLEMPO_BUILD=release sbcl --dynamic-space-size 8192 --non-interactive \
 ;;;   --load scripts/build.lisp --eval '(asdf:load-system "clempo-trie/tests")' \
-;;;   --load src/node/hash-workers.lisp --load tests/trie/benchmark.lisp \
+;;;   --load src/node/workers.lisp --load tests/trie/benchmark.lisp \
 ;;;   --eval '(clempo.trie.tests::benchmark-trie 1000000 4)'
 (in-package #:clempo.trie.tests)
 
@@ -20,7 +20,7 @@
       (time (dotimes (i count) (trie-put trie (svref keys i) value)))
       (format t "~:D inserts/s~%"
               (round (* count internal-time-units-per-second) (- (get-internal-real-time) start))))
-    (clempo.node.hash-workers:call-with-root-workers
+    (clempo.node.workers:call-with-workers
      (lambda (mapper)
        (call-with-trie-hashing
         (lambda ()

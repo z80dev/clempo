@@ -17,21 +17,25 @@
 (defun bench-seconds (ticks)
   (/ ticks (float internal-time-units-per-second 1d0)))
 
-(defun bench-run (db store from to profile)
+(defun bench-run (db store from to profile sender-threads)
   (let* ((wall (get-internal-real-time)) (cpu (get-internal-run-time))
          (gc sb-ext:*gc-run-time*) (bytes (sb-ext:get-bytes-consed))
          (result nil))
     (when profile
       (sb-sprof:reset)
-      (sb-sprof:start-profiling :mode :time :sample-interval 0.005 :max-samples 120000
-                               :threads (list sb-thread:*current-thread*)))
+      (sb-sprof:start-profiling :mode :cpu :sample-interval 0.005 :max-samples 120000
+                               :threads :all))
     (unwind-protect
          (handler-bind ((error (lambda (condition)
                                  (let ((restart (find-restart 'clempo.executor:abort-replay condition)))
                                    (when restart (invoke-restart restart condition))))))
-           (setf result (clempo.executor:replay-blocks
-                         db from to :chain :mainnet :block-fn (make-archive-source)
-                         :commit-fn (when store (lambda (diff) (clempo.store:store-commit-block store diff)))))
+           (setf result (call-with-recovered-senders
+                         (lambda (recover)
+                           (clempo.executor:replay-blocks
+                            db from to :chain :mainnet :block-fn (make-archive-source)
+                            :senders-fn recover
+                            :commit-fn (when store (lambda (diff) (clempo.store:store-commit-block store diff)))))
+                         sender-threads))
            (when store (clempo.store:store-sync store)))
       (when profile (sb-sprof:stop-profiling)))
     (let ((secs (max (bench-seconds (- (get-internal-real-time) wall)) 1d-6))
@@ -46,10 +50,12 @@
       (values result secs cpu-secs gc-secs consed rss))))
 
 (defcommand "bench" (args)
-  "R7: bench -range busy|early|recent [-parent SAVED_DIR -datadir FRESH_DIR] [-result FILE] [-profile FILE]"
+  "R7: bench -range busy|early|recent [-parent SAVED_DIR -datadir FRESH_DIR] [-sender-threads N] [-result FILE] [-profile FILE]"
   (let* ((range (arg args :range)) (spec (assoc range *bench-ranges* :test #'equal))
-         (parent (arg args :parent)) (datadir (arg args :datadir)) (profile (arg args :profile)))
+         (parent (arg args :parent)) (datadir (arg args :datadir)) (profile (arg args :profile))
+         (sender-threads (arg-int args :sender-threads +default-sender-threads+)))
     (unless spec (error "Expected -range busy, early or recent, got ~S" range))
+    (check-type sender-threads (integer 1 16))
     (destructuring-bind (name from to) spec
       (let* ((path (expand-home (arg args :result (format nil "~~/scratch/clempo/bench/clempo-~A.json" name))))
              (parent-height (1- from))
@@ -76,7 +82,8 @@
                             (octets= root (clempo.store:db-root-hash db))
                             (octets= (clempo.blocks:block-hash parent-block) (clempo.store:db-hash db)))
                  (error "Saved state does not match canonical parent ~D" parent-height))
-               (multiple-value-bind (result secs cpu gc consed peak) (bench-run db store from to (and profile (expand-home profile)))
+               (multiple-value-bind (result secs cpu gc consed peak)
+                   (bench-run db store from to (and profile (expand-home profile)) sender-threads)
                  (let* ((blocks (clempo.executor:replay-result-blocks result))
                         (gas (clempo.executor:replay-result-gas result))
                         (stop (clempo.executor:replay-result-stop-reason result))
@@ -88,6 +95,7 @@
                                "last" (clempo.executor:replay-result-last result)
                                "complete" (if ok :true :false) "stop" (or stop :null)
                                "profiled" (if profile :true :false)
+                               "sender_threads" sender-threads
                                "persistent" (if store :true :false)
                                "blocks" blocks "txs" (clempo.executor:replay-result-txs result) "gas" gas
                                "seconds" secs "blocks_per_s" (/ blocks secs) "mgas_per_s" (/ gas secs 1e6)

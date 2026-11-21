@@ -25,7 +25,16 @@ CLEMPO_BUILD=release bin/clempo-dev bench -range busy -parent "$parent" \
 
 The measured interval includes archive reads, decoding, replay, and (in persistent mode) WAL writes and final fsync. It excludes startup, copying and opening the store, and writing the result. CPU and GC are deltas over the interval; peak RSS is for the whole process (including initialization). Always compare the same persistence mode. Repeat with fresh workdirs and interleave clients rather than reporting one best sample.
 
-For a separate profiling trial after R3 exceeds 10M, add `-profile "$profile_report"` to a Busy run. The report uses 5 ms SBCL `sb-sprof` wall-time sampling of the replay thread, with a flat profile and call graph. The JSON marks profiled runs; do not use them as baseline timing. Sort self samples separately from cumulative samples, and compare profiles on the same workload before attributing a regression.
+Both `replay` and `bench` default to eight sender-recovery participants,
+including the replay thread. They share a worker pool for the run and keep
+transaction execution serial and ordered. Use `-sender-threads 1` to measure
+serial sender recovery.
+
+For a separate profiling trial, add `-profile "$profile_report"` to a Busy
+run. This uses 5 ms SBCL `sb-sprof` CPU sampling with a flat profile and call
+graph. Darwin's sampling signals may underrepresent some workers; compare
+with a serial profile if needed. The JSON marks profiled runs; do not use
+them as baseline timing.
 
 ## Rust reference
 

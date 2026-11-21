@@ -1,12 +1,12 @@
 ;;; From the checkout root on macOS (time -l reports peak resident bytes):
 ;;; CLEMPO_BUILD=release /usr/bin/time -l sbcl --dynamic-space-size 16384 --noinform --non-interactive \
 ;;;   --load scripts/build.lisp --eval '(asdf:load-system "clempo-store")' \
-;;;   --load src/node/hash-workers.lisp --load tests/trie/state-benchmark.lisp \
+;;;   --load src/node/workers.lisp --load tests/trie/state-benchmark.lisp \
 ;;;   --eval '(clempo.trie.state-benchmark:run)'
 (defpackage #:clempo.trie.state-benchmark
   (:use #:cl #:clempo.base)
   (:local-nicknames (#:store #:clempo.store) (#:trie #:clempo.trie) (#:json #:clempo.json)
-                    (#:workers #:clempo.node.hash-workers))
+                    (#:workers #:clempo.node.workers))
   (:export #:run))
 
 (in-package #:clempo.trie.state-benchmark)
@@ -124,7 +124,7 @@
     (sb-ext:gc :full t)
     (let* ((before (sb-kernel:dynamic-usage))
            (start (get-internal-real-time))
-           (root (workers:call-with-root-workers
+           (root (workers:call-with-workers
                   (lambda (mapper)
                     (trie:call-with-trie-hashing (lambda () (load-state db accounts layout))
                                                  :parallel-map mapper)) :threads 4))
@@ -135,7 +135,7 @@
                                  "retainedLispBytes" (- (sb-kernel:dynamic-usage) before)
                                  "baseRoot" (octets->hex root :prefix t))))
       (dolist (threads '(1 4))
-        (workers:call-with-root-workers
+        (workers:call-with-workers
          (lambda (mapper)
            (trie:call-with-trie-hashing
             (lambda ()

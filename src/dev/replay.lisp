@@ -30,32 +30,6 @@
           (setf chunk (clempo.archive:read-chunk want) first want))
         (clempo.blocks:decode-block (clempo.archive:chunk-block chunk n))))))
 
-;;; Sender recovery dominates busy blocks (ecrecover per transaction), so a block's senders are
-;;; recovered on several threads. Recovery reads only immutable tables; each worker still runs
-;;; inside clempo.evm:with-evm-thread for its own Keccak scratch.
-
-(defparameter *sender-threads* 8)
-
-(defun recover-senders (block)
-  (let* ((txs (coerce (clempo.blocks:block-transactions block) 'simple-vector))
-         (n (length txs))
-         (out (make-array n)))
-    (if (< n 4)
-        (dotimes (i n) (setf (svref out i) (clempo.transactions:transaction-sender (svref txs i))))
-        (let* ((k (min *sender-threads* n))
-               (threads
-                 (loop for w below k
-                       collect (let ((w w))
-                                 (sb-thread:make-thread
-                                  (lambda ()
-                                    (clempo.evm:with-evm-thread
-                                      (loop for i from w below n by k
-                                            do (setf (svref out i)
-                                                     (clempo.transactions:transaction-sender (svref txs i))))))
-                                  :name "senders")))))
-          (mapc #'sb-thread:join-thread threads)))
-    (coerce out 'list)))
-
 ;;; The datadir's history: was every committed block matched?
 
 (defun history-path (datadir)
@@ -159,9 +133,10 @@
 (defun json-height (x) (or x :null))
 
 (defun replay (&key from to datadir (checkpoint 0) (heal 0) (skip 0) result-path diagnose
-                    interactive (chain :mainnet))
+                    interactive (chain :mainnet) (sender-threads +default-sender-threads+))
   "Run a replay; returns the result JSON object. Callable from a REPL (pass :interactive t to
 get the restarts in the debugger)."
+  (check-type sender-threads (integer 1 16))
   (let* ((clempo.executor:*chain* chain)
          (source (make-archive-source))
          (start (get-internal-real-time))
@@ -199,19 +174,23 @@ get the restarts in the debugger)."
                     (incf skips) (invoke-restart 'clempo.executor:skip-block))
                    (t (invoke-restart 'clempo.executor:abort-replay c)))))
       (unwind-protect
-           (flet ((run ()
+           (flet ((run (recover)
                     (clempo.executor:replay-blocks
                      db from to
                      :chain chain
                      :block-fn source
-                     :senders-fn #'recover-senders
+                     :senders-fn recover
                      :commit-fn (when store (lambda (diff) (clempo.store:store-commit-block store diff)))
                      :heal-fn (lambda (db n block)
                                 (clempo.executor:heal-block db block (reference-prestate-diff n) :chain chain))
                      :progress-fn #'progress)))
-             (setf result (if interactive
-                              (run)
-                              (handler-bind ((error #'choose)) (run))))
+             (setf result
+                   (call-with-recovered-senders
+                    (lambda (recover)
+                      (if interactive
+                          (run recover)
+                          (handler-bind ((error #'choose)) (run recover))))
+                    sender-threads))
              ;; Opcode diagnosis of the stopping block, on the parent state the abort restored.
              (let ((c (clempo.executor:replay-result-stopped result)))
                (when (and diagnose diagnosis (typep c 'clempo.executor:block-mismatch))
@@ -245,6 +224,7 @@ get the restarts in the debugger)."
                   "txs" (clempo.executor:replay-result-txs r)
                   "gas" gas
                   "seconds" (float secs 1d0)
+                  "sender_threads" sender-threads
                   "blocks_per_s" (float (/ blocks secs) 1d0)
                   "mgas_per_s" (float (/ gas secs 1000000) 1d0)
                   "stop" (or (clempo.executor:replay-result-stop-reason r) :null)
@@ -260,10 +240,11 @@ get the restarts in the debugger)."
       json)))
 
 (defcommand "replay" (args)
-  "R3: replay [-from N] [-to M] [-datadir D] [-checkpoint K] [-heal K] [-skip K] [-result F] [-diagnose] [-interactive]"
+  "R3: replay [-from N] [-to M] [-datadir D] [-checkpoint K] [-sender-threads N] [-heal K] [-skip K] [-result F] [-diagnose] [-interactive]"
   (let ((json (replay :from (arg-int args :from) :to (arg-int args :to)
                       :datadir (arg args :datadir)
                       :checkpoint (arg-int args :checkpoint 0)
+                      :sender-threads (arg-int args :sender-threads +default-sender-threads+)
                       :heal (arg-int args :heal 0)
                       :skip (arg-int args :skip 0)
                       :result-path (arg args :result)

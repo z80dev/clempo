@@ -5,7 +5,7 @@
                     (#:backend #:clempo.rpc.chain) (#:server #:clempo.rpcserver)
                     (#:archive #:clempo.archive) (#:store #:clempo.store)
                     (#:executor #:clempo.executor) (#:blocks #:clempo.blocks)
-                    (#:trie #:clempo.trie) (#:workers #:clempo.node.hash-workers)
+                    (#:trie #:clempo.trie) (#:workers #:clempo.node.workers)
                     (#:headers #:clempo.headers) (#:repl #:clempo.node.repl))
   (:export #:run-node #:main #:*node-backend*))
 
@@ -132,11 +132,11 @@
   (force-output *error-output*))
 
 (defun follow-with-root-workers (threads follower &rest options)
-  (workers:call-with-root-workers
+  (workers:call-with-workers
    (lambda (mapper)
      (trie:call-with-trie-hashing (lambda () (apply #'follow:follow-live follower options))
                                   :parallel-map mapper))
-   :threads threads))
+   :threads threads :name "trie subtree hash"))
 
 (defun run-node (datadir &key (upstream (rpc:local-rpc-url))
                            (archive-dir (archive:archive-dir))
