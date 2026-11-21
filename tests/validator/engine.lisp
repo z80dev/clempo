@@ -58,7 +58,7 @@ committee, its execution store in a fresh directory and its network peerless."
                 (head (clempo.headers:decode-header
                        (clempo.chainspec:genesis-header-rlp chain :state-root (clempo.store:db-root-hash db))))
                 (seed (make-array 32 :element-type 'octet :initial-element 9))
-                (app (net::%make-app :network (net::%make-network :remotes nil) :store store :db db
+                (app (net::%make-app :network (net::make-validator-network :seed seed) :store store :db db
                                      :chain chain :seed seed :key (clempo.ed25519:ed25519-public-key seed)
                                      :epoch-length (clempo.chainspec:chain-epoch-length chain) :head head
                                      :journal (clempo.simplex:make-memory-journal))))

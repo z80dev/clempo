@@ -102,23 +102,20 @@ private devnets; CALL-WITH-VALIDATOR-NETWORK defaults are Tempo's production val
                 when (plusp (ring-count (aref rings index))) do (take (aref rings index))))
       (values nil nil))))
 
+(defun queues-count (queues)
+  (loop for ring across (queues-rings queues) sum (ring-count ring)))
+
 (defun queues-take (queues limit timeout)
   "Remove up to LIMIT values, waiting up to TIMEOUT seconds while all rings are empty."
   (let ((mutex (queues-mutex queues))
         (deadline (+ (get-internal-real-time) (ceiling (* timeout internal-time-units-per-second)))))
     (thr:with-mutex (mutex)
       (loop for remaining = (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)
-            while (and (zerop (queues-bytes-or-count queues)) (plusp remaining))
+            while (and (zerop (queues-count queues)) (plusp remaining))
             do (thr:condition-wait (queues-ready queues) mutex :timeout remaining))
       (loop repeat limit
             for (value present) = (multiple-value-list (queues-pop-locked queues))
             while present collect value))))
-
-(defun queues-bytes-or-count (queues)
-  (loop for ring across (queues-rings queues) sum (ring-count ring)))
-
-(defun queues-wake (queues)
-  (thr:with-mutex ((queues-mutex queues)) (thr:condition-broadcast (queues-ready queues))))
 
 ;;; Events, configuration and state.
 
@@ -280,10 +277,10 @@ Inbound connections from tracked peers are accepted regardless (Rust always dial
       t)))
 
 (defun kill-link (link)
-  "Ask LINK's threads to stop; its reader releases the peer. Safe from any thread."
+  "Ask LINK's threads to stop (the writer polls the flag at least every 0.1 s and
+the shutdown wakes blocked I/O); its reader releases the peer. Safe from any thread."
   (setf (link-killed link) t)
-  (conn-shutdown (link-conn link))
-  (queues-wake (link-outbox link)))
+  (conn-shutdown (link-conn link)))
 
 (defun teardown-if-needed (network record)
   (let ((records (validator-network-records network)))
@@ -611,79 +608,105 @@ Inbound connections from tracked peers are accepted regardless (Rust always dial
             while (and (< (get-internal-real-time) end) (not (network-stopping-p network)))
             do (sleep (min 0.05 frequency))))))
 
-;;; Entry point.
+;;; Entry points.
 
-(defun call-with-validator-network
-    (function &key seed (listen-host "0.0.0.0") (listen-port 0) (sake-version 0) (cups-version 0)
-                (max-message-size +tempo-max-message-size+) (channel-quotas (tempo-channel-quotas))
-                (tracked-sets 1) (max-peers-per-set 128) (block-seconds (* 4 3600))
-                (handshake-timeout 5) (dial-timeout 15) (max-concurrent-handshakes 512)
-                (handshake-ip-period 5) (handshake-subnet-period 0.015) (peer-connection-cooldown 60)
-                (dial-frequency 1) (ping-interval 50) allow-private-ips bypass-ip-check)
-  "Listen on LISTEN-HOST:LISTEN-PORT (IPv4; port 0 picks one, see
-NETWORK-LISTEN-PORT), run the listener and dialer, call FUNCTION with the network,
-then stop and join every thread and zero this network's copy of SEED.
-Defaults are Tempo's production settings (crates/consensus args.rs); pass
-(LOCAL-NETWORK-OPTIONS) for a loopback devnet. SAKE-VERSION and CUPS-VERSION are
-not negotiated (commonware-stream sake/mod.rs) and Tempo pins 0/0: peers must be
-configured alike, and a mismatch fails the handshake closed. Periods are seconds."
+(defun seconds->ns (seconds)
+  (check-type seconds (real 0))
+  (ceiling (* (rationalize seconds) 1000000000)))
+
+(defun make-validator-network
+    (&key seed (sake-version 0) (cups-version 0)
+       (max-message-size +tempo-max-message-size+) (channel-quotas (tempo-channel-quotas))
+       (tracked-sets 1) (max-peers-per-set 128) (block-seconds (* 4 3600))
+       (handshake-timeout 5) (dial-timeout 15) (max-concurrent-handshakes 512)
+       (handshake-ip-period 5) (handshake-subnet-period 0.015) (peer-connection-cooldown 60)
+       (dial-frequency 1) (ping-interval 50) allow-private-ips bypass-ip-check)
+  "Build an unstarted network (no socket, no threads) holding a copy of SEED; see
+CALL-WITH-VALIDATOR-NETWORK for the options. Without peers, sends reach nobody."
   (check-type seed (octets 32))
-  (check-type listen-host string)
-  (check-type listen-port (integer 0 65535))
+  (check-type sake-version (member 0 1))
+  (check-type cups-version (member 0 1))
+  (check-type max-message-size (integer 0 #xffffff00))
   (check-type tracked-sets (integer 1 *))
   (check-type max-peers-per-set (integer 1 *))
   (check-type max-concurrent-handshakes (integer 1 *))
+  (check-type handshake-timeout (real (0)))
+  (check-type dial-timeout (real (0)))
+  (check-type dial-frequency (real (0)))
   (dolist (quota channel-quotas)
     (check-type (car quota) (integer 0 #xffffffffffffffff))
     (check-type (cdr quota) (integer 1 *)))
   (let* ((seed (copy-seq seed))
          (max-peers (* max-peers-per-set tracked-sets))
-         (channels (mapcar #'car channel-quotas))
-         (config (make-net-config
-                  :sake-version sake-version :cups-version cups-version
-                  :max-message-size max-message-size :channels channels :quotas channel-quotas
-                  :tracked-sets tracked-sets :max-peers-per-set max-peers-per-set
-                  :block-ns (ceiling (* block-seconds 1000000000))
-                  :handshake-timeout handshake-timeout :dial-timeout dial-timeout
-                  :max-concurrent-handshakes max-concurrent-handshakes
-                  :cooldown-ns (ceiling (* peer-connection-cooldown 1000000000))
-                  :dial-frequency dial-frequency :ping-ns (ceiling (* ping-interval 1000000000))
-                  :allow-private-ips allow-private-ips :bypass-ip-check bypass-ip-check))
-         (listener (make-instance 'sock:inet-socket :type :stream :protocol :tcp))
-         (network
-           (%make-network
-            :seed seed :key (clempo.ed25519:ed25519-public-key seed) :config config :listener listener
-            :outbound (loop for (channel . rate) in channel-quotas
-                            collect (cons channel (multiple-value-call #'clempo.cw-limit:make-keyed-gcra
-                                                    (clempo.cw-limit:quota-per-second rate))))
-            :ip-limiter (multiple-value-call #'clempo.cw-limit:make-keyed-gcra
-                          (clempo.cw-limit:quota-with-period handshake-ip-period))
-            :subnet-limiter (multiple-value-call #'clempo.cw-limit:make-keyed-gcra
-                              (clempo.cw-limit:quota-with-period handshake-subnet-period))
-            ;; Each channel backlog holds one quota burst per allowed peer (channels.rs).
-            :inbox (make-queues (cons (* 4 max-peers) (loop for (nil . rate) in channel-quotas
-                                                            collect (* max-peers rate)))
-                                +network-inbox-limit+ :rotate t)
-            :channel-rings (loop for channel in channels for index from 1 collect (cons channel index)))))
-    (unwind-protect
-         (progn
-           (setf (sock:sockopt-reuse-address listener) t)
-           (sock:socket-bind listener (resolve-ipv4 listen-host) listen-port)
-           (sock:socket-listen listener 128)
-           (setf (validator-network-listen-port network) (nth-value 1 (sock:socket-name listener)))
-           (with-network-lock (network)
-             (spawn-locked network "validator listener" (lambda () (run-listener network)))
-             (spawn-locked network "validator dialer" (lambda () (run-dialer network))))
-           (funcall function network))
-      (with-network-lock (network)
-        (setf (validator-network-stopping network) t)
-        (dolist (conn (validator-network-handshake-conns network)) (conn-shutdown conn))
-        (loop for record being the hash-values of (validator-network-records network)
-              when (record-link record) do (kill-link (record-link record))))
-      ;; Workers may start their last children until they observe STOPPING.
-      (loop for threads = (with-network-lock (network)
-                            (shiftf (validator-network-threads network) nil))
-            while threads
-            do (dolist (thread threads) (thr:join-thread thread :default nil)))
-      (sock:socket-close listener)
-      (fill seed 0))))
+         (channels (mapcar #'car channel-quotas)))
+    (%make-network
+     :seed seed :key (clempo.ed25519:ed25519-public-key seed)
+     :config (make-net-config
+              :sake-version sake-version :cups-version cups-version
+              :max-message-size max-message-size :channels channels :quotas channel-quotas
+              :tracked-sets tracked-sets :max-peers-per-set max-peers-per-set
+              :block-ns (seconds->ns block-seconds)
+              :handshake-timeout handshake-timeout :dial-timeout dial-timeout
+              :max-concurrent-handshakes max-concurrent-handshakes
+              :cooldown-ns (seconds->ns peer-connection-cooldown)
+              :dial-frequency dial-frequency :ping-ns (max 1000000 (seconds->ns ping-interval))
+              :allow-private-ips allow-private-ips :bypass-ip-check bypass-ip-check)
+     :outbound (loop for (channel . rate) in channel-quotas
+                     collect (cons channel (multiple-value-call #'clempo.cw-limit:make-keyed-gcra
+                                             (clempo.cw-limit:quota-per-second rate))))
+     :ip-limiter (multiple-value-call #'clempo.cw-limit:make-keyed-gcra
+                   (clempo.cw-limit:quota-with-period handshake-ip-period))
+     :subnet-limiter (multiple-value-call #'clempo.cw-limit:make-keyed-gcra
+                       (clempo.cw-limit:quota-with-period handshake-subnet-period))
+     ;; Each channel backlog holds one quota burst per allowed peer (channels.rs).
+     :inbox (make-queues (cons (* 4 max-peers) (loop for (nil . rate) in channel-quotas
+                                                     collect (* max-peers rate)))
+                         +network-inbox-limit+ :rotate t)
+     :channel-rings (loop for channel in channels for index from 1 collect (cons channel index)))))
+
+(defun call-with-validator-network
+    (function &rest options &key seed (listen-host "0.0.0.0") (listen-port 0) &allow-other-keys)
+  "Listen on LISTEN-HOST:LISTEN-PORT (IPv4; port 0 picks one, see
+NETWORK-LISTEN-PORT), run the listener and dialer, call FUNCTION with the network,
+then stop and join every thread and zero this network's copy of SEED.
+OPTIONS (MAKE-VALIDATOR-NETWORK's keywords) default to Tempo's production settings
+(crates/consensus args.rs and config.rs): SAKE-VERSION 0, CUPS-VERSION 0,
+MAX-MESSAGE-SIZE 8388780, CHANNEL-QUOTAS (TEMPO-CHANNEL-QUOTAS), TRACKED-SETS 1,
+MAX-PEERS-PER-SET 128, BLOCK-SECONDS 4 h, HANDSHAKE-TIMEOUT 5, DIAL-TIMEOUT 15,
+MAX-CONCURRENT-HANDSHAKES 512, HANDSHAKE-IP-PERIOD 5, HANDSHAKE-SUBNET-PERIOD 0.015,
+PEER-CONNECTION-COOLDOWN 60, DIAL-FREQUENCY 1, PING-INTERVAL 50 (all seconds),
+ALLOW-PRIVATE-IPS and BYPASS-IP-CHECK false. Pass (LOCAL-NETWORK-OPTIONS) for a
+loopback devnet. SAKE-VERSION and CUPS-VERSION are not negotiated
+(commonware-stream sake/mod.rs) and Tempo pins 0/0: peers must be configured
+alike, and a mismatch fails the handshake closed."
+  (declare (ignore seed))
+  (check-type listen-host string)
+  (check-type listen-port (integer 0 65535))
+  (let ((options (copy-list options)))
+    (remf options :listen-host)
+    (remf options :listen-port)
+    (let ((network (apply #'make-validator-network options))
+          (listener (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+      (setf (validator-network-listener network) listener)
+      (unwind-protect
+           (progn
+             (setf (sock:sockopt-reuse-address listener) t)
+             (sock:socket-bind listener (resolve-ipv4 listen-host) listen-port)
+             (sock:socket-listen listener 128)
+             (setf (validator-network-listen-port network) (nth-value 1 (sock:socket-name listener)))
+             (with-network-lock (network)
+               (spawn-locked network "validator listener" (lambda () (run-listener network)))
+               (spawn-locked network "validator dialer" (lambda () (run-dialer network))))
+             (funcall function network))
+        (with-network-lock (network)
+          (setf (validator-network-stopping network) t)
+          (dolist (conn (validator-network-handshake-conns network)) (conn-shutdown conn))
+          (loop for record being the hash-values of (validator-network-records network)
+                when (record-link record) do (kill-link (record-link record))))
+        ;; Workers may start their last children until they observe STOPPING.
+        (loop for threads = (with-network-lock (network)
+                              (shiftf (validator-network-threads network) nil))
+              while threads
+              do (dolist (thread threads) (thr:join-thread thread :default nil)))
+        (sock:socket-close listener)
+        (fill (validator-network-seed network) 0)))))

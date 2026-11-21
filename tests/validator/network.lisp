@@ -336,3 +336,9 @@
                     (is (not (closed-by-peer-p first 0.3))))
           (sock:socket-close first)
           (sock:socket-close second))))))
+
+(deftest validator-manifest-admission ()
+  (signals error (net::loopback-port "localhost:4444" "127.0.0.1:"))
+  (signals error (net::loopback-port "127.0.0.1:4444/ignored" "127.0.0.1:"))
+  (signals error (net::loopback-port "127.0.0.1:0" "127.0.0.1:"))
+  (is= 4444 (net::loopback-port "127.0.0.1:4444" "127.0.0.1:")))
