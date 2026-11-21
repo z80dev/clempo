@@ -385,29 +385,27 @@ function names."
 (defmacro defcodec (name-and-options &body slots)
   "Declare a struct and its commonware wire shape, fields in wire order.
   (defcodec proposal (round round) (parent :varint) (payload (:array 32)))
-NAME-AND-OPTIONS is NAME or (NAME &rest defstruct-options). Each slot is
-\(SLOT-NAME SPEC &key default type doc). Defines the struct, WRITE-<NAME> (writer value),
+NAME-AND-OPTIONS is NAME or (NAME &rest defstruct-options); (:constructor NAME) names the
+keyword constructor. Each slot is
+\(SLOT-NAME SPEC &key default type doc); DOC documents the field in the source only. Defines the struct, WRITE-<NAME> (writer value),
 READ-<NAME> (reader) and registers NAME for CW-ENCODE / CW-DECODE and other specs."
   (destructuring-bind (name &rest options) (if (consp name-and-options)
                                                name-and-options
                                                (list name-and-options))
     (let* ((writer (symbolicate "WRITE-" name))
            (reader (symbolicate "READ-" name))
-           (constructor (symbolicate "MAKE-" name))
+           (constructor (or (second (assoc :constructor options)) (symbolicate "MAKE-" name)))
            (conc (or (second (assoc :conc-name options)) (symbolicate name "-")))
            (temps (loop for s in slots collect (gensym (symbol-name (first s)))))
            (w (gensym "W")) (r (gensym "R")) (v (gensym "V")))
       `(progn
          (eval-when (:compile-toplevel :load-toplevel :execute)
            (register-cw-type ',name ',writer ',reader))
-         (defstruct (,name (:constructor ,constructor
-                               (&key ,@(loop for s in slots
-                                             collect (list (first s) (getf (cddr s) :default)))))
+         (defstruct (,name (:constructor ,constructor)
                            ,@(remove :constructor options :key #'first))
            ,@(loop for (slot nil . keys) in slots
                    collect `(,slot ,(getf keys :default)
-                                   ,@(when (getf keys :type) `(:type ,(getf keys :type)))
-                                   ,@(when (getf keys :doc) `(:documentation ,(getf keys :doc))))))
+                                   ,@(when (getf keys :type) `(:type ,(getf keys :type))))))
          (defun ,writer (,w ,v)
            (declare (type cw-writer ,w) (type ,name ,v))
            ,@(loop for (slot spec) in slots
