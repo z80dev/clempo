@@ -118,15 +118,13 @@ compare with. A \"headRelative\" case is value-checked after HEAD-RELATIVE."
 
 (defun call-with-rpc-websocket (url function)
   (multiple-value-bind (scheme host port path) (clempo.http:parse-url url)
-    (unless (member scheme '("http" "ws") :test #'string=)
-      (error "rpcdiff WebSocket replay requires a plain HTTP or WS target"))
-    (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+    (unless (member scheme '("http" "ws" "https" "wss") :test #'string=)
+      (error "rpcdiff WebSocket replay requires an http(s) or ws(s) target"))
+    (multiple-value-bind (stream socket)
+        (let ((clempo.http:*read-timeout* 10)) (clempo.http:open-connection scheme host port))
       (unwind-protect
            (progn
-             (sb-bsd-sockets:socket-connect socket (clempo.http::resolve host) port)
-             (with-open-stream (stream (sb-bsd-sockets:socket-make-stream
-                                        socket :input t :output t :timeout 10 :buffering :full
-                                        :element-type '(unsigned-byte 8)))
+             (progn
                (let ((key (clempo.websocket:base64-encode (clempo.io:random-octets 16)))
                      (crlf (coerce '(#\Return #\Newline) 'string)))
                  (write-sequence
@@ -142,6 +140,7 @@ compare with. A \"headRelative\" case is value-checked after HEAD-RELATIVE."
                                        (clempo.websocket:accept-key key)))
                      (error "WebSocket handshake refused: ~A" status)))
                  (funcall function stream))))
+        (ignore-errors (close stream :abort t))
         (ignore-errors (sb-bsd-sockets:socket-close socket))))))
 
 (defun ws-receive-json (stream)

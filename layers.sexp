@@ -10,6 +10,7 @@
 ((:dir "base" :io-exempt ("test.lisp"))   ; the test harness times tests
  (:dir "io" :io t)
  (:dir "crypto")
+ (:dir "net" :io t)                         ; TLS client, trust anchors, HTTP client: sockets and files
  (:dir "codec")
  (:dir "trie")                              ; before types: tx/receipt roots are tries
  (:dir "types")

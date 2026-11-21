@@ -20,8 +20,9 @@ One directory under `src/` per layer, in import order (`layers.sexp`). Each has 
 | Path | What |
 |---|---|
 | `src/base` | build policy, invariants, octets, hex, u256 helpers, test harness |
-| `src/io` | clock, entropy, files, processes, http client |
-| `src/crypto` | keccak, sha2, ripemd160, blake2f, blake3, secp256k1, p256, bn254, bls12-381, kzg, ed25519, x25519, aes, chacha20-poly1305 |
+| `src/io` | clock, entropy, files, processes |
+| `src/crypto` | keccak, sha2, ripemd160, blake2f, blake3, secp256k1, p256, bn254, bls12-381, kzg, ed25519, x25519, aes, aes-gcm, chacha20-poly1305, rsa verification, p256 ecdh, asn.1 der, x.509 |
+| `src/net` | TLS 1.3 client, system trust anchors, http(s) client |
 | `src/codec` | RLP, JSON, ABI, commonware codec |
 | `src/trie` | Merkle Patricia trie, state root, proofs |
 | `src/types` | headers, transactions (including Tempo's 0x76), receipts, blocks, signatures |
