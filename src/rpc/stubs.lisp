@@ -1,9 +1,8 @@
 (defpackage #:clempo.rpc.stubs
   (:use #:cl #:clempo.base #:clempo.rpc)
   (:local-nicknames (#:json #:clempo.json) (#:serde #:clempo.serde) (#:eth #:clempo.rpc.eth))
-  (:documentation "Methods the reference answers without chain data: reth's debug no-ops, the
-admin, txpool, signing and bundle endpoints of a node with no local accounts or pool, and the
-error paths of methods whose success needs a transaction pool.")
+  (:documentation "Methods the reference answers without chain data: reth's debug no-ops and the
+admin and signing endpoints of a node with no local accounts.")
   (:export))
 
 (in-package #:clempo.rpc.stubs)
@@ -97,13 +96,6 @@ error paths of methods whose success needs a transaction pool.")
 
 ;;; A node with no local accounts
 
-(defun decode-or-fail (data)
-  (when (zerop (length data)) (rpc-fail +invalid-params+ "empty transaction data"))
-  (handler-case (clempo.transactions:decode-transaction data)
-    (error () (rpc-fail +invalid-params+ "failed to decode signed transaction"))))
-
-(defrpc "trace_rawTransaction" ((data bytes) (types any)) "decode, then trace"
-  (decode-or-fail data) (internal-error "tracing unavailable"))
 (defrpc "eth_sign" ((address address) (data bytes)) "no local accounts" (rpc-fail +invalid-params+ "unknown account"))
 (defrpc "eth_sendTransaction" ((request any)) "no local accounts" (rpc-fail +invalid-params+ "unknown account"))
 (defrpc "eth_signTransaction" ((request any)) "no local accounts" (rpc-fail +invalid-params+ "unknown account"))
@@ -118,11 +110,6 @@ error paths of methods whose success needs a transaction pool.")
 
 (defrpc "eth_signTypedData" ((address address) (data typed-data)) "no local accounts"
   (rpc-fail +invalid-params+ "unknown account"))
-
-(defrpc "eth_callBundle" ((bundle any)) "bundles need at least one transaction"
-  (if (zerop (length (json:jget bundle "txs" #())))
-      (rpc-fail +invalid-params+ "bundle missing txs")
-      (internal-error "bundle simulation unavailable")))
 
 ;;; Tempo extensions the reference leaves unimplemented
 

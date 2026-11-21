@@ -1221,15 +1221,26 @@ in turn; execution stops at the first invalid transaction."
   (:accounts "accounts" raw :required t)
   (:storages "storages" raw :required t))
 
-(defun preimages (hashes candidates)
-  "HASHES (32-octet keys) -> the CANDIDATES (address or slot integers, WIDTH octets wide as a
-cons (width . list)) whose keccak they are, as an EQUALP table."
-  (let ((want (make-hash-table :test 'equalp)) (found (make-hash-table :test 'equalp)))
-    (dolist (h hashes) (setf (gethash h want) t))
-    (destructuring-bind (width . values) candidates
-      (dolist (v values found)
-        (let ((h (clempo.keccak:keccak256 (integer->octets v width))))
-          (when (gethash h want) (setf (gethash h found) v)))))))
+(defun hashed-view (trie)
+  "A handle on a snapshot of the secure TRIE that takes hashed keys (the 32-octet paths of
+its leaves), as reth's hashed post-state addresses them."
+  (let* ((snapshot (trie:trie-clone trie))
+         (view (clempo.trie::%make-trie (clempo.trie::trie-root-node snapshot) (clempo.trie::trie-store snapshot) nil)))
+    (trie:trie-root view)
+    view))
+
+(defun address-preimages (db hashes)
+  "keccak(address) -> address for the accounts of DB whose hashed address is among HASHES
+\(an EQUALP set). Only an account whose kept storage changes needs its address: clempo
+keeps storage tries by address."
+  (let ((found (make-hash-table :test 'equalp)))
+    (when (plusp (hash-table-count hashes))
+      (store:map-accounts (lambda (address account)
+                            (declare (ignore account))
+                            (let ((h (clempo.keccak:keccak256 (integer->octets address 20))))
+                              (when (gethash h hashes) (setf (gethash h found) address))))
+                          db))
+    found))
 
 (defun trie-updates-json (nodes removed)
   (values (cons :object
@@ -1241,78 +1252,118 @@ cons (width . list)) whose keccak they are, as an EQUALP table."
                                                   "root_hash" :null))))
           (sort (map 'simple-vector #'clempo.rpc.tries:nibbles-hex removed) #'string<)))
 
+(defun nibbles-octets (nibbles)
+  (let ((o (make-octets (floor (length nibbles) 2))))
+    (loop for (a b) on nibbles by #'cddr for i from 0
+          do (setf (aref o i) (logior (ash a 4) b)))
+    o))
+
+(defun stored-branch-paths (trie)
+  "The paths of the branches of TRIE that reth keeps in its trie tables (those
+clempo.rpc.tries:trie-updates treats as stored), the root's empty path excluded: what a trie
+cursor walks."
+  (let ((out '()))
+    (labels ((walk (path)
+               (multiple-value-bind (kind more) (trie:trie-node-at trie path)
+                 (case kind
+                   (:extension (walk (append path more)))
+                   (:branch
+                    (let ((stored (some (lambda (c) (and c (eq (car c) :branch) (= (length (cdr c)) 32))) more)))
+                      (loop for i below 16
+                            for c = (svref more i)
+                            when (and c (member (car c) '(:branch :extension)) (walk (append path (list i))))
+                              do (setf stored t))
+                      (when (and stored path) (push path out))
+                      stored))))))
+      (walk '()))
+    out))
+
 (defun state-root-with-updates (input n)
-  "reth state_root_with_updates: the hashed post-state INPUT (accounts and storages keyed by
-keccak) applied to the state after block N; the new state root and reth's trie updates, as
-its walker over the stored trie would rebuild them (clempo.rpc.tries:trie-updates). Hashed
-keys are mapped back to the state's addresses and slots, so only existing ones can change."
+  "reth state_root_with_updates on the state after block N (see HASHED-POST-STATE-UPDATES)."
   (clempo.rpc.tries:with-trie-state (db n)
-    (store:with-speculative-blocks (db)
-      (let* ((accounts (cdr (getf input :accounts)))
-             (storages (cdr (getf input :storages)))
-             (all-addresses (let ((out '())) (store:map-accounts (lambda (a acc) (declare (ignore acc)) (push a out)) db) out))
-             (hashed (lambda (s) (hex->octets s)))
-             (addresses (preimages (mapcar (lambda (e) (funcall hashed (car e))) (append accounts storages))
-                                   (cons 20 all-addresses)))
-             (address-of (lambda (s) (or (gethash (funcall hashed s) addresses)
-                                         (internal-error (format nil "no account hashes to ~A" s)))))
-             (pre (trie:trie-clone (store:db-account-trie db)))
-             (pre-storage (make-hash-table)))
-        (loop for (key . storage) in storages
-              for address = (funcall address-of key)
-              do (setf (gethash address pre-storage) (trie:trie-clone (store:db-storage-trie db address))))
-        (store:db-begin-block db)
-        (loop for (key . account) in accounts
-              for address = (funcall address-of key)
+    (hashed-post-state-updates db input)))
+
+(defun hashed-post-state-updates (db input)
+  "reth state_root_with_updates: the hashed post-state INPUT (accounts and storages keyed by
+keccak) applied to the state database DB; the new state root and reth's trie updates, as
+its walker over the stored trie would rebuild them (clempo.rpc.tries:trie-updates).
+Everything happens on snapshots of the block's tries addressed by the hashed keys
+themselves, so new accounts and slots need no preimage; an existing account's kept storage
+trie is found by its address. As in reth, a storage change of an account that exists
+neither in the state nor in INPUT's accounts adds no leaf, and a destroyed account (null in
+INPUT's accounts) reports every stored node of its storage trie removed."
+  (progn
+    (let* ((accounts (mapcar (lambda (e) (cons (hex->octets (car e)) (cdr e))) (cdr (getf input :accounts))))
+           (storages (mapcar (lambda (e) (cons (hex->octets (car e)) (cdr e))) (cdr (getf input :storages))))
+           (pre (hashed-view (store:db-account-trie db)))
+           (post (hashed-view (store:db-account-trie db)))
+           (existing (let ((set (make-hash-table :test 'equalp)))
+                       (loop for (h . v) in (append storages (remove :null accounts :key #'cdr :test-not #'eq))
+                             when (trie:trie-get pre h) do (setf (gethash h set) t))
+                       set))
+           (addresses (address-preimages db existing))
+           (storage-tries (make-hash-table :test 'equalp)) ; h -> (pre post slot-changes)
+           (roots (make-hash-table :test 'equalp)))
+      (labels ((stored (h)
+                 "A hashed view of the stored storage trie of the existing account H, or an empty trie."
+                 (if (gethash h existing)
+                     (hashed-view (store:db-storage-trie
+                                   db (or (gethash h addresses)
+                                          (unreachable "account ~A is in the trie but not in the state" (hex32 h)))))
+                     (trie:make-trie))))
+       (loop for (h . storage) in storages
+              for slots = (mapcar (lambda (e) (cons (hex->octets (car e)) (hex-or-integer (cdr e))))
+                                  (cdr (json:jget storage "storage" '(:object))))
+              for after = (if (eq (json:jget storage "wiped") :true) (trie:make-trie) (stored h))
+              do (loop for (slot . value) in slots
+                       do (if (zerop value)
+                              (trie:trie-delete after slot)
+                              (trie:trie-put after slot (clempo.rlp:rlp-encode value))))
+                 (setf (gethash h roots) (trie:trie-root after)
+                       (gethash h storage-tries)
+                       (list (stored h) after (mapcar (lambda (e) (clempo.rpc.tries:octets-nibbles (car e))) slots))))
+      (flet ((leaf (h nonce balance code-hash commitment)
+               (trie:trie-put post h (trie:encode-account nonce balance
+                                                          (or (gethash h roots)
+                                                              (let ((old (trie:trie-get pre h)))
+                                                                (if old (nth-value 2 (trie:decode-account old)) trie:+empty-trie-root+)))
+                                                          code-hash commitment))))
+        (loop for (h . account) in accounts
               do (if (eq account :null)
-                     (store:db-delete-account db address)
+                     (trie:trie-delete post h)
                      (let ((code (json:jget account "bytecode_hash")))
-                       (store:db-set-account db address (hex-or-integer (json:jget account "nonce" 0))
-                                             (hex-or-integer (json:jget account "balance" 0))
-                                             (if (stringp code) (hex->octets code) trie:+empty-code-hash+)))))
-        (let ((slot-changes (make-hash-table)))
-          (loop for (key . storage) in storages
-                for address = (funcall address-of key)
-                for slots = (cdr (json:jget storage "storage" '(:object)))
-                for known = (let ((out '()) (a (store:db-account db address)))
-                              (when a (store:map-account-storage (lambda (s v) (declare (ignore v)) (push s out)) a))
-                              out)
-                for preimages = (preimages (mapcar (lambda (e) (funcall hashed (car e))) slots) (cons 32 known))
-                do (when (eq (json:jget storage "wiped") :true) (store:db-wipe-storage db address))
-                   (loop for (slot-key . value) in slots
-                         do (store:db-set-storage db address
-                                                  (or (gethash (funcall hashed slot-key) preimages)
-                                                      (internal-error (format nil "no slot hashes to ~A" slot-key)))
-                                                  (hex-or-integer value)))
-                   (setf (gethash address slot-changes)
-                         (mapcar (lambda (e) (clempo.rpc.tries:octets-nibbles (funcall hashed (car e)))) slots)))
-          (let ((root (store:db-state-root db))
-                (post (store:db-account-trie db))
-                (changes (mapcar (lambda (e) (clempo.rpc.tries:octets-nibbles (funcall hashed (car e))))
-                                 (append accounts storages))))
-            (multiple-value-bind (nodes removed leaves) (clempo.rpc.tries:trie-updates pre post changes)
-              (let* ((leaf-keys (mapcar (lambda (nibbles)
-                                          (let ((o (make-octets 32)))
-                                            (loop for (a b) on nibbles by #'cddr for i from 0
-                                                  do (setf (aref o i) (logior (ash a 4) b)))
-                                            o))
-                                        leaves))
-                     (leaf-addresses (preimages leaf-keys (cons 20 all-addresses)))
-                     (storage-tries
-                       (loop for key in leaf-keys
-                             for address = (gethash key leaf-addresses)
-                             for post-storage = (and address (store:db-storage-trie db address))
-                             when post-storage
-                               append (multiple-value-bind (snodes sremoved)
-                                          (clempo.rpc.tries:trie-updates (or (gethash address pre-storage) post-storage)
-                                                                         post-storage (gethash address slot-changes))
-                                        (when (or snodes sremoved)
-                                          (multiple-value-bind (sn rn) (trie-updates-json snodes sremoved)
-                                            (list (cons (hex32 key) (json:jobject "storage_nodes" sn "removed_nodes" rn)))))))))
-                (multiple-value-bind (an rn) (trie-updates-json nodes removed)
-                  (vector (hex32 root)
-                          (json:jobject "account_nodes" an "removed_nodes" rn
-                                        "storage_tries" (cons :object storage-tries))))))))))))
+                       (leaf h (hex-or-integer (json:jget account "nonce" 0)) (hex-or-integer (json:jget account "balance" 0))
+                             (if (stringp code) (hex->octets code) trie:+empty-code-hash+) 0))))
+        (loop for (h) in storages
+              for old = (trie:trie-get pre h)
+              unless (or (assoc h accounts :test #'equalp) (null old))
+                do (multiple-value-bind (nonce balance root code-hash commitment) (trie:decode-account old)
+                     (declare (ignore root))
+                     (leaf h nonce balance code-hash commitment))))
+      (let ((root (trie:trie-root post))
+            (changes (mapcar (lambda (e) (clempo.rpc.tries:octets-nibbles (car e))) (append accounts storages))))
+        (multiple-value-bind (nodes removed leaves) (clempo.rpc.tries:trie-updates pre post changes)
+          (let ((storage-json
+                  (loop for nibbles in leaves
+                        for h = (nibbles-octets nibbles)
+                        for entry = (gethash h storage-tries)
+                        when (and entry (trie:trie-get post h))
+                          append (destructuring-bind (before after slot-changes) entry
+                                   (multiple-value-bind (snodes sremoved)
+                                       (clempo.rpc.tries:trie-updates before after slot-changes)
+                                     (when (or snodes sremoved)
+                                       (multiple-value-bind (sn rn) (trie-updates-json snodes sremoved)
+                                         (list (cons (hex32 h) (json:jobject "storage_nodes" sn "removed_nodes" rn)))))))))
+                (destroyed
+                  (loop for (h . account) in accounts
+                        for paths = (and (eq account :null) (gethash h existing) (stored-branch-paths (stored h)))
+                        when paths
+                          collect (cons (hex32 h) (json:jobject "storage_nodes" (json:jobject)
+                                                                "removed_nodes" (nth-value 1 (trie-updates-json '() paths)))))))
+            (multiple-value-bind (an rn) (trie-updates-json nodes removed)
+              (vector (hex32 root)
+                      (json:jobject "account_nodes" an "removed_nodes" rn
+                                    "storage_tries" (cons :object (append storage-json destroyed))))))))))))
 
 (defun hex-or-integer (v)
   (etypecase v (integer v) (string (hex->integer v))))

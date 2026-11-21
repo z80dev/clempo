@@ -30,7 +30,8 @@
                (:file "filter")
                (:file "fill")
                (:file "pool")
-               (:file "capabilities")))
+               (:file "capabilities")
+               (:file "bundle")))
 
 (defsystem "clempo-rpc/tests"
   :depends-on ("clempo-rpc")
@@ -45,4 +46,5 @@
                (:file "aa-request-tests")
                (:file "pool-tests")
                (:file "server-tests")
-               (:file "gap-tests")))
+               (:file "gap-tests")
+               (:file "impl-tests")))

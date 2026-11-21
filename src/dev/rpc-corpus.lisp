@@ -1098,3 +1098,84 @@ methods are slow far behind the head, so they use the samples' recent archive bl
                   (record-suite (car s) suite-url :threads (if (string= (car s) "consensus") 1
                                                                (arg-int args :threads 8)))
                   suite-url))))))
+
+;;; Success paths of the methods that execute signed transactions or a hashed post-state,
+;;; pinned to historical blocks so every answer is fixed: eth_callBundle and
+;;; trace_rawTransaction replay a mainnet transaction (its raw bytes from the archive) on its
+;;; parent's state, debug_stateRootWithUpdates applies hashed post-states (new accounts and
+;;; slots included) to the samples' recent block. One trace_rawTransaction case names
+;;; "latest" and is recorded as live.
+
+(defparameter *impl-txs*
+  '((47952533 0) (14051124 0) (26944661 0) (45604163 0) (6254004 0) (7360166 0) (30383358 0)
+    (46015857 0) (35240394 0 1))
+  "(block index...) of the archive transactions the impl suite replays: Tempo batch, EIP-1559
+create, EIP-7702 (a nonzero tip), legacy, EIP-2930 create, expiring nonce, a reverting Tempo
+transaction, and a two-transaction bundle.")
+
+(defun archive-raw-txs (n indices)
+  "(values raw-tx-hex-list timestamp-hex) of the transactions INDICES of archive block N."
+  (let* ((block (clempo.blocks:decode-block (clempo.archive:raw-block n)))
+         (txs (clempo.blocks:block-transactions block)))
+    (values (mapcar (lambda (i) (octets->hex (clempo.transactions::transaction-raw (nth i txs)))) indices)
+            (quantity->hex (clempo.headers:ethereum-header-timestamp
+                            (clempo.headers:header-inner (clempo.blocks:block-header block)))))))
+
+(defun keccak-hex (hex) (octets->hex (clempo.keccak:keccak256 (hex->octets hex))))
+
+(defsuite "impl" (s)
+  "eth_callBundle, trace_rawTransaction and debug_stateRootWithUpdates success paths at pinned blocks"
+  (let* ((recent (clempo.json:jget s "recent"))
+         (n (and recent (clempo.json:jget recent "number")))
+         (pathusd (keccak-hex +pathusd+))
+         (fresh (keccak-hex "0x00000000000000000000000000000000c1e3b0aa"))
+         (slot1 (keccak-hex "0x00000000000000000000000000000000000000000000000000000000deadbeef"))
+         (slot2 (keccak-hex "0x0000000000000000000000000000000000000000000000000000000000000001"))
+         (slot3 (keccak-hex "0x0000000000000000000000000000000000000000000000000000000000000002")))
+    (append
+     (loop for (block . indices) in *impl-txs*
+           for number = (quantity->hex block)
+           for parent = (quantity->hex (1- block))
+           append (multiple-value-bind (raws timestamp) (archive-raw-txs block indices)
+                    (list* (r "eth_callBundle" (jo "txs" (coerce raws 'simple-vector) "blockNumber" number
+                                                   "stateBlockNumber" parent "timestamp" timestamp))
+                           (mapcar (lambda (raw) (r "trace_rawTransaction" raw (jv "trace" "stateDiff") parent))
+                                   raws))))
+     (multiple-value-bind (raws timestamp) (archive-raw-txs 26944661 '(0))
+       (declare (ignore timestamp))
+       (let ((raw (first raws)) (number (quantity->hex 26944661)) (parent (quantity->hex 26944660)))
+         (list (r "eth_callBundle" (jo "txs" (jv raw) "blockNumber" number "stateBlockNumber" parent))
+               (r "eth_callBundle" (jo "txs" (jv raw) "blockNumber" number "stateBlockNumber" parent
+                                       "coinbase" "0x00000000000000000000000000000000000000c0"
+                                       "baseFee" "0x1" "gasLimit" "0x1000000"))
+               (r "eth_callBundle" (jo "txs" (jv raw) "blockNumber" number "stateBlockNumber" parent
+                                       "difficulty" "0x5" "timeout" "0x0" "transactionIndex" 3))
+               (r "eth_callBundle" (jo "txs" (jv raw) "blockNumber" number "stateBlockNumber" parent
+                                       "baseFee" "0xffffffffffffffffffff"))
+               (r "eth_callBundle" (jo "txs" (jv raw) "blockNumber" number "stateBlockNumber" parent
+                                       "gasLimit" "0x5208"))
+               (r "eth_callBundle" (jo "txs" (jv raw) "blockNumber" number "stateBlockNumber" parent
+                                       "gasLimit" "0x3000000"))
+               (r "eth_callBundle" (jo "txs" (jv raw) "blockNumber" number "stateBlockNumber" number))
+               (r "eth_callBundle" (jo "txs" (jv raw) "blockNumber" number "stateBlockNumber" +far-block+))
+               (r "eth_callBundle" (jo "txs" (jv raw) "blockNumber" "0x0" "stateBlockNumber" parent))
+               (r "eth_callBundle" (jo "txs" (jv raw) "blockNumber" number))
+               (r "eth_callBundle" (jv (jv raw) number parent))
+               (r "eth_callBundle" (jv (jv raw) number))
+               (r "eth_callBundle" (jv (jv) "0x1" "0x1" :null :null :null :null :null :null :null 5))
+               (r "eth_callBundle" (jo "txs" (jv "0x01") "blockNumber" "0x1" "stateBlockNumber" "0x1"))
+               (r "trace_rawTransaction" raw (jv "vmTrace") parent)
+               (r "trace_rawTransaction" raw (jv "trace") number)
+               (r "trace_rawTransaction" raw (jv "trace") "latest")
+               (r "trace_rawTransaction" raw (jv "trace") +far-block+)
+               (r "trace_rawTransaction" raw (jv "nope") parent))))
+     (when n
+       (flet ((root (accounts storages) (r "debug_stateRootWithUpdates" (jo "accounts" accounts "storages" storages) n))
+              (storage (&rest kvs) (jo "wiped" :false "storage" (apply #'jo kvs))))
+         (list (root (jo fresh (jo "nonce" 1 "balance" "0x5" "bytecode_hash" :null))
+                     (jo fresh (storage slot1 "0x7" slot2 "0x1")))
+               (root (jo) (jo pathusd (storage slot1 "0x7" slot3 "0x0")))
+               (root (jo) (jo fresh (storage slot1 "0x7")))
+               (root (jo pathusd :null) (jo))
+               (root (jo fresh (jo "nonce" 0 "balance" "0x0" "bytecode_hash" :null))
+                     (jo fresh (jo "wiped" :true "storage" (jo slot1 "0x1"))))))))))
