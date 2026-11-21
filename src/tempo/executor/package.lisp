@@ -40,7 +40,7 @@ with RETRY-BLOCK, HEAL-FROM-REFERENCE, SKIP-BLOCK and ABORT-REPLAY restarts.")
    ;; overlay blocks (RPC requests and trace replays)
    #:begin-call-block #:call-block-world #:execute-request #:next-call-block #:finish-call-block
    #:tx-outcome-output #:tx-outcome-halt #:tx-outcome-refunded
-   ;; call.lisp (HistoryAgent): calls on any state view
+   ;; call.lisp: calls on any state view
    #:block-prefix-context #:call-request #:*call-flags* #:caller-gas-allowance
    #:estimate-gas #:estimate-failure #:estimate-failure-kind #:estimate-failure-gas-limit
    #:estimate-failure-outcome

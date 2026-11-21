@@ -1,6 +1,6 @@
-;;; Owner: the precompiles agent. Tempo hardforks, fork-if, gas parameters.
+;;; Tempo hardforks, fork-if and the fork-site registry, gas parameters.
 (defsystem "clempo-tempo-forks"
-  :description "Owner: the precompiles agent. Tempo hardforks, fork-if, gas parameters."
+  :description "Tempo hardforks, fork-if and the fork-site registry, gas parameters."
   :depends-on ("clempo-base")
   :serial t
   :components ((:file "forks")))

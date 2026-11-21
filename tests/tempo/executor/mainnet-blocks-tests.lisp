@@ -135,6 +135,30 @@ transactions touched."
 (defblock-test t7-sstore-storage-credits-2 29152424
   "T7 (TIP-1060): the second early T7 block with storage-credit SSTOREs.")
 
+(deftest overlay-check-transaction-never-opens-a-db-block ()
+  "check-transaction :overlay validates (and with :execute, runs) on a world over the
+database: no db block is opened, so readers sharing the database never see its writes."
+  (let* ((n 4711932)
+         (block (fixture-block n))
+         (db (prestate-db n block))
+         (root (clempo.store:db-root-hash db))
+         (env (header-block-env (blocks:block-header block) :chain :mainnet))
+         (tx (first (blocks:block-transactions block)))
+         (sender (clempo.transactions:transaction-sender tx))
+         (opened nil)
+         (plain (check-transaction db env tx sender :execute t))
+         (overlay (progn
+                    (sb-int:encapsulate 'store:db-begin-block 'overlay-test
+                                        (lambda (f &rest args) (setf opened t) (apply f args)))
+                    (unwind-protect (check-transaction db env tx sender :execute t :overlay t)
+                      (sb-int:unencapsulate 'store:db-begin-block 'overlay-test)))))
+    (is (not opened))
+    (is (= (tx-outcome-gas-used plain) (tx-outcome-gas-used overlay)))
+    (is (tx-outcome-status overlay))
+    (is (tx-outcome-fee-token (check-transaction db env tx sender :overlay t)))
+    (is (not (store:db-block-open-p db)))
+    (is (equalp root (clempo.store:db-root-hash db)))))
+
 (defblock-test t3-call-scope-prevalidation 16986086
   "T3: an access key's call scopes are validated (metered) before the batch runs.")
 (defblock-test create-under-2d-nonce-pays-new-account 18337286

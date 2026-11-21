@@ -1,7 +1,3 @@
-;;; NOT YET IN clempo-tempo-executor.asd: written against EvmAgent's and PrecompilesAgent's
-;;; working trees (clempo.state backend/world, clempo.evm spec/precompile provider/SSTORE hook,
-;;; clempo.contract host protocol); add it to the system once clempo.evm and clempo.state are
-;;; pushed. Compiled cleanly in a scratch tree combining those working trees (2026-11-21).
 (in-package #:clempo.executor)
 
 ;;; How Tempo configures the EVM (tempo crates/evm/src/handler/config.rs, instructions.rs,

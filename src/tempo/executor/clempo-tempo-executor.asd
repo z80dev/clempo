@@ -1,6 +1,6 @@
-;;; Owner: the executor agent. Tempo block execution, receipts, roots and resumable replay.
+;;; Tempo block execution, receipts, roots and resumable replay.
 (defsystem "clempo-tempo-executor"
-  :description "Owner: the executor agent. Tempo block executor and replay with restarts."
+  :description "Tempo block executor and replay with restarts."
   :depends-on ("clempo-base" "clempo-io" "clempo-crypto" "clempo-codec" "clempo-trie" "clempo-types"
                "clempo-store" "clempo-state" "clempo-evm" "clempo-tempo-forks"
                "clempo-tempo-chainspec" "clempo-tempo-contract" "clempo-tempo-precompiles")
@@ -16,7 +16,7 @@
                (:file "aa")
                (:file "system-calls")
                (:file "replay")
-               (:file "call")))                ; HistoryAgent: call contexts over any state view
+               (:file "call")))                ; call contexts over any state view
 
 (defsystem "clempo-tempo-executor/tests"
   :depends-on ("clempo-tempo-executor" "clempo-io")

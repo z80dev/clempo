@@ -1,8 +1,3 @@
-;;; NOT YET IN clempo-tempo-executor.asd: needs clempo.state / clempo.evm (EvmAgent) pushed and
-;;; the fee manager, TIP-20, keychain and channel-reserve entry points (PrecompilesAgent).
-;;; Precompile entry points are resolved at run time (PROTOCOL-FN) so a missing one stops a
-;;; block in UNSUPPORTED-TRANSACTION instead of breaking the build; replace with direct calls
-;;; once they are exported.
 (in-package #:clempo.executor)
 
 ;;; The transaction pipeline: tempo crates/evm/src/handler.rs (0x76) and handler/config.rs
@@ -34,24 +29,9 @@
   "Fee in TIP-20 base units: ceil(gas * price / 10^12)."
   (ceiling (* gas price) +gas-price-scaling+))
 
-;;; Precompile entry points, by name until PrecompilesAgent exports them.
-
-(defun protocol-fn (package name)
-  (let* ((p (find-package package))
-         (s (and p (find-symbol name p))))
-    (if (and s (fboundp s))
-        (symbol-function s)
-        (fail-tx 'unsupported-transaction *tx-index* "precompile entry point ~A::~A is not available"
-                 package name))))
-
-(defmacro pcall (package name &rest args)
-  `(funcall (protocol-fn ,package ,name) ,@args))
-
-
 (defmacro with-protocol-storage ((&key (gas-limit '+max-u64+) static) &body body)
   "StorageCtx::enter_evm_without_tip1060_accounting: precompile code run by the handler, metered
-on its own gas (unlimited unless GAS-LIMIT) without TIP-1060 accounting. Returns BODY's values
-and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-STORAGE* for gas."
+on its own gas (unlimited unless GAS-LIMIT) without TIP-1060 accounting. Returns BODY's values."
   `(let ((contract:*storage* (contract:make-metered-storage *host* :gas-limit ,gas-limit :static ,static
                                                                   :tip1060 nil)))
      ,@body))
@@ -249,8 +229,7 @@ and the storage backend as an extra last value is not needed; use WITH-PROTOCOL-
       ;; A transient write only TIP20ChannelReserve (T5) reads, inside this transaction: before
       ;; T5 nothing can observe it.
       (when (forks:spec>= :t5)
-        (pcall "CLEMPO.CHANNEL-RESERVE" "SET-CHANNEL-OPEN-CONTEXT-HASH"
-               (txv-unique-id v))))
+        (clempo.channel-reserve:set-channel-open-context-hash (txv-unique-id v))))
     (multiple-value-bind (token fallback-p) (resolve-fee-token v fee-payer max-fee)
       (unless (tip20-address-p token) (invalid "fee token ~X is not TIP-20" token))
       (unless (zerop max-fee)
@@ -280,7 +259,7 @@ non-creditable for the rest of the transaction (NonCreditableSlots)."
            (balance-slot (with-protocol-storage () (clempo.tip20:balance-slot token payer)))
            (limit-slot (when key-id
                          (with-protocol-storage ()
-                           (pcall "CLEMPO.KEYCHAIN" "SPENDING-LIMIT-REMAINING-SLOT" payer key-id token)))))
+                           (clempo.keychain:spending-limit-remaining-slot payer key-id token)))))
       (setf *non-creditable*
             (lambda (owner slot)
               (or (and (= owner token) (= slot balance-slot))
@@ -595,19 +574,25 @@ tokens, TIP-20 balances, keychain keys) can be called. Writes signal; nothing re
                              :fee-payer (fee-payer fee) :key-expiry (ctx-key-expiry *ctx*)))
 
 (defun check-transaction (db env tx sender &key skip-nonce-check skip-valid-after-check
-                                               skip-base-fee-check skip-liquidity-check execute)
+                                               skip-base-fee-check skip-liquidity-check execute
+                                               overlay)
   "Validate TX on DB as the first transaction after ENV's pre-execution changes: every check
 the handler makes through nonce, keychain and fee collection, without running its calls
 (with EXECUTE, run it too). Everything is undone. Returns the TX-OUTCOME (gas 0 unless
-EXECUTE) or signals INVALID-TRANSACTION."
-  (let ((ctx (begin-block db env)))
+EXECUTE) or signals INVALID-TRANSACTION. With OVERLAY the block and its pre-execution changes
+live in a world over DB and DB is never written (safe for readers sharing DB)."
+  (let ((ctx (if overlay
+                 (open-call-block (make-context db env :overlay t))
+                 (begin-block db env))))
     (setf (ctx-skip-nonce-check ctx) skip-nonce-check
           (ctx-skip-valid-after-check ctx) skip-valid-after-check
           (ctx-skip-base-fee-check ctx) skip-base-fee-check
           (ctx-skip-liquidity-check ctx) skip-liquidity-check
           (ctx-validate-only ctx) (not execute))
-    (unwind-protect (apply-transaction ctx tx sender)
-      (store:db-revert-block db))))
+    (if overlay
+        (apply-transaction ctx tx sender)
+        (unwind-protect (apply-transaction ctx tx sender)
+          (store:db-revert-block db)))))
 
 ;;; Overlay blocks: requests (eth_call, eth_estimateGas, eth_simulateV1, eth_callMany) and trace
 ;;; replays on a state backend. Pre-execution changes and every write stay in the context's
