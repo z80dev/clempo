@@ -307,8 +307,8 @@ allocating 79,780,352 bytes including state construction and signing. These are
 end-to-end fixture costs, not pool-only throughput. No production validation is
 bypassed.
 
-Archive R1 command: `CLEMPO_RPC=http://127.0.0.1:8545 bin/clempo-dev r1-archive
--threads 16 -batch 500 -result ~/scratch/clempo/r1-archive/full.json` checks archived
+Archive R1 command: `CLEMPO_RPC=http://127.0.0.1:8545 nice -n 10 bin/clempo-dev r1-archive
+-threads 6 -batch 100 -result ~/scratch/clempo/r1-archive/full.json` checks archived
 raw blocks against independent full-block RPC responses, including byte-exact
 round trips, header/body commitments, transaction hashes, recovered senders and
 keychain key IDs. It records every failed block in JSONL and fails closed on
@@ -319,3 +319,16 @@ cryptographic recoveries, in 4.369541 s: **4,577.1 blocks/s, 22.0 recoveries/s**
 These are end-to-end rates including archive I/O, RPC, JSON, codecs, roots and
 recovery, not dense-transaction or crypto-only benchmarks. Evidence:
 `~/scratch/clempo/r1-archive/check-1795242754.json`.
+
+The full-archive run uses six workers (at most six concurrent HTTP batches) and
+niceness 10 to share the reference node. Repeat the same command with `-resume`
+and the same `-result` to resume the atomically saved completed-chunk checkpoint.
+The original range is retained even if the archive grows. Interrupted chunks are
+rechecked without double-counting; failure/chunk logs append across attempts.
+Resumed throughput includes committed checkpoint time, not downtime or trailing
+work lost before a checkpoint.
+A real-data missing-chunk/resume check retained 10,000 committed blocks, resumed
+to exactly 20,000 unique blocks, and preserved the original end height despite
+the isolated archive view gaining another chunk. It finished with zero failed
+blocks and no duplicate completed chunks; evidence is
+`~/scratch/clempo/r1-archive/resume-test.eI4u3S/{first.log,resumed.log,result.json}`.
