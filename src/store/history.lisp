@@ -465,8 +465,12 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
   "Pick up segments and codes written since the history was opened (a running build job)."
   (sb-thread:with-mutex ((history-lock history))
     (let* ((dir (history-dir history))
-           (known (history-segments history))
-           (fresh (loop for p in (segment-files dir)
+           (files (segment-files dir))
+           ;; a file gone from the directory (a merge input, a removed job) is dropped
+           (known (remove-if-not (lambda (s) (find (namestring (segment-path s)) files
+                                                   :key #'namestring :test #'string=))
+                                 (history-segments history)))
+           (fresh (loop for p in files
                         unless (find (namestring p) known :key (lambda (s) (namestring (segment-path s)))
                                                          :test #'string=)
                           collect (handler-case (open-segment p)
