@@ -200,9 +200,10 @@ Per step, each paired Clempo A/B on the previous step:
 The first three rows are single runs taken while the host load was changing. Parallel
 storage-trie hashing (`7075d08`) was reverted: paired runs with 1 vs 4 state-root
 participants were equal (27.20/27.50/27.68 vs 27.17/27.88/27.70 s). Replay-thread
-profile now (`-profile-threads main`): TIP-20 transfer and fee pre/post paths ~35%, metered
-SLOAD path ~20% (bignum-keyed hash lookups ~15%), state root ~12%, expiring-nonce ring
-~10%, receipts root and bloom ~6%, synchronous EVM JIT compiles ~2%.
+profile at that revision (`-profile-threads main`): TIP-20 transfer and fee
+pre/post paths ~35%, metered SLOAD ~20% (bignum-keyed lookups ~15%), state root
+~12%, expiring-nonce ring ~10%, receipts root and bloom ~6%, and the then
+synchronous EVM JIT ~2%. The node no longer compiles on the execution thread.
 
 R7 pipeline handoff and storage-trie build (`b81e3e5`, paired against `6c0f9d2`,
 alternating, all blocks root-checked; `logs/busy/es/recent/` and `es/`):
@@ -244,11 +245,12 @@ Silicon). `src/evm/compile.lisp` turns a contract into Lisp (blocks as TAGBODY
 tags, a symbolic stack in lexical variables, the DEFOP bodies themselves, static
 gas charged once per segment, interpreter resume on short gas or broken stack
 bounds) and `compile`s it; `compile-cache.lisp` shares the functions by (code
-hash, fork). Differential: `bin/clempo-dev statetest -jit` (every code compiled at
-its first call) passes **61,903/61,903** (50,909 compilations, 0 failures,
-602 s); `jit-latency` compiles all 9,480 distinct fixture codes without a
-warning. `evm-bench -n 10000000`, median of three, interpreter (`-interp`) ->
-compiled (`-jit`), Mgas/s:
+hash, fork). At `4c479c7`, `bin/clempo-dev statetest -jit` passed
+**61,903/61,903** (50,193 compilations, 89,803 shared-cache uses, 46,179 LRU
+evictions, no compilation failures, 561 s). `-interp` passed the same suite
+in 9.9 s. Historical `jit-latency` compiled all 9,480 distinct fixture codes
+without a warning; historical `evm-bench -n 10000000`, median of three,
+interpreter (`-interp`) to compiled (`-jit`), Mgas/s:
 
 | Workload | Interpreter | Compiled | |
 |---|---:|---:|---:|
@@ -259,10 +261,12 @@ compiled (`-jit`), Mgas/s:
 
 Compile latency (Osaka, all fixture codes): 2.9 ms mean under 64 bytes, 5 ms
 to 256, 13 ms to 1 KiB, 102 ms to 4 KiB, 1.2 s to 16 KiB, 8.8 s above
-(75-190 us/byte). The default policy compiles a code once it has spent 100,000
-gas per byte interpreted; with it the state tests take 12.9 s against 12.8 s
-interpreted (23 codes compiled) and evm-bench is unchanged (its loops are one
-frame, which does not turn hot while it runs).
+(75–190 µs/byte). `clempo.evm` loads with compilation off. The node starts
+a compiler thread unless `--no-jit` is supplied; dev tools can select `-jit-bg`.
+A code becomes eligible after 100,000 interpreted gas per byte of its own work,
+excluding callees. Execution never waits for compilation. At most 16 jobs
+wait, code larger than 24 KiB is not compiled, and the shared LRU cache is
+capped at 4,096 functions and 256 MiB.
 
 Keccak-256 (SBCL 2.6.8 release, Apple Silicon): the ARM SHA3 permutation and
 copy-free 32/64-byte paths reduced 64-byte hashes from **626 ns to 178 ns**
@@ -557,6 +561,9 @@ R3 = 50,049,999 (2026-11-21): `CLEMPO_BUILD=release bin/clempo-dev replay -datad
 
 R5 historical run (2026-11-21, `4c2db4d`): `CLEMPO_HEAP=40000 CLEMPO_RPC=http://127.0.0.1:8545 bin/clempo-dev rpcdiff` ran in 880 s with 16 threads and a complete history through block 50,049,999. Its legacy aggregate of 154 labels and 14,287 cases is not a value-match score. Technical observations from the run:
 - State tries (src/rpc/tries.lisp): the archive backend loads clempo.store checkpoints (the history build's job-N.state files at 13,999,999 .. 50,049,999, or `$CLEMPO_TRIE_STATE`) and moves a state database between blocks with clempo.history's changed keys (`history-map-changes`; across the three gap seeds 14M/16M/20M, whose deletions the history does not list, every key is re-read). Every move is checked against the header's state root. Measured: checkpoint load 14 s (356k accounts, 10.7M slots, 1.4 GB heap), moves of 10k/50k/400k blocks 1.3–9.5 s. A pinned head state serves eth_getProof/getAccount/getMultiProof at "latest".
+  Current datadirs no longer emit checkpoint files on flush; historical trie
+  seeds come from history-build `job-N.state` files or explicit checkpoints
+  exported with `clempo.store:write-checkpoint`.
 - debug_intermediateRoots: the block re-executed on the parent's trie state with the state root after each transaction (`executor:flush-transactions`; a test checks flushing keeps gas, receipts, bloom and root). 132 cases in ~24 min at 16 threads, one cursor (the cases jump across 0..50M).
 - debug_stateRootWithUpdates: reth's TrieUpdates (account_nodes/removed_nodes/storage_tries) emulated from reth's walker and alloy's HashBuilder store rules over `trie:trie-node-at`; both recorded cases identical.
 - debug_executionWitness*: a recording backend (reth CacheDB's reads), proofs, codes, keys, headers (live, shape); debug_traceBlock over raw RLP; trace_replayTransaction of an unknown hash answers null.

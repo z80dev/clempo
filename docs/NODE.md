@@ -59,6 +59,13 @@ archive remains separate (`--archive`). Receipts are persisted as blocks
 execute. Block- or transaction-hash queries outside the most recent 256
 blocks use the hash index built by `clempo-dev index`.
 
+The datadir uses an exclusively locked (`LOCK`) disk-backed key/value store:
+checksummed immutable segments hold accounts, slots, code and reference-counted
+trie nodes. Memory caches are trimmed after flushes. Legacy format-1 checkpoint
+datadirs are imported on open. The node syncs each block to stable storage before
+commit returns. Recovery discards a torn final record; corruption preceding later
+valid records is an error, not a reason to discard committed history.
+
 `eth_sendRawTransaction` validates a transaction against an overlay of the
 committed head, queues valid transactions and forwards them asynchronously
 to the upstream. A refusal drops it locally; new heads revalidate the pool.

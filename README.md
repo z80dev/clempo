@@ -107,7 +107,7 @@ base io crypto net codec trie types store state evm tempo consensus p2p sync rpc
 | `io`, `net` | deterministic clock/entropy interfaces, native I/O, TLS 1.3 and HTTP |
 | `crypto` | Keccak, SHA-2, RIPEMD-160, BLAKE2f/BLAKE3, AES, ChaCha20-Poly1305, X25519, Ed25519, secp256k1, P-256, P-384, BN254, BLS12-381, KZG, modexp |
 | `codec`, `types` | RLP, JSON, ABI, commonware codec; headers, every Tempo transaction and signature kind, receipts |
-| `trie`, `store`, `state` | Merkle Patricia trie and proofs, persistent checkpoints and history with in-memory working state, journaled world state |
+| `trie`, `store`, `state` | Merkle Patricia trie and proofs, disk-backed LSM with bounded working caches and a durable block log, journaled world state |
 | `evm` | interpreter, compiler, gas schedules Istanbul..Osaka, Ethereum precompiles, geth and parity tracers |
 | `tempo` | chain specs, hardforks, `defcontract`, every Tempo precompile, the block executor, transaction pool, payload builder |
 | `consensus`, `p2p`, `validator`, `sim` | certificates, Simplex, DKG; devp2p and commonware networking; the validator; the seeded simulator |

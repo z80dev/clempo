@@ -185,24 +185,30 @@ Early and Recent use the same persistent `bench` path:
 CLEMPO_BUILD=release bin/clempo-dev bench -range early \
   -datadir "$early_work" -result "$early_result"
 
-# Capture only the immutable checkpoint; never copy R3's live WAL.
-mkdir "$recent_parent"
-cp "$r3_dd/checkpoint-000049000000.state" "$recent_parent/"
-cp "$r3_dd/replay.sexp" "$recent_parent/"
-printf 'clempo-store 1 49000000\n' > "$recent_parent/MANIFEST"
+# Copy a stopped, unhealed seed at or below 49,409,999, not a running datadir.
+# With no seed, omit cp and let replay start from genesis.
+cp -R "$recent_seed" "$recent_parent"
 CLEMPO_BUILD=release bin/clempo-dev replay -to 49409999 -datadir "$recent_parent" \
-  -checkpoint 49409999 -result "$recent_prepare"
+  -checkpoint 500000 -result "$recent_prepare"
 jq -e '.last == 49409999 and .r3_height == 49409999 and .stop == null
        and .heals == [] and .skips == []' "$recent_prepare"
 CLEMPO_BUILD=release bin/clempo-dev bench -range recent -parent "$recent_parent" \
   -datadir "$recent_work" -result "$recent_result"
 ```
 
-Capture the R3 checkpoint while its manifest names 49,000,000. R3 replaces
-the old checkpoint at the next interval. The replay command advances the
-copy to the exact parent and writes a checkpoint there outside the timed run.
+Prepare the exact parent outside the timed run. Current datadirs keep state
+in the disk-backed KV store; they do not produce a `checkpoint-N.state` file
+at each flush. The store can import stopped format-1 datadirs, and explicit
+exports via `clempo.store:write-checkpoint` remain available.
 
-The measured interval includes archive reads, decoding, replay, and (in persistent mode) WAL writes and final fsync. It excludes startup, copying and opening the store, and writing the result. CPU and GC are deltas over the interval; peak RSS is for the whole process (including initialization). Always compare the same persistence mode. Repeat with fresh workdirs and interleave clients rather than reporting one best sample.
+Datadir `replay` and `bench` use group commit (`(:group 1024)`); replay
+acknowledges no work externally and can resume after a crash from its last
+durable block. This differs from the node's default `:block` sync policy.
+The measured interval includes archive reads, decoding, execution, WAL
+writes and final sync, but excludes state preparation, copying/opening the
+datadir and writing the result. CPU and GC are interval deltas; peak RSS
+includes initialization. Compare like persistence modes with interleaved
+fresh runs. The same-host rows above predate the disk-backed store migration.
 
 `replay`, `bench` and `history-build` default to eight sender-recovery
 participants. A producer thread reads blocks up to four ahead of the replay
@@ -341,6 +347,12 @@ python3 scripts/bench/rust-import.py --tempo "$tempo" \
 ```
 
 `tempo re-execute` is read-only and starts from historical parent state, but verifies gas/receipts and the resulting change sets rather than recomputing state roots. `tempo import --fail-on-invalid-block` runs the staged pipeline and checks the Merkle root at each import chunk’s terminal checkpoint, **not every block's root**. This follows goempo's Rust baseline and is a lower root-check workload than Clempo. Report that distinction alongside any comparison. Rust includes the import indexing stages; use the per-stage numbers to distinguish execution from full import wall time. Neither client’s metrics include provisioning the input corpus or parent state.
+
+Rust's MDBX default is durable sync, but the staged import commits at stage
+execution boundaries (`Pipeline::execute_stage_to_completion`), not after
+each executed block. Its default execution commit limits are 500,000 blocks
+or 5,000,000 changes. Clempo's current 1,024-block replay/bench sync group
+and Rust's stage commits are different durability workloads.
 
 For the separate read-only Busy cross-check reported in `FRONTIER.md`:
 
