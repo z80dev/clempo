@@ -1,0 +1,87 @@
+(defpackage #:clempo.follow.tests
+  (:use #:cl #:clempo.base #:clempo.follow)
+  (:local-nicknames (#:blocks #:clempo.blocks) (#:hdr #:clempo.headers)
+                    (#:trie #:clempo.trie) (#:archive #:clempo.archive)))
+
+(in-package #:clempo.follow.tests)
+
+(defun test-block (height parent &key (withdrawals-present t))
+  (let* ((header (hdr:make-ethereum-header
+                  :parent-hash parent :state-root trie:+empty-trie-root+
+                  :transactions-root trie:+empty-trie-root+ :receipts-root trie:+empty-trie-root+
+                  :ommers-hash (clempo.keccak:keccak256 (octets-of #xc0))
+                  :beneficiary 0 :logs-bloom (make-octets 256) :difficulty 0 :number height
+                  :gas-limit 500000000 :gas-used 0 :timestamp height :extra-data (make-octets 0)
+                  :mix-hash (make-octets 32) :nonce (make-octets 8)
+                  :base-fee-per-gas 10000000000 :withdrawals-root trie:+empty-trie-root+))
+         (block (blocks:make-block :header (hdr:make-header :inner header :general-gas-limit 0
+                                                            :shared-gas-limit 0 :timestamp-millis-part 0)
+                                   :withdrawals-present-p withdrawals-present)))
+    (values (blocks:encode-block block) (blocks:block-hash block))))
+
+(defun verification-error (fn)
+  (handler-case (progn (funcall fn) nil)
+    (follow-error (e) (list (follow-error-reason e) (follow-error-height e)))))
+
+(deftest authenticate-follow-batch ()
+  (let ((anchor (make-octets 32)))
+    (multiple-value-bind (one hash-one) (test-block 1 anchor)
+      (multiple-value-bind (two hash-two) (test-block 2 hash-one)
+        (let ((target (make-head :number 2 :hash hash-two)))
+          (multiple-value-bind (blocks heads)
+              (clempo.follow::verify-follow-batch 1 anchor target (vector one two))
+            (is= 2 (length blocks))
+            (is-equalp hash-one (head-hash (aref heads 0)))
+            (is-equalp hash-two (head-hash (aref heads 1))))
+          (flet ((check-batch (raw &optional (expected target))
+                   (verification-error
+                    (lambda () (clempo.follow::verify-follow-batch 1 anchor expected raw)))))
+            (is-equalp '(:block-number 1) (check-batch (vector two one)))
+            (is-equalp '(:parent-hash 2) (check-batch (vector one (test-block 2 anchor))))
+            (is-equalp '(:body-root 2)
+                       (check-batch (vector one (test-block 2 hash-one :withdrawals-present nil))))
+            (is-equalp '(:canonical-hash 2)
+                       (check-batch (vector one two) (make-head :number 2 :hash anchor)))))))))
+
+(defstruct collecting-executor (heights nil))
+
+(defmethod apply-follow-block ((executor collecting-executor) block)
+  (push (hdr:ethereum-header-number (hdr:header-inner (blocks:block-header block)))
+        (collecting-executor-heights executor)))
+
+(defstruct prefix-certifier available)
+
+(defmethod certify-follow-batch ((certifier prefix-certifier) blocks previous-hash)
+  (declare (ignore previous-hash))
+  (min (length blocks) (prefix-certifier-available certifier)))
+
+(deftest follow-from-archive-through-verified-prefix ()
+  (let* ((dir (format nil "/tmp/clempo-follow-test-~A/" (octets->hex (clempo.io:random-octets 8))))
+         (anchor (make-octets 32))
+         (executor (make-collecting-executor))
+         (certifier (make-prefix-certifier :available 1))
+         (follower (make-follower (make-head :number 0 :hash anchor) :archive-dir dir
+                                 :use-archive t :executor executor :certifier certifier)))
+    (unwind-protect
+         (multiple-value-bind (one hash-one) (test-block 1 anchor)
+           (multiple-value-bind (two hash-two) (test-block 2 hash-one)
+             (let ((raw (make-array archive:+chunk-blocks+ :initial-element one))
+                   (target (make-head :number 2 :hash hash-two)))
+               (setf (aref raw 2) two)
+               (archive:write-chunk 0 raw dir)
+               (multiple-value-bind (head caught-up) (follow-to follower target)
+                 (is= 1 (head-number head))
+                 (is (not caught-up))
+                 (is-equalp '(1) (collecting-executor-heights executor))
+                 (is= 1 (follower-certified follower)))
+               (multiple-value-bind (head caught-up) (follow-to follower target)
+                 (is caught-up)
+                 (is-equalp hash-two (head-hash head))
+                 (is-equalp '(2 1) (collecting-executor-heights executor))
+                 (is= 2 (follower-blocks follower))
+                 (is= 2 (follower-certified follower)))
+               (is-equalp '(:canonical-hash 2)
+                          (verification-error
+                           (lambda () (follow-to follower (make-head :number 2 :hash hash-one)))))
+               (is-equalp '(2 1) (collecting-executor-heights executor)))))
+      (when (probe-file dir) (sb-ext:delete-directory dir :recursive t)))))

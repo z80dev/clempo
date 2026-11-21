@@ -10,7 +10,7 @@ Offsets are relative to the start of the data section, so block i is
 data[offset(i), offset(i+1)). Files are written once, atomically, and never modified.")
   (:export #:+chunk-blocks+ #:*archive-dir* #:archive-dir #:chunk-path #:chunk-present-p
            #:write-chunk #:read-chunk #:chunk-block #:chunk-first #:chunk-count
-           #:raw-block #:fetch-chunk #:fetch-range #:archive-contiguous-height))
+           #:raw-block #:fetch-blocks #:fetch-chunk #:fetch-range #:archive-contiguous-height))
 
 (in-package #:clempo.archive)
 
