@@ -19,7 +19,8 @@ Paths under `logs/` are the measuring host's local run logs and result files; th
 
 **Linux x86-64** (`498155e`, Arch Linux, AMD Ryzen 7 9700X): the cold strict
 `scripts/verify.sh` gate passes with SBCL 2.6.8 built from the official source
-with `--fancy`; no source changes were needed. With `CLEMPO_BUILD=release`,
+with `--fancy`. The stalled-WebSocket test caps the server's send buffer to
+exercise backpressure on both platforms; no production code changed. With `CLEMPO_BUILD=release`,
 `bin/clempo-dev genesis` and `genesis -chain moderato` computed the state roots;
 `bin/clempo-dev score -rung R2 -json` matched both roots and block hashes
 against public RPC. Using `fixtures_develop.tar.gz` from execution-spec-tests

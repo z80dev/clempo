@@ -425,7 +425,14 @@ stream LOG."
   (with-test-server (server backend log)
     (let* ((first 2000) (last 3999)
            (stalled (connect (server:server-port server) :receive-buffer 4096))
-           (live (connect (server:server-port server))))
+           (live (progn
+                   ;; A small receive window alone does not stall the writer: the default
+                   ;; Linux send buffer can hold the entire burst. Cap the stalled peer's
+                   ;; server-side send buffer before connecting the live peer.
+                   (setf (sb-bsd-sockets:sockopt-send-buffer
+                          (server::connection-socket (first (server::server-connections server))))
+                         4096)
+                   (connect (server:server-port server)))))
       (unwind-protect
            (let ((stalled-heads (json:jget (call stalled 1 "eth_subscribe" #("newHeads")) "result"))
                  (stalled-logs (json:jget (call stalled 2 "eth_subscribe" #("logs")) "result"))
@@ -454,8 +461,8 @@ stream LOG."
                (let ((numbers (head-numbers (sb-thread:join-thread reader :default '() :timeout 60) live-heads)))
                  (is= last (car (last numbers)))
                  (is (strictly-increasing-p numbers) "the live client's heads are in order")))
-             ;; the live client has everything; the stalled one's writer is blocked on its
-             ;; socket with a full queue
+             ;; The live client drained its queue; the stalled one's writer is blocked
+             ;; on its socket with a full queue.
              (is= (list server::+outbox-capacity+ 0)
                   (sort (mapcar #'server::connection-outbox-length (server::server-connections server)) #'>))
              (is (plusp (reduce #'+ (mapcar #'server::connection-skipped (server::server-connections server)))))
