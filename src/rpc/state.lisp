@@ -229,17 +229,12 @@ quantity."
         (push (cons address (nreverse slots)) out)))
     (nreverse out)))
 
-;;; Proofs: the store's proof readers (ExecutorAgent's clempo.store) over the committed tries.
+;;; Proofs: the store's proof readers over the committed tries.
 
-(defun account-proof (db address)
-  (funcall (landed-function "CLEMPO.STORE" "DB-ACCOUNT-PROOF" "eth_getProof")
-           db address))
+(defun account-proof (db address) (store:db-account-proof db address))
 
 (defun storage-proofs (db address slots)
-  (if slots
-      (funcall (landed-function "CLEMPO.STORE" "DB-STORAGE-PROOF" "eth_getProof")
-               db address slots)
-      '()))
+  (mapcar (lambda (slot) (store:db-storage-proof db address slot)) slots))
 
 (defun proof-json (db address keys)
   "alloy EIP1186AccountProofResponse for ADDRESS with storage KEYS (storage-key structs)."

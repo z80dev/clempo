@@ -1,7 +1,8 @@
 (defpackage #:clempo.rpc.calls
   (:use #:cl #:clempo.base #:clempo.rpc #:clempo.rpc.render #:clempo.rpc.state)
   (:local-nicknames (#:json #:clempo.json) (#:serde #:clempo.serde) (#:chain #:clempo.rpc.chain)
-                    (#:h #:clempo.headers) (#:executor #:clempo.executor) (#:blocks #:clempo.blocks))
+                    (#:h #:clempo.headers) (#:executor #:clempo.executor) (#:blocks #:clempo.blocks)
+                    (#:state #:clempo.state))
   (:documentation "Methods that execute requests on a state: eth_call, eth_estimateGas,
 eth_createAccessList, eth_simulateV1, eth_callMany and tempo_simulateV1, and the replaying
 debug_trace* and trace_* families.
@@ -439,25 +440,145 @@ Returns (values cblock state)."
 (defun unsupported-execution (what)
   (internal-error (format nil "~A: request execution over clempo.executor is not wired yet" what)))
 
+;;; Executing requests: reth prepare_call_env over the executor's overlay call block
+;;; (clempo.executor begin-call-block / execute-request).
+
+(defparameter *rpc-gas-cap* 50000000 "reth RPC_DEFAULT_GAS_CAP")
+
+(defun call-env (b block-overrides gas-price)
+  "The block environment a call runs in: the block's header env with BLOCK-OVERRIDES applied,
+and a zero base fee when the request pays no gas price (reth prepare_call_env)."
+  (let ((env (executor:header-block-env (cblock-header b))))
+    (destructuring-bind (&key number time gas-limit coinbase base-fee random difficulty
+                           blob-base-fee beacon-root withdrawals block-hash)
+        block-overrides
+      (when (or random difficulty blob-base-fee beacon-root withdrawals block-hash)
+        (internal-error "block overrides of prevrandao, difficulty, blob fee, beacon root, withdrawals or block hashes are not supported yet"))
+      (when number (setf (executor:block-env-number env) number))
+      (when time (setf (executor:block-env-timestamp env) time))
+      (when gas-limit (setf (executor:block-env-gas-limit env) gas-limit))
+      (when coinbase (setf (executor:block-env-beneficiary env) coinbase))
+      (when base-fee (setf (executor:block-env-base-fee env) base-fee)))
+    (when (zerop gas-price) (setf (executor:block-env-base-fee env) 0))
+    env))
+
+(defun apply-state-overrides (world overrides)
+  "reth apply_state_overrides on the overlay WORLD."
+  (loop for (address . o) in overrides
+        do (let ((account (state:get-account world address)))
+             (when (getf o :move-precompile-to)
+               (internal-error "movePrecompileToAddress overrides are not supported yet"))
+             (when (getf o :balance) (state:set-balance world account (getf o :balance)))
+             (when (getf o :nonce) (state:set-nonce world account (getf o :nonce)))
+             (when (getf o :code) (state:set-code world account (getf o :code)))
+             (when (getf o :state)
+               (state:wipe-storage account)
+               (loop for (slot . value) in (getf o :state) do (state:sstore world address slot value)))
+             (loop for (slot . value) in (getf o :state-diff) do (state:sstore world address slot value)))))
+
+(defun request-type (r)
+  "alloy TransactionRequest::minimal_tx_type."
+  (cond ((req-authorizations r) 4)
+        ((or (req-max-fee r) (req-max-priority r)) 2)
+        ((req-access-list r) 1)
+        ((req-gas-price r) 0)
+        (t 2)))
+
+(defun request-plist (r world gas price)
+  "The executor's request plist for an Ethereum request (normalize_transaction_request with
+the nonce taken from the state, as create_txn_env does)."
+  (let ((type (request-type r)) (from (or (req-from r) 0)))
+    (when (req-authorizations r)
+      (internal-error "EIP-7702 authorization lists in call requests are not converted yet"))
+    (list :from from
+          :to (let ((to (req-to r))) (if (or (null to) (eq to :create)) nil to))
+          :gas gas :type type
+          :gas-price (when (member type '(0 1)) (or (req-gas-price r) price))
+          :max-fee (unless (member type '(0 1)) (or (req-max-fee r) price))
+          :max-priority (unless (member type '(0 1)) (or (req-max-priority r) 0))
+          :value (or (req-value r) 0)
+          :nonce (state:get-nonce world from)
+          :chain-id (req-chain-id r)
+          :input (or (request-input r) (make-octets 0))
+          :access-list (mapcar (lambda (item)
+                                 (cons (getf item :address)
+                                       (map 'list #'octets->integer (getf item :storage-keys))))
+                               (req-access-list r)))))
+
+(defparameter +invalid-transaction-errors+
+  '(("intrinsic gas too low" -32000 "intrinsic gas too low" -38013)
+    ("value transfer not allowed" -32003 "value transfer not allowed" -32003)
+    ("fee cap below base fee" -32000 "max fee per gas less than block base fee" -38012)
+    ("priority fee greater than max fee" -32003 "max priority fee per gas higher than max fee per gas" -32003)
+    ("initcode too large" -32003 "max initcode size exceeded" -38025)
+    ("sender has code" -32003 "sender is not an EOA" -38024)
+    ("wrong chain id" -32000 "invalid chain ID" -32000))
+  "clempo's invalid-transaction reasons -> reth's RpcInvalidTransactionError (code, message)
+and eth_simulateV1's code.")
+
+(defun invalid-request-error (reason &key simulate)
+  "(values code message) of the reference's error for an invalid request, or an internal
+error naming a reason with no known reference equivalent."
+  (let ((e (assoc reason +invalid-transaction-errors+ :test #'string=)))
+    (unless e (internal-error (format nil "request rejected by clempo's executor with no reference error mapped: ~A" reason)))
+    (values (if simulate (fourth e) (second e)) (third e))))
+
+(defun outcome-output (outcome what)
+  (funcall (landed-function "CLEMPO.EXECUTOR" "TX-OUTCOME-OUTPUT" what) outcome))
+
+(defun call-result (outcome what)
+  "reth ensure_success: the output of a successful call; reverts and halts fail as reth does."
+  (let ((output (outcome-output outcome what)))
+    (if (executor:tx-outcome-status outcome)
+        output
+        (internal-error (format nil "~A: rendering reverted or halted calls needs the executor's revert/halt kind (tx-outcome-halt), which has not landed yet" what)))))
+
+(defun run-request (b state request what &key state-overrides block-overrides on-invalid)
+  "Execute REQUEST on STATE in block B's environment. Returns the tx-outcome; an invalid
+request calls ON-INVALID with (code message), or fails with reth's error."
+  (when (aa-request-p request)
+    (internal-error (format nil "~A: Tempo AA call requests are not converted to executor requests yet" what)))
+  (let* ((price (normalize-request request (or (getf block-overrides :base-fee) (header-base-fee b))))
+         (env (call-env b block-overrides price))
+         (ctx (executor:begin-call-block state env))
+         (world (executor:call-block-world ctx))
+         (gas (let ((g (req-gas request)))
+                (cond (g (min g *rpc-gas-cap*))
+                      ((zerop price) *rpc-gas-cap*)
+                      (t (internal-error (format nil "~A: capping the gas of a priced request by the caller's fee token allowance is not implemented yet" what)))))))
+    (apply-state-overrides world state-overrides)
+    (handler-case (executor:execute-request ctx (request-plist request world gas price)
+                                            :skip-nonce-check t :skip-base-fee-check t)
+      (executor:invalid-transaction (e)
+        (multiple-value-bind (code message) (invalid-request-error (executor:execution-failure-reason e))
+          (if on-invalid (funcall on-invalid code message) (rpc-fail code message)))))))
+
 ;;; Methods
 
 (defrpc "eth_call" ((request tx-request) (block block-id :optional t)
                     (state-overrides state-override :optional t) (block-overrides block-overrides :optional t))
   "execute a call on the state after BLOCK"
-  (prepare-call request block "eth_call" :state-overrides state-overrides :block-overrides block-overrides)
-  (unsupported-execution "eth_call"))
+  (multiple-value-bind (b state)
+      (prepare-call request block "eth_call" :state-overrides state-overrides :block-overrides block-overrides)
+    (hexbytes (call-result (run-request b state request "eth_call" :state-overrides state-overrides
+                                                                   :block-overrides block-overrides)
+                           "eth_call"))))
 
 (defrpc "eth_estimateGas" ((request tx-request) (block block-id :optional t)
                            (state-overrides state-override :optional t) (block-overrides block-overrides :optional t))
   "binary-search the gas a call needs"
-  (prepare-call request block "eth_estimateGas" :state-overrides state-overrides :block-overrides block-overrides)
-  (unsupported-execution "eth_estimateGas"))
+  (multiple-value-bind (b state)
+      (prepare-call request block "eth_estimateGas" :state-overrides state-overrides :block-overrides block-overrides)
+    (run-request b state request "eth_estimateGas" :state-overrides state-overrides :block-overrides block-overrides)
+    (internal-error "eth_estimateGas: reth's gas search (estimate.rs) is not implemented yet")))
 
 (defrpc "eth_createAccessList" ((request tx-request) (block block-id :optional t)
                                 (state-overrides state-override :optional t))
   "the access list a call touches and its gas"
-  (prepare-call request block "eth_createAccessList" :state-overrides state-overrides)
-  (unsupported-execution "eth_createAccessList"))
+  (multiple-value-bind (b state)
+      (prepare-call request block "eth_createAccessList" :state-overrides state-overrides)
+    (run-request b state request "eth_createAccessList" :state-overrides state-overrides)
+    (internal-error "eth_createAccessList: recording the accessed addresses and slots is not implemented yet")))
 
 (defparameter *max-simulate-blocks* 256 "reth max_simulate_blocks default")
 
@@ -468,9 +589,18 @@ Returns (values cblock state)."
   (let* ((n (block-id-number (or block :latest)))
          (b (and n (<= n chain:*head*) (chain-block n))))
     (unless b (rpc-fail -38020 (format nil "block not found: ~A" (block-id-text (or block :latest)))))
-    (state-at (list :hash (cblock-hash b)))
-    (executor-call-api what)
-    (unsupported-execution what)))
+    (let ((state (state-at (list :hash (cblock-hash b)))))
+      ;; The first call's request errors come before any block is rendered.
+      (let* ((first-block (first (getf payload :block-state-calls)))
+             (call (first (getf first-block :calls))))
+        (when (and call (not (getf payload :validation)) (not (aa-request-p call)))
+          (run-request b state call what
+                       :state-overrides (getf first-block :state-overrides)
+                       :on-invalid (lambda (code message)
+                                     (declare (ignore code))
+                                     (let ((e (find message +invalid-transaction-errors+ :key #'third :test #'string=)))
+                                       (rpc-fail (fourth e) message))))))
+      (internal-error (format nil "~A: rendering simulated blocks is not implemented yet" what)))))
 
 (defrpc "eth_simulateV1" ((payload simulate-payload) (block block-id :optional t))
   "execute calls in simulated blocks on top of BLOCK"
@@ -490,10 +620,28 @@ Returns (values cblock state)."
     (let* ((b (chain-block n))
            (index (getf context :transaction-index :all))
            (all (or (eq index :all) (>= index (length (cblock-txs b))))))
-      ;; All transactions replayed: the state after the block itself; otherwise its parent.
-      (state-at (if all (list :hash (cblock-hash b)) (max 0 (1- n))))
-      (executor-call-api "eth_callMany")
-      (unsupported-execution "eth_callMany"))))
+      (unless all
+        (internal-error "eth_callMany: replaying a block prefix before the bundles is not implemented yet"))
+      ;; All transactions replayed: the state after the block itself.
+      (let ((state (state-at (list :hash (cblock-hash b))))
+            (results '()))
+        (loop for bundle in bundles for bi from 0
+              do (loop for request in (getf bundle :transactions) for ti from 0
+                       for overrides = (when (and (zerop bi) (zerop ti)) state-overrides)
+                       do (let ((outcome
+                                  (run-request b state request "eth_callMany"
+                                               :state-overrides overrides
+                                               :block-overrides (getf bundle :block-override)
+                                               :on-invalid (lambda (code message)
+                                                             (rpc-fail code (format nil "call_many error in bundle ~D and transaction ~D: ~A"
+                                                                                    bi ti message))))))
+                            (push outcome results)))
+                 ;; Each bundle sees the state its predecessors left: one overlay per request
+                 ;; does not chain them.
+                 (when (or (rest bundles) (rest (getf bundle :transactions)))
+                   (internal-error "eth_callMany: chaining several calls on one overlay is not implemented yet")))
+        (vector (map 'simple-vector (lambda (o) (json:jobject "value" (hexbytes (call-result o "eth_callMany"))))
+                     (nreverse results)))))))
 
 ;;; Re-executing recorded blocks: witnesses, intermediate roots, raw block traces
 
