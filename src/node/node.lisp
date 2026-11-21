@@ -140,6 +140,8 @@
                (pools:pool-service-block (node-pool node) db header)))
         (when (store:db-block-open-p db) (store:db-revert-block db))))
     (metrics:metric-set *m-head* number)
+    (let ((tip (getf (node-status node) :tip)))
+      (when tip (metrics:metric-set *m-lag* (max 0 (- tip number)))))
     (metrics:metric-inc *m-executed*)
     (metrics:metric-inc *m-txs* :by (length (blocks:block-transactions block)))
     (metrics:metric-observe *m-exec-seconds* (/ (- (clempo.io:monotonic-ticks) start)
@@ -549,6 +551,11 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
                                 (setf (getf (node-status node) :retries) (1+ (getf (node-status node) :retries))
                                       (getf (node-status node) :last-error) (princ-to-string condition))
                                 (log-node "node: retry ~D: ~A" attempt condition))
+                              :on-target
+                              (lambda (follow remote)
+                                (declare (ignore follow))
+                                (setf (getf (node-status node) :tip) (follow:head-number remote))
+                                (metrics:metric-set *m-tip* (follow:head-number remote)))
                               :on-poll
                               (lambda (follow remote)
                                 (let* ((local (follow:follower-head follow))
@@ -639,6 +646,7 @@ directory flag shares one. SIGTERM or SIGINT stops cleanly.~%"))
         while words
         for flag = (pop words)
         do (cond ((string= flag "--help") (return-from node-options :help))
+                 ((string= flag "--certify") (setf (getf options :certify) t))
                  ((string= flag "--no-certify") (setf (getf options :certify) nil))
                  ((string= flag "--no-jit") (setf (getf options :jit) nil))
                  ((string= flag "--no-forward") (setf (getf options :forward) nil))

@@ -165,10 +165,11 @@ COUNT raw block encodings. It replaces RPC body fetches, not RPC canonical heads
             (setf (follower-archive-pending follower) nil
                   (follower-archive-first follower) nil)))))))
 
-(defun follow-to (follower tip)
+(defun follow-to (follower tip &key stop)
   "Follow up to canonical TIP and return the current HEAD and whether TIP was reached.
-An unavailable finalization certificate stops at the last certified block. An
-upstream reorg or mismatching block fails closed; this function never rolls back."
+An unavailable finalization certificate stops at the last certified block, and so does
+STOP returning true between batches. An upstream reorg or mismatching block fails
+closed; this function never rolls back."
   (let* ((limit (head-number tip))
          (anchor (follower-head follower))
          (last (head-number anchor))
@@ -176,7 +177,7 @@ upstream reorg or mismatching block fails closed; this function never rolls back
          (executor (follower-executor follower))
          (certifier (follower-certifier follower)))
     (when (< limit last) (reject-block last :upstream-behind limit))
-    (loop while (< last limit)
+    (loop while (and (< last limit) (not (and stop (funcall stop))))
           for from = (1+ last)
           for end = (min limit (+ last (follower-batch-size follower))
                          (+ (chunk-first-for from) archive:+chunk-blocks+ -1))
@@ -202,6 +203,8 @@ upstream reorg or mismatching block fails closed; this function never rolls back
                      (archive-follow-block follower last (svref raw i))))
                  (unless (= accepted (length blocks))
                    (return-from follow-to (values (follower-head follower) nil))))))
+    (when (< (head-number (follower-head follower)) limit)
+      (return-from follow-to (values (follower-head follower) nil)))
     (unless (octets= (head-hash tip) (head-hash (follower-head follower)))
       (reject-block limit :canonical-hash "upstream and local head at the same height differ"))
     (values (follower-head follower) t)))
@@ -217,10 +220,11 @@ upstream reorg or mismatching block fails closed; this function never rolls back
             (when (<= left 0) (return nil))
             (sleep (/ (min left 100) 1000))))))
 
-(defun follow-live (follower &key tip (poll-seconds 0.25) once seconds on-poll stop on-retry)
+(defun follow-live (follower &key tip (poll-seconds 0.25) once seconds on-poll on-target stop on-retry)
   "Catch up to the supplied TIP (or the current one), then poll until STOP returns true.
 ONCE exits after reaching the initial TIP. SECONDS counts from first reaching it.
-ON-POLL receives FOLLOWER and remote TIP at the end of each poll.
+ON-TARGET receives FOLLOWER and each remote TIP before following to it; ON-POLL the same
+at the end of each poll.
 A failed step (upstream, transport, certificate or rejected block) is retried with
 exponential backoff up to 10 s, calling ON-RETRY with the attempt and condition; a live
 follower retries forever, a bounded one (ONCE or SECONDS) gives up after 20 in a row.
@@ -237,7 +241,8 @@ EXECUTION-FAILED is never retried."
       (let ((failure
               (handler-case
                   (let ((target (or initial-tip (rpc-head :latest :url url))))
-                    (when (nth-value 1 (follow-to follower target))
+                    (when on-target (funcall on-target follower target))
+                    (when (nth-value 1 (follow-to follower target :stop stop))
                       (setf initial-tip nil)
                       (unless since (setf since (clempo.io:now-ms))))
                     (when on-poll (funcall on-poll follower target))

@@ -195,3 +195,23 @@ tip requests fail with a JSON-RPC error, then report block 2."
             ;; Live (no ONCE/SECONDS) and failing forever: only STOP ends it.
             (is= 0 (head-number (follow-live follower :poll-seconds 0.001
                                                       :stop (lambda () (> (incf asked) 5)))))))))
+
+(deftest follow-to-stops-between-batches ()
+  (let ((anchor (make-octets 32)) (asked 0))
+    (multiple-value-bind (one hash-one) (test-block 1 anchor)
+      (multiple-value-bind (two hash-two) (test-block 2 hash-one)
+        (let* ((executor (make-collecting-executor))
+               (follower (make-follower (make-head :number 0 :hash anchor) :batch-size 2
+                                        :executor executor
+                                        :block-source (lambda (from count)
+                                                        (subseq (vector one two) (1- from) (+ from count -1))))))
+          ;; A stop request is honoured before the next batch: nothing more is executed.
+          (multiple-value-bind (head reached)
+              (follow-to follower (make-head :number 2 :hash hash-two)
+                         :stop (lambda () (plusp (incf asked))))
+            (is= 0 (head-number head))
+            (is (not reached))
+            (is (null (collecting-executor-heights executor))))
+          (multiple-value-bind (head reached) (follow-to follower (make-head :number 2 :hash hash-two))
+            (is= 2 (head-number head))
+            (is reached)))))))
