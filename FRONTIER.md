@@ -6,7 +6,7 @@
 | R1 Decode | mainnet 640/640 (T0..T13), moderato 33/33 | 1edd52f | 2026-11-21 |
 | R2 Genesis | yes: matching state roots and block hashes on mainnet and Moderato | `ec20b6b` | 2026-11-21 |
 | R3 Replay | 3,210 (every block 1..3210 matches gas, receipts root, bloom, state root; stops at 3211, the first user transaction, until the EVM lands) | `b74f4d8` | 2026-11-21 |
-| R3e EVM | - | | |
+| R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `b0b729d` | 2026-11-21 |
 | R3p Precompiles | - | | |
 | R4 Follow | - | | |
 | R5 RPC | - | | |
@@ -16,6 +16,15 @@
 ## Evidence
 
 Keccak-256 (macro-unrolled Keccak-f over 25 typed lane variables): 250 MB/s on 64 MiB with no allocation, 0.57 µs per 64-byte hash, SBCL 2.6.8 release build on the dev host (Apple Silicon, 16 cores).
+
+R3e = 61,903/61,903 (b0b729d): `bin/clempo-dev score -rung R3e -json` (or
+`bin/clempo-dev statetest ~/cache/clempo/fixtures/fixtures/state_tests/`) runs every
+execution-spec-tests v5.4.0 `fixtures_develop` state test for Istanbul..Osaka (pre-Istanbul
+cases skipped, as goempo) on 12 threads in 33.5 s: Istanbul 608, Berlin 1,249, London 1,504,
+Paris 1,564, Shanghai 1,745, Cancun 16,847, Prague 18,869, Osaka 19,517, all passing. Each
+case checks validity (expectException), the full post alloc, the logs hash and the state
+root (clempo.trie over the in-memory backend). EIP-7702 authorities are recovered with
+clempo.secp256k1 (the fixtures' `signer` is ignored).
 
 R3 = 3,210 (b74f4d8): `bin/clempo-dev replay -datadir ~/scratch/clempo/r3/dd -checkpoint 500000 -diagnose -result ~/scratch/clempo/r3/replay.json`
 executes mainnet from the R2 genesis over the archive (contiguous to 50,049,999), state in a
