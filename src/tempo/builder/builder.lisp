@@ -271,7 +271,10 @@ included as given (the DKG dealer log or the encoded DKG outcome, as consensus s
   (unless (octets= (store:db-root-hash db) (headers:header-state-root parent))
     (build-fail "state root ~A is not the parent's ~A" (octets->hex (store:db-root-hash db))
                 (octets->hex (headers:header-state-root parent))))
-  (let* ((plan (plan-next-block db parent attributes chain desired-gas-limit))
+  ;; The executor reads the chain (e.g. the epoch length of the boundary block's
+  ;; CurrentCommittee call) from EX:*CHAIN*: run the block under CHAIN.
+  (let* ((ex:*chain* chain)
+         (plan (plan-next-block db parent attributes chain desired-gas-limit))
          (env (next-env plan))
          (spec (next-spec plan))
          (block-gas-limit (next-gas-limit plan))

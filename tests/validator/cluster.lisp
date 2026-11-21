@@ -62,8 +62,9 @@ is released."
     (push (mem-key network) (hub-offline (mem-hub network)))
     (setf (car (mem-inbox network)) nil (cdr (mem-inbox network)) nil)
     (net::close-block-log (net::validator-app-log app))
-    (close (clempo.store::store-log-stream store) :abort t)
-    (sb-posix:close (clempo.store::store-lock-fd store))))
+    (close (clempo.store::store-wal-stream store) :abort t)
+    (clempo.store::kv-close (clempo.store::store-kv store))
+    (clempo.store::unlock-datadir (clempo.store::store-lock-fd store))))
 
 (defun call-with-cluster (function)
   "FUNCTION receives the four nodes, started from genesis in fresh datadirs."
@@ -134,4 +135,33 @@ is released."
              "validator 3 proposes again after catching up"))
        (is (member 2 (signing-epochs n3)) "validator 3 signs in epoch 2")
        (is (check-agreement nodes (reduce #'min (mapcar #'node-head nodes))))
-       (is (null (hub-blocks hub)) "no honest validator was blocked: ~S" (hub-blocks hub))))))
+       (is (null (hub-blocks hub)) "no honest validator was blocked: ~S" (hub-blocks hub))
+       ;; and its metrics, on the shared registry, follow it
+       (net::publish-metrics (node-app n3))
+       (is (= (node-head n3)
+              (clempo.metrics:metric-value (clempo.metrics:define-metric "clempo_validator_head" :gauge ""))))
+       (is (= 1 (clempo.metrics:metric-value (clempo.metrics:define-metric "clempo_validator_member" :gauge ""))))
+       (is (plusp (clempo.metrics:metric-value
+                   (clempo.metrics:define-metric "clempo_validator_proposed_total" :counter ""))))))))
+
+(deftest validator-command-flags ()
+  ;; `clempo validator` takes Tempo's flag names.
+  (let* ((dir (make-temp-dir)) (key (merge-pathnames "signing.key" dir)))
+    (unwind-protect
+         (flet ((options (&rest extra)
+                  (net::validator-options
+                   (list* "--chain" "moderato" "--datadir" (namestring dir)
+                          "--consensus.signing-key" (namestring key) extra))))
+           (net:write-signing-key key (devnet-seed 2))
+           (let ((options (options "--consensus.listen-address" "0.0.0.0:8000"
+                                   "--consensus.wait-for-proposal" "500ms"
+                                   "--http" "--http.port" "8545" "--metrics" "127.0.0.1:9001")))
+             (is (eq :moderato (getf options :chain)))
+             (is (octets= (devnet-seed 2) (getf options :seed)))
+             (is (equal '("0.0.0.0" 8000) (list (getf options :listen-host) (getf options :listen-port))))
+             (is (equal '("127.0.0.1" 9001) (list (getf options :metrics-host) (getf options :metrics-port))))
+             (is (eql 8545 (getf options :http-port)))
+             (is (eql 500 (getf (getf options :timeouts) :leader))))
+           (is (null (getf (options) :metrics-port)))
+           (signals net:keys-error (options "--metrics" "nope")))
+      (uiop:delete-directory-tree dir :validate t))))

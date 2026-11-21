@@ -52,9 +52,11 @@ trusted enodes are supplied. Defaults never touch the unrelated mainnet
 exclude 30311. Startup checks all selected TCP ports before spawning anything.
 
 `start --slots 0,1,2` and `stop --slots 1` select slots. `start --clempo 2,3`
-uses the real clempo validator CLI for those selected slots, Rust for the rest.
+runs `bin/clempo validator` for those selected slots, Rust for the rest.
 `--clempo` is intersected with `--slots`. Readiness waits for each Rust RPC and
-each clempo signing-enabled epoch event, not quorum. Readiness/shutdown default
+each clempo signing-enabled epoch event, not quorum; `--ready started` waits only
+for clempo's `started` event (a restarted validator that is still catching up, or
+one that joins at the next epoch). Readiness/shutdown default
 to 60 seconds and accept `--timeout`. Provisioning/helper build defaults to 1800
 seconds. Rust uses `--consensus.use-local-defaults` for short local ceremonies.
 Failed startup terminates only children launched by that invocation. Stop sends SIGTERM
@@ -63,7 +65,7 @@ no process-name matching, process-group kill, SIGKILL, or datadir deletion occur
 PID reuse fails closed. `status` reports those ownership checks, not consensus
 health. Logs append to `rust-N.log` or `clempo-N.log`; provisioning and helper
 build logs are separate. Clempo datadirs are `ROOT/clempo-N`, separate from Rust
-datadirs, and currently require fresh genesis state. Mutating commands use a
+datadirs; starting a clempo slot again resumes from its datadir. Mutating commands use a
 nonblocking root-local operation lock. Launch attempts (including probes) are
 persisted in `launch-history.json`, which is never cleared by stop.
 
@@ -137,24 +139,55 @@ validator and three Rust signers can finalize without it.
 
 ## Mixed validators and quorum
 
-Use a fresh T13 root for every mixed run. The validator loads genesis, executes
-proposals on speculative branches, and persists verified finalizations, Simplex
-artifacts, and DKG state and events. It uses the genesis validator set; changing
-`ValidatorConfigV2` during a run is rejected. Clempo will not reopen an activated
-signing identity: the execution checkpoint and journals do not yet provide a
-unified restart point for the validator process.
+Use a fresh T13 root for every mixed run. A clempo slot runs
+
+```sh
+bin/clempo validator --chain GENESIS --datadir ROOT/clempo-N \
+  --consensus.signing-key KEY --consensus.secret ROOT/localnet.secret \
+  --consensus.signing-share SHARE --consensus.listen-address 127.0.0.1:PORT \
+  --consensus.use-local-defaults --metrics 127.0.0.1:PORT+2 \
+  --http --http.addr 127.0.0.1 --http.port PORT+4
+```
+
+with the slot's identity, share and ports (the Rust node's flag names). It executes
+proposals on speculative branches, persists finalized blocks to a synced block log and its
+votes and DKG state to journals, and resumes from the datadir after a stop or crash (the
+journal keeps it from signing against its own earlier votes). Peers and the next DKG's
+players come from `ValidatorConfigV2` at the parent state. Its JSON-RPC feeds the
+transaction pool its proposals draw from; `/metrics` serves `clempo_validator_*`
+(head, epoch, member, peers, proposed, committed, DKG dealt and acks).
 
 ```sh
 MIX="$HOME/cache/clempo/devnet-mixed"
 $D --root "$MIX" provision --tempo "$HOME/dev/tempo/target/release/tempo"
-CLEMPO_BUILD=release $D --root "$MIX" start --clempo 2,3
+$D --root "$MIX" start --clempo 2,3
 $D --root "$MIX" capture --clempo 2,3 --seconds 180 --report "$MIX/mixed.jsonl"
 $D --root "$MIX" stop
 ```
 
-Launch calls `bin/clempo-dev devnet-validator -manifest PATH -slot N -datadir
-ROOT/clempo-N`, never a probe or synthetic stand-in. It preserves the same
-identity/ports/share as the slot's Rust configuration.
+### Restarts, catch-up, joining and transactions
+
+```sh
+$D --root "$MIX" stop --slots 3                       # a restart mid-run …
+$D --root "$MIX" start --slots 3 --clempo 3 --ready started
+$D --root "$MIX" send --clempo 2,3 --seconds 120      # no-op calls into clempo's pools (cast)
+$D --root "$MIX" join                                 # a fifth, clempo, validator
+$D --root "$MIX" audit --clempo 2,3 --joiner --report "$MIX/audit.jsonl"
+$D --root "$MIX" stop --joiner
+```
+
+`join` generates a key with `clempo keys generate`, registers it with `clempo keys
+add-validator --send` signed by the localnet registry owner (the first funded account;
+loopback devnets only) through a Rust slot's RPC, and starts `bin/clempo validator`
+without a share on ports base+400…404; it becomes a player at the next DKG. `send`
+submits no-op calls from funded accounts 1 and 2 through clempo's JSON-RPC.
+`audit` compares every node's finalized block hash (clempo nodes through their own
+JSON-RPC) with Rust slot's at every height up to the lowest finalized head, then splits
+each clempo log into process runs and reports for each: the head it started at, the
+replayed range, the largest gap one `behind` event reported (a catch-up target is at most
+the current epoch's last block), its last `caught-up` head, the epochs it entered
+holding a share, its DKG outcomes (player counts), and its proposals that are in the
+Rust chain, with transaction counts and the first such height.
 
 For a necessary-vote proof, start exactly three identities from a **fresh**
 provisioning, leaving the fourth identity unused from genesis:

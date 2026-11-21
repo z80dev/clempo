@@ -40,6 +40,7 @@
   (backfill-next-ms (make-hash-table :test #'equalp)) ; peer -> earliest next request time
   (backfill-queued 0)                     ; a finalization above a gap, queued for its ancestors
   (proposed 0) (committed 0) (dealings-sent 0) (acks-sent 0)
+  (signing nil)                           ; whether it holds a share in the current epoch
   (report (constantly nil)))
 
 (defun report (app kind &rest kvs)
@@ -83,12 +84,9 @@ blocks the epoch transition would cut off."
   (clempo.chainspec:fork-active-p :t15 timestamp (validator-app-chain app)))
 
 (defmacro with-chain-write ((app) &body body)
-  "Run BODY, which runs blocks on the state DB, under the app's chain spec (the executor
-and builder read CLEMPO.EXECUTOR:*CHAIN*, e.g. for the epoch length of the boundary's
-CurrentCommittee call) with JSON-RPC requests held off."
+  "Run BODY, which runs blocks on the state DB, with JSON-RPC requests held off."
   (let ((backend (gensym "BACKEND")) (thunk (gensym "THUNK")))
-    `(let ((,backend (validator-app-backend ,app))
-           (clempo.executor:*chain* (validator-app-chain ,app)))
+    `(let ((,backend (validator-app-backend ,app)))
        (flet ((,thunk () ,@body))
          (if ,backend
              (clempo.rpc.chain:with-backend-write (,backend) (,thunk))
@@ -100,17 +98,36 @@ CurrentCommittee call) with JSON-RPC requests held off."
   (let ((raw (clempo.blocks:block-raw block)))
     (if raw (length raw) (length (clempo.blocks:encode-block block)))))
 
+(defun evict-highest-candidates (app above)
+  "Drop every candidate at the highest height when that height exceeds ABOVE; true if any
+was dropped. A validator far behind fills its candidates with blocks broadcast near the
+tip; the ones next to its head are the ones it must keep room for."
+  (let* ((table (validator-app-candidate-blocks app))
+         (highest (loop for block being the hash-values of table maximize (number-of block))))
+    (when (and highest (> highest above))
+      (maphash (lambda (hash block)
+                 (when (= (number-of block) highest)
+                   (decf (validator-app-candidate-bytes app) (candidate-size block))
+                   (remhash hash table)))
+               table)
+      t)))
+
 (defun stash-block (app block)
   (let* ((hash (digest-of block)) (table (validator-app-candidate-blocks app))
          (number (number-of block)))
     (when (and (< (head-number app) number (+ (head-number app) +candidate-limit+))
-               (< (hash-table-count table) +candidate-limit+)
                (not (gethash hash table))
                (not (clempo.blocks:block-body-mismatches block)))
       (let ((size (candidate-size block)))
-        (when (<= (+ (validator-app-candidate-bytes app) size) +candidate-bytes-limit+)
-          (incf (validator-app-candidate-bytes app) size)
-          (setf (gethash hash table) block))))
+        (flet ((room-p ()
+                 (and (< (hash-table-count table) +candidate-limit+)
+                      (<= (+ (validator-app-candidate-bytes app) size) +candidate-bytes-limit+))))
+          (loop repeat +candidate-limit+
+                until (room-p)
+                while (evict-highest-candidates app number))
+          (when (room-p)
+            (incf (validator-app-candidate-bytes app) size)
+            (setf (gethash hash table) block)))))
     (when (gethash hash table) hash)))
 
 (defun branch (app digest)
@@ -504,6 +521,7 @@ last block. It is the voter's genesis (Floor::Genesis) and its timestamp picks t
                  (when (validator-app-timeouts app) (list :timeouts (validator-app-timeouts app)))))
     (clrhash (validator-app-certificates app))
     (clrhash (validator-app-requests app))
+    (setf (validator-app-signing app) (and index share t))
     (report app "epoch" "epoch" (epoch app) "signing" (json:jbool (and index share))
             "player" (json:jbool index) "participants" (length players))
     (refresh-peers app)
@@ -604,7 +622,12 @@ if the state store had not synced), then the state, then the DKG actor."
         for artifact = (first (validator-app-finalizations app))
         for proposal = (clempo.consensus:finalization-proposal artifact)
         for digest = (clempo.consensus:proposal-payload proposal)
-        do (multiple-value-bind (blocks valid missing) (branch app digest)
+        do (multiple-value-bind (blocks valid missing)
+               (if (block-log-height (validator-app-log app) digest)
+                   ;; Already finalized here (e.g. replayed from the journal after a restart):
+                   ;; its block is no candidate, so asking for it would never end.
+                   (values nil t nil)
+                   (branch app digest))
              (cond (missing (ask-block app missing) (return))
                    ((not valid) (error "verified finalization does not extend our finalized head"))
                    (t
@@ -648,12 +671,13 @@ block is finalized."
   (when (> epoch (epoch app))
     (note-backfill-target app (epoch-last-height app))))
 
-(defun backfill-peer (app now)
-  "A connected peer whose marshal quota admits a request now, or NIL."
+(defun backfill-peer (app now refused)
+  "A connected peer, not among REFUSED (those that answered this height with an error),
+whose marshal quota admits a request now, or NIL."
   (let ((gap (ceiling 1000 (max 1 (validator-app-backfill-frequency app)))))
     (loop for peer in (network-peers (validator-app-network app))
           for next = (gethash peer (validator-app-backfill-next-ms app) 0)
-          when (<= next now)
+          when (and (<= next now) (not (member peer refused :test #'octets=)))
             do (setf (gethash peer (validator-app-backfill-next-ms app)) (+ now gap))
                (return peer))))
 
@@ -675,10 +699,12 @@ block is finalized."
                 to (min target (+ (head-number app) +backfill-window+))
               unless (or (member height outstanding)
                          (gethash height (validator-app-backfill-buffer app)))
-                do (let ((peer (backfill-peer app now)))
-                     (unless peer (return))
-                     (send-request app 4 (clempo.validator-wire:make-marshal-key :kind :finalized :height height)
-                                   :finalized peer +backfill-timeout-ms+))))
+                do (let ((peer (backfill-peer app now (gethash height (validator-app-backfill-missing app)))))
+                     ;; Every peer refused it or none is free yet; APPLY-BACKFILL skips a
+                     ;; height no peer holds a certificate for.
+                     (when peer
+                       (send-request app 4 (clempo.validator-wire:make-marshal-key :kind :finalized :height height)
+                                     :finalized peer +backfill-timeout-ms+)))))
       (apply-backfill app))))
 
 (defun current-finalization-p (app finalization)
@@ -856,8 +882,9 @@ or NIL when the height had no certificate of its own here."
                (if (eq kind :response)
                    (handle-response app peer request message)
                    (when (eq (fetch-kind request) :finalized)
-                     (push peer (gethash (clempo.validator-wire:marshal-key-height (fetch-key request))
-                                         (validator-app-backfill-missing app)))))))))))
+                     (pushnew peer (gethash (clempo.validator-wire:marshal-key-height (fetch-key request))
+                                            (validator-app-backfill-missing app))
+                              :test #'octets=)))))))))
 
 (defun handle-consensus (app channel peer octets)
   (multiple-value-bind (message e)

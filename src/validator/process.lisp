@@ -84,8 +84,11 @@ synced."
 NETWORK and enter the current epoch. BEFORE-CONSENSUS, when given, is called with the app
 before it enters its epoch. CLOSE-VALIDATOR-APP closes the datadir."
   (let* ((length (clempo.chainspec:chain-epoch-length chain))
+         ;; The block log syncs every finalized block, so the state store's log need not:
+         ;; a crash loses at most its unsynced tail, which recovery re-executes from the log.
          (store (clempo.store:open-store (datadir-path datadir "state/")
-                                         :genesis (lambda (db) (clempo.executor:load-genesis db :chain chain))))
+                                         :genesis (lambda (db) (clempo.executor:load-genesis db :chain chain))
+                                         :sync '(:group 64)))
          (log nil) (app nil))
     (unwind-protect
          (progn
@@ -118,17 +121,46 @@ before it enters its epoch. CLOSE-VALIDATOR-APP closes the datadir."
     (unwind-protect (funcall function app)
       (close-validator-app app))))
 
+;;; Metrics, on the process's shared registry (clempo.metrics), refreshed once a second.
+
+(defmacro define-validator-metrics (&rest specs)
+  "Each spec is (NAME KIND HELP READER): the metric NAME is set from (READER app)."
+  `(progn
+     (defparameter +validator-metrics+
+       (list ,@(loop for (name kind help reader) in specs
+                     collect `(cons (clempo.metrics:define-metric ,name ,kind ,help) #',reader))))
+     (defun publish-metrics (app)
+       (loop for (metric . reader) in +validator-metrics+
+             do (clempo.metrics:metric-set metric (funcall reader app))))))
+
+(defun validator-peer-count (app) (length (network-peers (validator-app-network app))))
+(defun validator-member (app) (if (validator-app-signing app) 1 0))
+
+(define-validator-metrics
+  ("clempo_validator_head" :gauge "Finalized head." head-number)
+  ("clempo_validator_epoch" :gauge "Current epoch." epoch)
+  ("clempo_validator_member" :gauge "1 when it holds a share in the current epoch." validator-member)
+  ("clempo_validator_peers" :gauge "Connected consensus peers." validator-peer-count)
+  ("clempo_validator_proposed_total" :counter "Blocks proposed." validator-app-proposed)
+  ("clempo_validator_committed_total" :counter "Finalized blocks committed." validator-app-committed)
+  ("clempo_validator_dkg_dealt_total" :counter "DKG dealings sent." validator-app-dealings-sent)
+  ("clempo_validator_dkg_acks_total" :counter "DKG acks sent." validator-app-acks-sent))
+
 (defun run-validator (&key chain datadir seed share (listen-host "127.0.0.1") (listen-port 8000)
-                           (fee-recipient 0) http-host http-port network-options timeouts
+                           (fee-recipient 0) http-host http-port metrics-host metrics-port
+                           network-options timeouts
                            (backfill-frequency 8) (seconds 0) (reporter (constantly nil)))
   "Run a Tempo validator with ed25519 SEED on DATADIR (created or resumed) for the chain
 CHAIN (a genesis path or LOAD-CHAINSPEC designator). SHARE is the BLS share for the first
 epoch it signs in (NIL: the datadir's DKG state, or an observer until a ceremony deals one).
-Peers come from ValidatorConfigV2. HTTP-PORT serves JSON-RPC. Stops on SIGTERM/SIGINT or
-after SECONDS (0: never) and returns the finalized head. REPORTER receives each JSON event."
+Peers come from ValidatorConfigV2. HTTP-PORT serves JSON-RPC and METRICS-PORT Prometheus
+metrics. Stops on SIGTERM/SIGINT or after SECONDS (0: never) and returns the finalized head.
+REPORTER receives each JSON event."
   (let ((chain (clempo.chainspec:load-chainspec chain))
         (deadline (when (plusp seconds) (+ (io:now-ms) (* 1000 seconds))))
-        (server nil))
+        (server nil)
+        (metrics (when metrics-port
+                   (clempo.metrics:start-metrics-server (or metrics-host "127.0.0.1") metrics-port))))
     (unwind-protect
          (apply #'call-with-validator-network
                 (lambda (network)
@@ -136,8 +168,12 @@ after SECONDS (0: never) and returns the finalized head. REPORTER receives each 
                    (lambda (app)
                      (unwind-protect
                           (progn
-                            (loop until (or *stop-requested* (and deadline (>= (io:now-ms) deadline)))
-                                  do (step-validator app))
+                            (loop with publish-at = 0
+                                  until (or *stop-requested* (and deadline (>= (io:now-ms) deadline)))
+                                  do (step-validator app)
+                                     (when (>= (io:now-ms) publish-at)
+                                       (publish-metrics app)
+                                       (setf publish-at (+ (io:now-ms) 1000))))
                             (funcall reporter (json:jobject "event" "stopped" "head" (head-number app)))
                             (head-number app))
                        ;; JSON-RPC readers stop before the store closes.
@@ -160,7 +196,8 @@ after SECONDS (0: never) and returns the finalized head. REPORTER receives each 
                 :seed seed :listen-host listen-host :listen-port listen-port
                 :channel-quotas (tempo-channel-quotas :backfill-frequency backfill-frequency)
                 network-options)
-      (when server (clempo.rpcserver:stop-server server)))))
+      (when server (clempo.rpcserver:stop-server server))
+      (when metrics (clempo.metrics:stop-metrics-server metrics)))))
 
 ;;; The command line, with Tempo's flag names.
 
@@ -169,6 +206,7 @@ after SECONDS (0: never) and returns the finalized head. REPORTER receives each 
     --consensus.signing-key PATH [--consensus.secret PASSPHRASE-FILE]
     [--consensus.signing-share PATH] [--consensus.listen-address HOST:PORT]
     [--consensus.fee-recipient ADDR] [--http --http.addr HOST --http.port PORT]
+    [--metrics IP:PORT]
     [--consensus.use-local-defaults] [--consensus.allow-private-ips]
     [--consensus.backfill-frequency N] [--consensus.wait-for-proposal DURATION]
     [--consensus.wait-for-notarizations DURATION]
@@ -182,7 +220,7 @@ written to standard output as JSON lines.
     "consensus.listen-address" "consensus.fee-recipient" "http" "http.addr" "http.port"
     "consensus.use-local-defaults" "consensus.allow-private-ips" "consensus.bypass-ip-check"
     "consensus.backfill-frequency" "consensus.wait-for-proposal" "consensus.wait-for-notarizations"
-    "consensus.wait-to-rebroadcast-nullify" "seconds"))
+    "consensus.wait-to-rebroadcast-nullify" "seconds" "metrics"))
 
 (defparameter +validator-boolean-flags+
   '("http" "consensus.use-local-defaults" "consensus.allow-private-ips" "consensus.bypass-ip-check"))
@@ -196,9 +234,9 @@ written to standard output as JSON lines.
       (keys-fail "--~A must be a duration such as 500ms or 2s" name))
     (* (parse-integer digits) (cond ((string= unit "ms") 1) ((string= unit "s") 1000) (t 60000)))))
 
-(defun parse-listen-address (text)
+(defun parse-address-flag (text name)
   (multiple-value-bind (host port) (parse-socket-address text)
-    (unless host (keys-fail "--consensus.listen-address must be IP:PORT, got ~S" text))
+    (unless host (keys-fail "--~A must be IP:PORT, got ~S" name text))
     (values host port)))
 
 (defun validator-options (args)
@@ -208,7 +246,8 @@ written to standard output as JSON lines.
          (secret (flag flags "consensus.secret"))
          (share-path (flag flags "consensus.signing-share")))
     (multiple-value-bind (listen-host listen-port)
-        (parse-listen-address (or (flag flags "consensus.listen-address") "127.0.0.1:8000"))
+        (parse-address-flag (or (flag flags "consensus.listen-address") "127.0.0.1:8000")
+                            "consensus.listen-address")
       (flet ((integer-flag (name default bits)
                (if (flag flags name) (flag-integer flags name bits) default))
              (duration (name) (let ((v (flag flags name))) (when v (parse-duration-ms v name)))))
@@ -224,6 +263,9 @@ written to standard output as JSON lines.
                 :fee-recipient (if (flag flags "consensus.fee-recipient") (flag-address flags "consensus.fee-recipient") 0)
                 :http-host (when (flag flags "http") (or (flag flags "http.addr") "127.0.0.1"))
                 :http-port (when (flag flags "http") (integer-flag "http.port" 8545 16))
+                :metrics-host (when (flag flags "metrics") (parse-address-flag (flag flags "metrics") "metrics"))
+                :metrics-port (when (flag flags "metrics")
+                                (nth-value 1 (parse-address-flag (flag flags "metrics") "metrics")))
                 :backfill-frequency (max 1 (integer-flag "consensus.backfill-frequency" 8 32))
                 :seconds (integer-flag "seconds" 0 32)
                 :timeouts (when timeouts (append timeouts clempo.simplex:*tempo-timeouts*))

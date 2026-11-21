@@ -674,6 +674,7 @@ directory flag shares one. SIGTERM or SIGINT stops cleanly.~%"))
 
 (defun run-main (argv)
   (cond ((equal (first argv) "keys") (clempo.validator:keys-command (rest argv)))
+        ((equal (first argv) "validator") (clempo.validator:validator-command (rest argv)))
         (t (let ((options (node-options argv)))
              (cond ((eq options :help) (node-usage) 0)
                    ((not (getf options :datadir)) (node-usage) 2)

@@ -216,6 +216,8 @@ def start(a, m):
             port = int(v['consensus_address'].rsplit(':', 1)[1])
             for p in range(port, port + 5):
                 sock = sockets.enter_context(socket.socket())
+                # A restarted node leaves TIME_WAIT connections; a live listener still fails.
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 sock.bind(('127.0.0.1', p))
     peers = ','.join(f"enode://{v['enode_identity']}@127.0.0.1:{v['execution_port']}" for v in m['validators'])
     spawned = []
@@ -223,9 +225,6 @@ def start(a, m):
     try:
         for v in selected:
             implementation = 'clempo' if v['slot'] in a.clempo else 'rust'
-            used = Path(v['signing_seed']).with_name('clempo-signing-active')
-            if used.exists():
-                raise RuntimeError(f"slot {v['slot']} signed in clempo; provision a fresh devnet before reusing it")
             command = [m['tempo_binary'], 'node', '--chain', m['genesis'], '--datadir', v['datadir'],
                 '--consensus.signing-key', v['signing_key'], '--consensus.secret', str(a.root / 'localnet.secret'),
                 '--consensus.signing-share', v['signing_share'], '--consensus.listen-address', v['consensus_address'],
@@ -237,9 +236,17 @@ def start(a, m):
                 '--http', '--http.addr', '127.0.0.1', '--http.port', v['rpc_url'].rsplit(':', 1)[1],
                 '--http.api', 'eth,net,web3,debug,consensus', '--ipcdisable']
             if implementation == 'clempo':
-                command = [str(HERE.parents[1] / 'bin/clempo-dev'), 'devnet-validator',
-                           '-manifest', str(a.root / 'manifest.json'), '-slot', str(v['slot']),
-                           '-datadir', str(a.root / f"clempo-{v['slot']}")]
+                # The same identity, share and ports as the slot's Rust node, on its own
+                # datadir; restarting resumes from it.
+                command = [str(HERE.parents[1] / 'bin/clempo'), 'validator', '--chain', m['genesis'],
+                    '--datadir', str(a.root / f"clempo-{v['slot']}"),
+                    '--consensus.signing-key', v['signing_key'],
+                    '--consensus.secret', str(a.root / 'localnet.secret'),
+                    '--consensus.signing-share', v['signing_share'],
+                    '--consensus.listen-address', v['consensus_address'],
+                    '--consensus.use-local-defaults',
+                    '--metrics', v['metrics_url'].removeprefix('http://'),
+                    '--http', '--http.addr', '127.0.0.1', '--http.port', v['rpc_url'].rsplit(':', 1)[1]]
             log_path = a.root / f"{implementation}-{v['slot']}.log"
             log_offset = log_path.stat().st_size if log_path.exists() else 0
             remember_launch(a.root, v['slot'], implementation)
@@ -270,7 +277,8 @@ def start(a, m):
                         for line in lines:
                             if line.lstrip().startswith('{'):
                                 event = json.loads(line)
-                                if event.get('event') == 'epoch' and event.get('signing') is True:
+                                if (event.get('event') == 'epoch' and event.get('signing') is True
+                                        or a.ready == 'started' and event.get('event') == 'started'):
                                     pending.remove(v)
                                     break
                     elif rpc(v, 'eth_chainId', []):
@@ -452,6 +460,172 @@ def capture(a, m):
                   quorum_active_slots=a.slots if quorum else [],
                   quorum_excluded_slots=sorted(set(range(4)) - set(a.slots)) if quorum else []))
 
+# The well-known first funded localnet account (xtask's test mnemonic); genesis makes it the
+# ValidatorConfigV2 owner. Never use it outside an isolated loopback devnet.
+OWNER_KEY = 'ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
+# Funded localnet accounts 1 and 2 (the owner's nonce stays free for registrations).
+SENDER_KEYS = ['59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d',
+               '5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a']
+
+
+def joiner_paths(root):
+    base = root / 'joiner'
+    return dict(base=base, key=base / 'signing.key', owner=base / 'owner.key',
+                datadir=root / 'clempo-joiner', log=root / 'clempo-joiner.log')
+
+
+def join(a, m):
+    """Register a fifth, clempo, validator through `clempo keys add-validator --send` and
+    start it without a share: it joins as a player in the next DKG."""
+    clempo = str(HERE.parents[1] / 'bin/clempo')
+    paths = joiner_paths(a.root)
+    owned = records(a.root)
+    if alive(owned.get('joiner', {})):
+        raise RuntimeError('the joiner is already running')
+    port = a.port
+    rust = next(v for v in m['validators'] if v['slot'] == a.via)
+    if not paths['key'].exists():
+        paths['base'].mkdir(mode=0o700, exist_ok=True)
+        run([clempo, 'keys', 'generate', '--output', str(paths['key'])], timeout=600)
+        paths['owner'].write_text(OWNER_KEY + '\n')
+        chain_id = int(rpc(rust, 'eth_chainId', []), 16)
+        result = run([clempo, 'keys', 'add-validator', '--consensus.signing-key', str(paths['key']),
+                      '--chain-id', str(chain_id), '--validator', a.validator,
+                      '--ingress', f'127.0.0.1:{port}', '--egress', '127.0.0.1',
+                      '--fee-recipient', a.validator, '--send', '--rpc', rust['rpc_url'],
+                      '--owner-key', str(paths['owner'])], timeout=600, capture_output=True, text=True)
+        registration = json.loads(result.stdout.strip().splitlines()[-1])
+        save(paths['base'] / 'registration.json', registration)
+        receipt = registration.get('receipt', {})
+        print(json.dumps(dict(public_key=registration['publicKey'], status=receipt.get('status'),
+                              block=receipt.get('blockNumber'))))
+        if receipt.get('status') != '0x1':
+            raise RuntimeError('addValidator was not executed successfully; see joiner/registration.json')
+    command = [clempo, 'validator', '--chain', m['genesis'], '--datadir', str(paths['datadir']),
+               '--consensus.signing-key', str(paths['key']),
+               '--consensus.listen-address', f'127.0.0.1:{port}', '--consensus.use-local-defaults',
+               '--metrics', f'127.0.0.1:{port + 2}',
+               '--http', '--http.addr', '127.0.0.1', '--http.port', str(port + 4)]
+    log_offset = paths['log'].stat().st_size if paths['log'].exists() else 0
+    with paths['log'].open('ab') as log:
+        child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=log,
+                                 stderr=subprocess.STDOUT, start_new_session=True)
+    owned['joiner'] = dict(pid=child.pid, identity=identity(child.pid), command=command,
+                           implementation='clempo', log_offset=log_offset)
+    save(a.root / 'processes.json', owned)
+    print('Joiner started, pid', child.pid)
+
+
+def send(a, m):
+    """Submit no-op calls to clempo validators' JSON-RPC (their transaction pools), so their
+    proposals carry transactions; prints each hash."""
+    targets = [v for v in m['validators'] if v['slot'] in a.clempo]
+    deadline = time.monotonic() + a.seconds
+    sent = 0
+    while time.monotonic() < deadline:
+        for v in targets:
+            for key in SENDER_KEYS:
+                result = subprocess.run(['cast', 'send', '--async', '--private-key', '0x' + key,
+                                         '--rpc-url', v['rpc_url'], '0x70997970C51812dc3A010C7d01b50e0d17dc79C8'],
+                                        timeout=60, capture_output=True, text=True)
+                if result.returncode == 0:
+                    sent += 1
+                    print(json.dumps(dict(slot=v['slot'], tx=result.stdout.strip())), flush=True)
+                else:
+                    print(json.dumps(dict(slot=v['slot'], error=result.stderr.strip()[-300:])), flush=True)
+        time.sleep(a.interval)
+    print(json.dumps(dict(sent=sent)))
+
+
+def clempo_runs(path):
+    """Split a clempo validator log into process runs (each begins with a 'started' event)."""
+    runs = []
+    for line in path.read_text(errors='replace').splitlines():
+        if not line.startswith('{'):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        kind = event.get('event')
+        if kind == 'started':
+            runs.append(dict(start_head=event['head'], key=event['key'], behind=None, caught_up=None,
+                             replayed=None, signing_epochs=[], dkg=[], proposed=[], stopped=None))
+        elif not runs:
+            continue
+        run_ = runs[-1]
+        if kind == 'replaying':
+            run_['replayed'] = [event['from'], event['to']]
+        elif kind == 'behind':
+            run_['behind'] = max(run_['behind'] or 0, event['target'] - event['head'])
+        elif kind == 'caught-up':
+            run_['caught_up'] = event['head']
+        elif kind == 'epoch' and event.get('signing') is True:
+            run_['signing_epochs'].append(event['epoch'])
+        elif kind == 'dkg':
+            run_['dkg'].append(dict(epoch=event['epoch'], players=len(event.get('players', [])),
+                                    share=event.get('share')))
+        elif kind == 'proposed':
+            run_['proposed'].append((event['height'], event['hash'], event.get('transactions', 0)))
+        elif kind == 'stopped':
+            run_['stopped'] = event['head']
+    return runs
+
+
+def audit(a, m):
+    """Every node's finalized chain agrees with the Rust validators' at every height, and each
+    clempo validator's process runs (restarts, catch-up, signing epochs, DKG, its own proposals
+    finalized by Rust, with transaction counts) as its log records them."""
+    rust = [v for v in m['validators'] if v['slot'] not in a.clempo]
+    nodes = {f"rust-{v['slot']}": v for v in rust}
+    nodes.update({f"clempo-{v['slot']}": v for v in m['validators'] if v['slot'] in a.clempo})
+    if a.joiner:
+        nodes['clempo-joiner'] = dict(slot='joiner', rpc_url=f'http://127.0.0.1:{a.port + 4}')
+    heads = {}
+    for name, v in nodes.items():
+        try:
+            heads[name] = int(rpc(v, 'eth_getBlockByNumber', ['finalized', False])['number'], 16)
+        except (OSError, RuntimeError, TypeError):
+            heads[name] = None
+    reference = nodes[f"rust-{rust[0]['slot']}"]
+    top = min(h for h in heads.values() if h is not None)
+    with a.report.open('x') as output:
+        def emit(row):
+            output.write(json.dumps(row, sort_keys=True) + '\n')
+            output.flush()
+        emit(dict(kind='heads', heads=heads, compared_to=top))
+        canonical = {}
+        for height in range(0, top + 1):
+            block = rpc(reference, 'eth_getBlockByNumber', [hex(height), False])
+            canonical[height] = block['hash']
+            for name, v in nodes.items():
+                if v is reference or heads[name] is None:
+                    continue
+                other = rpc(v, 'eth_getBlockByNumber', [hex(height), False])
+                if other is None or other['hash'] != block['hash']:
+                    raise RuntimeError(f'{name} differs from Rust at height {height}')
+        logs = {f'clempo-{slot}': a.root / f'clempo-{slot}.log' for slot in a.clempo}
+        if a.joiner:
+            logs['clempo-joiner'] = joiner_paths(a.root)['log']
+        summary = {}
+        for name, path in logs.items():
+            runs = clempo_runs(path)
+            rows = []
+            for index, run_ in enumerate(runs):
+                own = [(h, txs) for h, digest, txs in run_['proposed'] if canonical.get(h) == digest]
+                row = dict(run=index, start_head=run_['start_head'], replayed=run_['replayed'],
+                           behind=run_['behind'], caught_up=run_['caught_up'], stopped=run_['stopped'],
+                           signing_epochs=sorted(set(run_['signing_epochs'])), dkg=run_['dkg'],
+                           finalized_own_proposals=len(own),
+                           finalized_own_with_transactions=len([h for h, txs in own if txs > 0]),
+                           transactions_in_own_proposals=sum(txs for h, txs in own),
+                           first_own_finalized=min((h for h, txs in own), default=None))
+                emit(dict(kind='run', node=name, key=run_['key'], **row))
+                rows.append(row)
+            summary[name] = rows
+        emit(dict(kind='summary', compared=top + 1, heads=heads, runs=summary))
+    print(json.dumps(dict(compared=top + 1, heads=heads)))
+
 
 def slots(value):
     result = [int(x) for x in value.split(',')]
@@ -480,8 +654,13 @@ def main():
         cmd.add_argument('--slots', type=slots, default=[0, 1, 2, 3])
         if name in ('start', 'capture'):
             cmd.add_argument('--clempo', type=slots, default=[])
+        if name == 'start':
+            # 'started': a restarted or joining clempo validator need not sign yet.
+            cmd.add_argument('--ready', choices=('signing', 'started'), default='signing')
         if name in ('start', 'stop'):
             cmd.add_argument('--timeout', type=float, default=60)
+        if name in ('stop', 'status'):
+            cmd.add_argument('--joiner', action='store_true', help='also the joined fifth validator')
         if name == 'capture':
             cmd.add_argument('--quorum', action='store_true')
             cmd.add_argument('--seconds', type=float, default=120)
@@ -491,10 +670,24 @@ def main():
     probe = sub.add_parser('probe')
     probe.add_argument('--slot', type=int, choices=range(4), required=True)
     probe.add_argument('--seconds', type=int, default=20)
+    joiner = sub.add_parser('join')
+    joiner.add_argument('--port', type=int, default=None, help='consensus port (default: base port + 400)')
+    joiner.add_argument('--via', type=int, choices=range(4), default=0, help='Rust slot whose RPC takes the registration')
+    joiner.add_argument('--validator', default='0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc',
+                        help='the validator (and fee recipient) address')
+    sender = sub.add_parser('send')
+    sender.add_argument('--clempo', type=slots, required=True)
+    sender.add_argument('--seconds', type=float, default=60)
+    sender.add_argument('--interval', type=float, default=2)
+    auditor = sub.add_parser('audit')
+    auditor.add_argument('--clempo', type=slots, default=[])
+    auditor.add_argument('--joiner', action='store_true')
+    auditor.add_argument('--port', type=int, default=None)
+    auditor.add_argument('--report', type=Path, required=True)
     a = p.parse_args()
     if any(getattr(a, key, 1) <= 0 for key in ('timeout', 'seconds', 'stall', 'epoch_length')):
         p.error('durations and epoch length must be positive')
-    if hasattr(a, 'clempo'):
+    if hasattr(a, 'clempo') and hasattr(a, 'slots'):
         a.clempo = [slot for slot in a.clempo if slot in a.slots]
     if getattr(a, 'from_height', 0) < 0:
         p.error('--from-height must not be negative')
@@ -502,16 +695,18 @@ def main():
         provision(a)
         return
     m = load(a.root)
+    if getattr(a, 'port', 0) is None:
+        a.port = int(m['validators'][0]['consensus_address'].rsplit(':', 1)[1]) + 400
     with (a.root / 'operation.lock').open('a') as lock:
-        if a.command in ('start', 'stop', 'probe') or getattr(a, 'quorum', False):
+        if a.command in ('start', 'stop', 'probe', 'join') or getattr(a, 'quorum', False):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         if a.command == 'start':
             start(a, m)
         elif a.command == 'stop':
-            stop(a.root, a.slots, a.timeout)
+            stop(a.root, a.slots + (['joiner'] if a.joiner else []), a.timeout)
         elif a.command == 'status':
             owned = records(a.root)
-            for slot in a.slots:
+            for slot in a.slots + (['joiner'] if a.joiner else []):
                 record = owned.get(str(slot), {})
                 print(json.dumps(dict(slot=slot, pid=record.get('pid'), running=alive(record))))
         elif a.command == 'probe':
@@ -524,6 +719,12 @@ def main():
                  '-slot', str(a.slot), '-seconds', str(a.seconds)], timeout=a.seconds + 60)
         elif a.command == 'capture':
             capture(a, m)
+        elif a.command == 'join':
+            join(a, m)
+        elif a.command == 'send':
+            send(a, m)
+        elif a.command == 'audit':
+            audit(a, m)
 
 
 if __name__ == '__main__':
