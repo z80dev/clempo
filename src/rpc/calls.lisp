@@ -200,11 +200,12 @@ does: unknown keys are left for the next level. Returns (values plist leftover-e
 (defparameter +tempo-request-fields+
   '(("feeToken" :fee-token address t) ("nonceKey" :nonce-key q256 t) ("calls" :calls tempo-calls nil)
     ("keyType" :key-type signature-type t) ("keyData" :key-data hex-data t) ("keyId" :key-id address t)
-    ("aaAuthorizationList" :tempo-authorizations raw nil) ("keyAuthorization" :key-authorization raw t)
-    ("configurableAccountSimulation" :account-simulation raw t)
-    ("keyAuthorizationSimulation" :key-authorization-simulation raw t)
+    ("aaAuthorizationList" :tempo-authorizations tempo-authorization-list nil)
+    ("keyAuthorization" :key-authorization signed-key-authorization t)
+    ("configurableAccountSimulation" :account-simulation account-simulation t)
+    ("keyAuthorizationSimulation" :key-authorization-simulation account-simulation t)
     ("validBefore" :valid-before nonzero-q64 t) ("validAfter" :valid-after nonzero-q64 t)
-    ("feePayerSignature" :fee-payer-signature raw t))
+    ("feePayerSignature" :fee-payer-signature signature t))
   "TempoTransactionRequest's own fields: (json key type optional-p).")
 
 (defparam tx-request (src) "Tempo's TempoTransactionRequest; returns a CALL-REQUEST"

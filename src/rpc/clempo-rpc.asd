@@ -21,6 +21,7 @@
                (:file "state")
                (:file "revert")
                (:file "calls")
+               (:file "tempo-request")
                (:file "simulate")))
 
 (defsystem "clempo-rpc/tests"
