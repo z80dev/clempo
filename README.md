@@ -16,9 +16,9 @@ clempo is an independent implementation of the Tempo reference node, alongside o
 | R4 Follow | live tip: executed, certified, RPC probed independently | 74,779 blocks executed and certified; latest recorded hour failed the RPC gap limit (20.0195 s vs 20 s) | yes |
 | R5 RPC | recorded reference answers, separated by comparison mode | see the [RPC evidence](FRONTIER.md#evidence) for verdicts and coverage | see [goempo's frontier](https://github.com/gakonst/goempo/blob/main/FRONTIER.md) |
 | R6 Validator | Simplex and DKG; independent signers with Rust validators | seeded sims (4/5/7 validators, faults, reshares); devnet where clempo signers are required for quorum | seeded simulations and mixed-validator devnet |
-| R7 Speed | timed replay/import wall throughput vs Rust on the same Mac | 6.65× (Early), 1.58× (Busy), 2.86× (Recent) | 17.65× (Early), 1.36× (Busy), 3.00× (Recent) |
+| R7 Speed | same-Mac replay wall seconds: Early / Busy / Recent, two runs each | 2.621–2.720 / 21.867–25.597 / 8.109–9.354 | 3.028–3.054 / 25.135–26.728 / 10.278–11.224 |
 
-The six R3p differences are T14 keychain grants where clempo follows a newer reference commit than the corpus. The R7 ratios come from the revisions and runs in [docs/BENCH.md](docs/BENCH.md#results-on-the-shared-dev-host), before the disk-backed store migration. They use timed replay/import, not end-to-end command time: clempo and goempo check every root; Rust checks import-chunk terminal roots. Clempo used more CPU than Rust on Busy (58.20 s vs 45.76 s), and less on Early and Recent.
+The six R3p differences are T14 keychain grants where clempo follows a newer reference commit than the corpus. In the [R7 comparison at `3c43b9e`](docs/BENCH.md#current-main-comparison-3c43b9e), clempo replay was faster in all six matched pairs. Both engines checked every root; Rust checked import-chunk terminal roots and took 57.893–61.427 s (Early), 32.977–34.733 s (Busy), and 42.232–42.741 s (Recent). These are timed replay/import intervals, not whole-command measurements: goempo used less CPU on Recent and finished one Recent command sooner.
 
 ## Why Lisp
 
