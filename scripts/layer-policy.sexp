@@ -83,14 +83,10 @@
    ("U-EXP" 1 "Consumes the bits of a 256-bit exponent.")
    ("WRITE-WORD" 3 "Emits bytes from one fixed-width EVM word."))
   ("src/p2p/cw-stream.lisp" ("UINT" 1 "Unsigned varint generation shifts out seven bits per iteration."))
-  ("src/p2p/eth.lisp"
-   ("DECODE-FIELD" 1 "Consumes RLP fields up to the enclosed payload end.")
-   ("DOWNLOAD-BLOCKS" 2 "Fetches finite requested subranges and consumes responses through the transport deadline."))
   ("src/p2p/snappy.lisp"
    ("COMPRESS" 4 "Varint and copy loops consume finite input lengths and matches.")
    ("DECOMPRESS" 1 "Consumes compressed tags up to the finite input length, checking the declared output bound."))
   ("src/rpc/defrpc.lisp" ("VALUE-SPANS" 1 "Advances through values of a fixed JSON slice."))
-  ("src/rpc/logs.lisp" ("BLOCK-REWARDS" 1 "Traverses the block's finite transaction/receipt sequences."))
   ("src/rpc/revert.lisp" ("SPLIT-SEQUENCE" 1 "Scans the finite signature string from one separator to the next."))
   ("src/rpc/serde.lisp"
    ("DO-ARRAY" 1 "Each element consumes input, or invalid JSON stops parsing.")
@@ -105,7 +101,6 @@
   ("src/rpc/tempo-request.lisp"
    ("RLP-VEC" 1 "Traverses finite RLP items in the supplied list.")
    ("SEQ-TRAILING" 1 "Scans finite trailing transaction fields."))
-  ("src/rpc/websocket.lisp" ("READ-MESSAGE" 1 "Reads fragments or control frames until a message, EOF, cap, or transport timeout."))
   ("src/sim/network.lisp"
    ("HEAP-POP" 1 "Descends a finite heap.")
    ("HEAP-PUSH" 1 "Ascends a finite heap.")
@@ -152,6 +147,10 @@
    ("WALK-KEY" 1 "Consumes key nibbles on descent or terminates at a leaf/mismatch."))
   ("src/types/blocks.lisp" ("DECODE-BLOCK" 2 "Each decoded transaction or ommer advances the cursor within its bounded RLP list."))
   ("src/types/signatures.lisp" ("WEBAUTHN-CLIENT-DATA" 7 "Token, whitespace, string and container scans advance within the bounded input."))
+  ("src/validator/keys-age.lisp"
+   ("DECRYPT-PAYLOAD" 1 "Processes bounded AGE ciphertext chunks, advancing on every chunk.")
+   ("PARSE-HEADER" 2 "Parses stanzas and lines within the bounded AGE envelope.")
+   ("SPLIT-SPACES" 1 "Advances past each separator in a finite line."))
   ("src/types/validation.lisp" ("CALLDATA-TOKENS" 1 "Traverses the finite calldata bytes.")))
  :hash-order
  (("src/consensus/dkg/manager.lisp" ("PRUNE" 1 "Builds an unordered set of cached epochs to remove."))
@@ -169,6 +168,7 @@
    ("SORTED-RECORDS" 1 "Sorts records by address.")
    ("SORTED-SLOTS" 1 "Sorts slots by numeric key.")
    ("STEP-JSON" 1 "Sorts keys before rendering storage."))
+  ("src/p2p/cw-limit.lisp" ("KEYED-GCRA-RETAIN-RECENT" 1 "Drops independent expired limiter entries."))
   ("src/rpc/bal.lisp"
    ("BALANCE-CHANGES" 1 "Sorts changes by index before rendering.")
    ("BLOCK-ACCESS-LIST" 1 "Sorts addresses before encoding the access list.")
@@ -202,7 +202,10 @@
   ("src/tempo/txpool/pool.lisp"
    ("POOL-BEST-TRANSACTIONS" 2 "Collects keyed candidates into a heap whose comparator breaks ties.")
    ("POOL-REVALIDATE" 1 "Sorts candidates before revalidating them.")
-   ("POOL-SWEEP-EXPIRED" 1 "Sorts expired entries before eviction.")))
+   ("POOL-SWEEP-EXPIRED" 1 "Sorts expired entries before eviction."))
+  ("src/tempo/txpool/service.lisp"
+   ("POOL-CLEAR" 1 "Removes all transactions, independent of removal order.")
+   ("POOL-SNAPSHOT" 1 "Sorts by submission sequence before returning transactions.")))
  :assertions
  (("src/consensus/certify.lisp" 2 "Rejects bad certificates and reports the lowest failing height.")
   ("src/consensus/scheme.lisp" 6 "Checks scheme dimensions, unique public keys and signer inputs.")

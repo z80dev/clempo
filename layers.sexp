@@ -20,12 +20,14 @@
  ;; Socket transport, discovery, and backoff; protocol encoding remains pure.
  (:dir "p2p" :io-exempt ("wire.lisp" "cwp2p.lisp" "discovery.lisp" "eth-source.lisp" "eth.lisp"))
  ;; Archive persistence and fetch/follow boundary.
- (:dir "sync" :io-exempt ("archive.lisp" "jsonrpc.lisp" "follow.lisp" "metrics.lisp"))
+ (:dir "sync" :io-exempt ("archive.lisp" "jsonrpc.lisp" "follow.lisp" "metrics.lisp" "pool.lisp"))
  ;; Node transport and shared backend/index state; method implementations are otherwise pure.
  (:dir "rpc" :io-exempt ("server.lisp" "chain.lisp" "consensus.lisp" "render.lisp"
-                         "sender.lisp" "state.lisp" "tries.lisp"))
+                         "sender.lisp" "state.lisp" "tries.lisp" "logs.lisp" "pool.lisp"
+                         "websocket.lisp"))
  (:dir "sim")
  ;; Validator process, peer supervision, and persistent configuration/journal.
- (:dir "validator" :io-exempt ("engine.lisp" "journal.lisp" "manifest.lisp" "network.lisp"))
+ (:dir "validator" :io-exempt ("engine.lisp" "journal.lisp" "manifest.lisp" "network.lisp"
+                               "keys.lisp"))
  (:dir "node" :io t)
  (:dir "dev" :io t))
