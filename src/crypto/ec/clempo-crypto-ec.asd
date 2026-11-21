@@ -8,6 +8,7 @@
                (:file "secp256k1-field")
                (:file "secp256k1")
                (:file "secp256k1-glv")
+               (:file "p256-field")
                (:file "p256")
                (:file "bn254")
                (:file "bls12-381")
@@ -20,6 +21,7 @@
   :serial t
   :pathname "../../../tests/crypto/ec/"
   :components ((:file "prime-curves")
+               (:file "p256-field")
                (:file "bn254/bn254-tests")
                (:file "bls12-381/precompile-tests")
                (:file "bls12-381/hash-tests")

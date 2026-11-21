@@ -1,13 +1,10 @@
-(defpackage #:clempo.p256
-  (:use #:cl)
-  (:export #:p256-verify #:p256-verify-low-s #:+p256-n+ #:+p256-p+))
 (in-package #:clempo.p256)
 
-(defconstant +p256-p+ #xffffffff00000001000000000000000000000000ffffffffffffffffffffffff)
 (defconstant +p256-n+ #xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551)
 
 (clempo.ec:define-prime-curve p256
   :p #xffffffff00000001000000000000000000000000ffffffffffffffffffffffff
+  :multiply p256-field-multiply
   :a -3 :b #x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
   :n #xffffffff00000000ffffffffffffffffbce6faada7179e84f3b9cac2fc632551
   :gx #x6b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c296

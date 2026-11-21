@@ -29,6 +29,11 @@ CLEMPO_BUILD=release sbcl --noinform --non-interactive --load scripts/build.lisp
             (time (clempo.keccak:keccak256 big)))'
 ```
 
+P256 verification: native four-limb multiply and signed 32-bit field
+reduction reduced CPU time from 637 to **339 µs per signature** at 1,000
+calls (same inputs as `tests/crypto/ec/benchmark.lisp`, SBCL 2.6.8 release),
+and allocation from 1.51 MB to **648 KB** per signature.
+
 R3e = 61,903/61,903 (750c66b): `bin/clempo-dev score -rung R3e -json` (or
 `bin/clempo-dev statetest ~/cache/clempo/fixtures/fixtures/state_tests/`) runs every
 execution-spec-tests v5.4.0 `fixtures_develop` state test for Istanbul..Osaka (pre-Istanbul
