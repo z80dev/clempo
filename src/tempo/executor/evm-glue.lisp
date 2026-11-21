@@ -196,6 +196,22 @@ evm2's journaled semantics (crates/precompiles/src/storage/evm.rs sload_journal 
 
 (defvar *evm-specs* (make-hash-table) "fork -> clempo.evm spec")
 
+(defun storage-credit-sstore-hook (frame key original present new cold)
+  "instructions.rs sstore from T7: TIP-1060 storage credits after the slot write, metered on the
+frame's gas (accounting.rs sstore_storage_credits without non-creditable slots: EVM writes
+always mint). Returns NIL or the halt status."
+  (declare (ignore original cold))
+  (unless (eq (zerop present) (zerop new))
+    (let ((b (contract:make-metered-storage *host* :gas-limit (evm:frame-gas frame))))
+      (handler-case
+          (progn (contract::sstore-storage-credits b (evm:frame-address frame) key present new)
+                 (decf (evm:frame-gas frame) (contract:metered-storage-spent b))
+                 nil)
+        (contract:precompile-halt (c)
+          (setf (evm:frame-gas frame) 0)
+          (let ((reason (contract:precompile-halt-reason c)))
+            (if (keywordp reason) reason :out-of-gas)))))))
+
 (defun tempo-evm-spec (fork)
   "The EVM spec of Tempo hardfork FORK (all Tempo forks run on Osaka)."
   (or (gethash fork *evm-specs*)
@@ -206,6 +222,8 @@ evm2's journaled semantics (crates/precompiles/src/storage/evm.rs sload_journal 
                                               :ext fork)))
               (when (forks:fork< fork :t1c)
                 (setf (svref (evm:spec-extra-opcodes spec) #x4f) #'millis-timestamp-op))
+              (when (forks:fork>= fork :t7)
+                (setf (evm:spec-sstore-hook spec) #'storage-credit-sstore-hook))
               spec))))
 
 (defun evm-block-env (backend env &optional block-hash-fn)

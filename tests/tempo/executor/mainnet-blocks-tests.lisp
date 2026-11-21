@@ -124,3 +124,8 @@ transactions touched."
                                               (list* :gas 50000000 :max-fee 0 :max-priority 0 request)
                                               :skip-gas-caps t :skip-base-fee-check t)))
       (is (equalp root (clempo.store:db-root-hash db))))))
+
+(defblock-test t7-sstore-storage-credits 29152422
+  "T7 (TIP-1060): an EVM SSTORE crossing zero pays or mints storage credits on top of 5,100.")
+(defblock-test t7-sstore-storage-credits-2 29152424
+  "T7 (TIP-1060): the second early T7 block with storage-credit SSTOREs.")
