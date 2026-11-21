@@ -10,7 +10,16 @@
            #:g1-decompress #:g2-decompress #:g1-encode #:g2-encode
            #:g1-decode #:g2-decode #:pairing-check
            #:g1-add-precompile #:g2-add-precompile #:g1-msm-precompile
-           #:g2-msm-precompile #:pairing-precompile))
+           #:g2-msm-precompile #:pairing-precompile
+           #:expand-message-xmd #:map-fp-to-g1 #:map-fp2-to-g2 #:hash-to-g1 #:hash-to-g2
+           #:map-g1-precompile #:map-g2-precompile
+           #:bls-public-key #:bls-sign #:bls-verify #:bls-pop-prove #:bls-pop-verify
+           #:bls-aggregate #:bls-aggregate-verify #:bls-fast-aggregate-verify
+           #:bls-batch-verify #:bls-batch-verify-same-message #:bls-union-unique
+           #:bls-batch-verify-same-signer
+           #:bls-participant-scalar #:bls-partial-public-key #:bls-threshold-sign
+           #:bls-threshold-verify #:bls-threshold-recover #:bls-threshold-pop-prove
+           #:bls-threshold-pop-verify))
 (in-package #:clempo.bls12-381)
 
 (defconstant +p+ #x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab)

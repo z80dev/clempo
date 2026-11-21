@@ -1,13 +1,6 @@
 ;;;; Commonware 2026.10.1 BLS POP signatures. All wire values are compressed octets.
 (in-package #:clempo.bls12-381)
 
-(export '(bls-public-key bls-sign bls-verify bls-pop-prove bls-pop-verify
-          bls-aggregate bls-aggregate-verify bls-fast-aggregate-verify
-          bls-batch-verify bls-batch-verify-same-message bls-union-unique
-          bls-batch-verify-same-signer
-          bls-participant-scalar bls-partial-public-key bls-threshold-sign
-          bls-threshold-verify bls-threshold-recover bls-threshold-pop-prove
-          bls-threshold-pop-verify))
 
 (defun bls-octets (value)
   (unless (typep value '(vector (unsigned-byte 8)))

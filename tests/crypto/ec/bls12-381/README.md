@@ -5,6 +5,9 @@
 `clempo-crypto-ec` loads `bls12-381`, `bls12-381-hash`, then
 `bls12-381-signatures`, after SHA-256. No external library, FFI, subprocess,
 filesystem, clock, or entropy is used by these source components.
+The complete subsystem export list is declared once in the core DEFPACKAGE;
+hash/signature components do not mutate it. Forced/repeated ASDF loads therefore
+keep the same package contract under strict package-variance checks.
 
 The package is `clempo.bls12-381`. `+p+` and `+r+` are the base-field modulus
 and prime subgroup order. Fp elements are canonical integers in `[0,p)`; Fp2

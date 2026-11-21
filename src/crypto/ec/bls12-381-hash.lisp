@@ -1,7 +1,6 @@
 ;;; RFC 9380, sections 5, 6.6.2, 8.8 and appendix E.
 (in-package #:clempo.bls12-381)
 
-(export '(expand-message-xmd map-fp-to-g1 map-fp2-to-g2 hash-to-g1 hash-to-g2))
 
 (defun h2c-ascii (text)
   (map '(simple-array (unsigned-byte 8) (*)) #'char-code text))
@@ -168,7 +167,6 @@
     (g2-add (map-fp2-to-g2 (cons (first u) (second u)))
             (map-fp2-to-g2 (cons (third u) (fourth u))))))
 
-(export '(map-g1-precompile map-g2-precompile))
 
 (defun map-g1-precompile (input)
   "EIP-2537 padded big-endian Fp input; return (values output valid-p)."

@@ -85,3 +85,11 @@
                                    (clempo.bls12-381:g2-mul g2 7)))))))
     (is (equal '(nil nil) (multiple-value-list
                           (clempo.bls12-381:pairing-check (list (cons '(0 . 2) g2))))))))
+
+(deftest package-redefinition-stable ()
+  ;; A forced ASDF reload must not warn that extension files exported symbols
+  ;; absent from the core DEFPACKAGE. Strict builds turn that warning into error.
+  (with-open-file (in (asdf:system-relative-pathname "clempo-crypto-ec" "bls12-381.lisp"))
+    (let ((*read-eval* nil))
+      (handler-bind ((warning #'error))
+        (is (eq (find-package '#:clempo.bls12-381) (eval (read in))))))))
