@@ -24,4 +24,5 @@
                (:file "validator-tests")
                (:file "tip20-tests")
                (:file "fee-manager-tests")
-               (:file "keychain-tests")))
+               (:file "keychain-tests")
+               (:file "channel-tests")))

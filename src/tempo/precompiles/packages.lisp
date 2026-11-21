@@ -143,8 +143,13 @@ rewards, permits, memos, transfer policies, virtual addresses.")
 (defpackage #:clempo.storage-credits
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
   (:shadowing-import-from #:clempo.contract #:read #:write #:delete)
-  (:documentation "StorageCredits (storage-credits.lisp): TIP-1060.")
-  (:export #:storage-credits #:balance-of #:track-minted-credits #:with-budget #:set-mode))
+  (:documentation "StorageCredits (storage-credits.lisp): TIP-1060 account-derived balances
+and transaction-local modes/budgets. Callback scopes return the value and credit delta.")
+  (:export #:storage-credits #:initialize #:balance-of #:mode-of #:budget-of
+           #:track-minted-credits #:with-budget #:set-mode #:set-budget
+           #:credit-exemptions #:make-credit-exemptions #:initialize-credit-exemptions
+           #:clear-credit-exemptions #:credit-exempt-slot-p
+           #:make-credit-deltas #:credit-slots #:flush-credit-deltas))
 
 (defpackage #:clempo.channel-reserve
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
