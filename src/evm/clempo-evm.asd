@@ -12,6 +12,7 @@
                (:file "interpreter")
                (:file "call")
                (:file "precompiles")
+               (:file "precompiles-curves")
                (:file "tx")))
 
 (defsystem "clempo-evm/tests"
