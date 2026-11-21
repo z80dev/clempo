@@ -523,15 +523,48 @@ error naming a reason with no known reference equivalent."
     (unless e (internal-error (format nil "request rejected by clempo's executor with no reference error mapped: ~A" reason)))
     (values (if simulate (fourth e) (second e)) (third e))))
 
-(defun outcome-output (outcome what)
-  (funcall (landed-function "CLEMPO.EXECUTOR" "TX-OUTCOME-OUTPUT" what) outcome))
+(defun utf8-or-nil (octets)
+  (handler-case (sb-ext:octets-to-string octets :external-format '(:utf-8 :replacement nil))
+    (error () nil)))
 
-(defun call-result (outcome what)
-  "reth ensure_success: the output of a successful call; reverts and halts fail as reth does."
-  (let ((output (outcome-output outcome what)))
-    (if (executor:tx-outcome-status outcome)
-        output
-        (internal-error (format nil "~A: rendering reverted or halted calls needs the executor's revert/halt kind (tx-outcome-halt), which has not landed yet" what)))))
+(defun revert-reason (data)
+  "alloy decode_revert_reason: Error(string), Panic(uint256), else the data as UTF-8 text."
+  (cond ((and (>= (length data) 68) (octets= (subseq data 0 4) (octets-of #x08 #xc3 #x79 #xa0)))
+         (let* ((offset (octets->integer data :start 4 :end 36))
+                (start (+ 4 offset)))
+           (when (<= (+ start 32) (length data))
+             (let ((len (octets->integer data :start start :end (+ start 32))))
+               (when (<= (+ start 32 len) (length data))
+                 (utf8-or-nil (subseq data (+ start 32) (+ start 32 len))))))))
+        ((and (= (length data) 36) (octets= (subseq data 0 4) (octets-of #x4e #x48 #x7b #x71)))
+         (format nil "panic: ~(0x~x~)" (octets->integer data :start 4)))
+        ((plusp (length data))
+         (let ((text (utf8-or-nil data)))
+           (and text (every (lambda (c) (or (graphic-char-p c) (< (char-code c) 32))) text) text)))))
+
+(defun halt-name (halt)
+  "The halt keyword as revm's Debug name (out-of-gas -> OutOfGas)."
+  (remove #\- (string-capitalize (string halt))))
+
+(defun call-result (outcome gas what)
+  "reth ensure_success: the output of a successful call; a revert is code 3 with its data, a
+halt rpc_invalid_transaction_error's text."
+  (declare (ignore what))
+  (let ((output (executor:tx-outcome-output outcome))
+        (halt (executor:tx-outcome-halt outcome)))
+    (cond ((executor:tx-outcome-status outcome) output)
+          ((null halt)
+           (let ((reason (revert-reason output)))
+             (rpc-fail 3 (if reason (format nil "execution reverted: ~A" reason) "execution reverted")
+                       (hexbytes output))))
+          (t (rpc-fail -32003
+                       (case halt
+                         (:out-of-gas (format nil "out of gas: gas required exceeds: ~D" gas))
+                         (:memory-out-of-gas (format nil "out of gas: gas exhausted during memory expansion: ~D" gas))
+                         (:precompile-out-of-gas (format nil "out of gas: gas exhausted during precompiled contract execution: ~D" gas))
+                         (:invalid-operand-out-of-gas (format nil "out of gas: invalid operand to an opcode: ~D" gas))
+                         (:nonce-overflow "nonce has max value")
+                         (t (format nil "EVM error: ~A" (halt-name halt)))))))))
 
 (defun run-request (b state request what &key state-overrides block-overrides on-invalid)
   "Execute REQUEST on STATE in block B's environment. Returns the tx-outcome; an invalid
@@ -547,11 +580,12 @@ request calls ON-INVALID with (code message), or fails with reth's error."
                       ((zerop price) *rpc-gas-cap*)
                       (t (internal-error (format nil "~A: capping the gas of a priced request by the caller's fee token allowance is not implemented yet" what)))))))
     (apply-state-overrides world state-overrides)
-    (handler-case (executor:execute-request ctx (request-plist request world gas price)
-                                            :skip-nonce-check t :skip-base-fee-check t)
+    (values (handler-case (executor:execute-request ctx (request-plist request world gas price)
+                                            :skip-nonce-check t :skip-base-fee-check t :skip-gas-caps t)
       (executor:invalid-transaction (e)
         (multiple-value-bind (code message) (invalid-request-error (executor:execution-failure-reason e))
-          (if on-invalid (funcall on-invalid code message) (rpc-fail code message)))))))
+          (if on-invalid (funcall on-invalid code message) (rpc-fail code message)))))
+            gas)))
 
 ;;; Methods
 
@@ -560,9 +594,9 @@ request calls ON-INVALID with (code message), or fails with reth's error."
   "execute a call on the state after BLOCK"
   (multiple-value-bind (b state)
       (prepare-call request block "eth_call" :state-overrides state-overrides :block-overrides block-overrides)
-    (hexbytes (call-result (run-request b state request "eth_call" :state-overrides state-overrides
-                                                                   :block-overrides block-overrides)
-                           "eth_call"))))
+    (multiple-value-bind (outcome gas)
+        (run-request b state request "eth_call" :state-overrides state-overrides :block-overrides block-overrides)
+      (hexbytes (call-result outcome gas "eth_call")))))
 
 (defrpc "eth_estimateGas" ((request tx-request) (block block-id :optional t)
                            (state-overrides state-override :optional t) (block-overrides block-overrides :optional t))
@@ -628,20 +662,21 @@ request calls ON-INVALID with (code message), or fails with reth's error."
         (loop for bundle in bundles for bi from 0
               do (loop for request in (getf bundle :transactions) for ti from 0
                        for overrides = (when (and (zerop bi) (zerop ti)) state-overrides)
-                       do (let ((outcome
+                       do (multiple-value-bind (outcome gas)
                                   (run-request b state request "eth_callMany"
                                                :state-overrides overrides
                                                :block-overrides (getf bundle :block-override)
                                                :on-invalid (lambda (code message)
                                                              (rpc-fail code (format nil "call_many error in bundle ~D and transaction ~D: ~A"
-                                                                                    bi ti message))))))
-                            (push outcome results)))
+                                                                                    bi ti message))))
+                            (push (handler-case (json:jobject "value" (hexbytes (call-result outcome gas "eth_callMany")))
+                                    (rpc-error (e) (json:jobject "error" (rpc-error-message e))))
+                                  results)))
                  ;; Each bundle sees the state its predecessors left: one overlay per request
                  ;; does not chain them.
                  (when (or (rest bundles) (rest (getf bundle :transactions)))
                    (internal-error "eth_callMany: chaining several calls on one overlay is not implemented yet")))
-        (vector (map 'simple-vector (lambda (o) (json:jobject "value" (hexbytes (call-result o "eth_callMany"))))
-                     (nreverse results)))))))
+        (vector (coerce (nreverse results) 'simple-vector))))))
 
 ;;; Re-executing recorded blocks: witnesses, intermediate roots, raw block traces
 
