@@ -44,6 +44,21 @@
 (defun boundary-p (app number)
   (clempo.dkg:boundary-height-p number (validator-app-epoch-length app)))
 
+(defun epoch-last-height (app)
+  (1- (* (1+ (epoch app)) (validator-app-epoch-length app))))
+
+(defun digest-height (app digest)
+  "The height of the block DIGEST names when it is a candidate or the finalized head, else NIL."
+  (let ((block (known-block app digest)))
+    (cond (block (number-of block))
+          ((octets= digest (head-hash app)) (head-number app)))))
+
+(defun reproposal-p (app digest)
+  "commonware marshal (standard Inline/Deferred): once the current epoch's last block is a
+proposal's parent, later views of the epoch re-propose that block as is rather than build
+blocks the epoch transition would cut off."
+  (eql (digest-height app digest) (epoch-last-height app)))
+
 (defun candidate-size (block)
   ;; Peer blocks retain their bytes. Locally built empty proposals have no raw
   ;; block allocation; header RLP plus the empty body bounds their size.
@@ -203,6 +218,10 @@
 
 (defun propose (app context)
   (let ((parent (clempo.simplex:context-parent context)))
+    (when (reproposal-p app (cdr parent))
+      (report app "reproposed" "height" (epoch-last-height app) "hash" (octets->hex (cdr parent))
+              "view" (clempo.simplex:context-view context))
+      (return-from propose (cdr parent)))
     (multiple-value-bind (ancestors available missing) (branch app (cdr parent))
       (when missing (return-from propose :pending))
       (unless available (return-from propose nil))
@@ -237,6 +256,11 @@
     answer))
 
 (defun verify-proposal (app context digest)
+  (when (octets= digest (cdr (clempo.simplex:context-parent context)))
+    ;; A re-proposal skips the parent and height checks: consensus settled the block's
+    ;; validity in the view that first carried it. It is valid only for the epoch's last block.
+    (return-from verify-proposal
+      (if (digest-height app digest) (reproposal-p app digest) :pending)))
   (let ((block (known-block app digest)))
     (unless block (return-from verify-proposal :pending))
     (let* ((parent (clempo.simplex:context-parent context))
@@ -274,18 +298,24 @@
     (when missing (return-from certify :pending))
     (unless available (return-from certify nil))
     (if (null ancestors) t
-        (handler-case
-            (let* ((block (car (last ancestors))) (context (clempo.headers:header-consensus-context (header-of block)))
-                   (db (validator-app-db app)))
-              (unless (and context (= (clempo.headers:consensus-context-epoch context) (clempo.consensus:round-epoch round))
-                           (= (clempo.headers:consensus-context-view context) (clempo.consensus:round-view round)))
-                (return-from certify nil))
-              (check-dkg-header app block (butlast ancestors))
-              (clempo.store:with-speculative-blocks (db) (execute-ancestors app ancestors))
-              t)
-          (error (condition)
-            (report app "certificate-rejected" "reason" (princ-to-string condition))
-            nil)))))
+        (let* ((block (car (last ancestors)))
+               (context (clempo.headers:header-consensus-context (header-of block))))
+          (unless (and context (= (clempo.headers:consensus-context-epoch context) (clempo.consensus:round-epoch round)))
+            (return-from certify nil))
+          ;; is_inferred_reproposal_at_certify: the epoch's last block notarized in a view
+          ;; after the one its header names was re-proposed; its own view settled its validity.
+          (when (/= (clempo.headers:consensus-context-view context) (clempo.consensus:round-view round))
+            (return-from certify
+              (and (boundary-p app (number-of block))
+                   (> (clempo.consensus:round-view round) (clempo.headers:consensus-context-view context)))))
+          (handler-case
+              (let ((db (validator-app-db app)))
+                (check-dkg-header app block (butlast ancestors))
+                (clempo.store:with-speculative-blocks (db) (execute-ancestors app ancestors))
+                t)
+            (error (condition)
+              (report app "certificate-rejected" "reason" (princ-to-string condition))
+              nil))))))
 
 (defmethod clempo.simplex:app-certify ((app validator-app) round digest)
   (let ((answer (certify app round digest)))
@@ -432,11 +462,19 @@
                    (t
                     (pop (validator-app-finalizations app))
                     (when blocks
-                      (let ((context (clempo.headers:header-consensus-context (header-of (car (last blocks))))))
+                      (let* ((block (car (last blocks)))
+                             (context (clempo.headers:header-consensus-context (header-of block)))
+                             (view (clempo.consensus:proposal-view proposal)))
                         (invariant (and context
-                                        (= (clempo.consensus:proposal-view proposal) (clempo.headers:consensus-context-view context))
                                         (= (clempo.consensus:proposal-epoch proposal) (clempo.headers:consensus-context-epoch context))
-                                        (= (clempo.consensus:proposal-parent proposal) (clempo.headers:consensus-context-parent-view context)))
+                                        (or (and (= view (clempo.headers:consensus-context-view context))
+                                                 (= (clempo.consensus:proposal-parent proposal)
+                                                    (clempo.headers:consensus-context-parent-view context)))
+                                            ;; the epoch's last block, re-proposed in a later view
+                                            (and (boundary-p app (number-of block))
+                                                 (> view (clempo.headers:consensus-context-view context))
+                                                 (>= (clempo.consensus:proposal-parent proposal)
+                                                     (clempo.headers:consensus-context-view context)))))
                                    "finalization proposal metadata mismatch"))
                       (commit-finalization app artifact blocks)))))))
 
