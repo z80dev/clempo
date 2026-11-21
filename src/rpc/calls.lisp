@@ -467,10 +467,13 @@ the nonce taken from the state, as create_txn_env does)."
           :nonce (state:get-nonce world from)
           :chain-id (req-chain-id r)
           :input (or (request-input r) (make-octets 0))
-          :access-list (mapcar (lambda (item)
-                                 (cons (getf item :address)
-                                       (map 'list #'octets->integer (getf item :storage-keys))))
-                               (req-access-list r)))))
+          :access-list (access-list-plist r))))
+
+(defun access-list-plist (r)
+  "The request's access list as the executor takes it: ((address slot ...) ...)."
+  (mapcar (lambda (item)
+            (cons (getf item :address) (map 'list #'octets->integer (getf item :storage-keys))))
+          (req-access-list r)))
 
 (defparameter +invalid-transaction-errors+
   '(("intrinsic gas too low" -32000 "intrinsic gas too low" -38013)
@@ -533,11 +536,36 @@ halt rpc_invalid_transaction_error's text."
                          (:nonce-overflow "nonce has max value")
                          (t (format nil "EVM error: ~A" (halt-name halt)))))))))
 
-(defun request-gas (request price what)
+(defun tx-gas-cap (env)
+  "The fork's transaction gas limit cap (EIP-7825 / Tempo T1), or NIL."
+  (clempo.chainspec:tx-gas-limit-cap-at (executor:block-env-timestamp env) executor:*chain*))
+
+(defun request-gas (request price env what)
+  "reth prepare_call_env's gas limit: the request's (capped by the RPC gas cap), else the RPC
+gas cap bounded by the transaction cap."
   (let ((g (req-gas request)))
     (cond (g (min g *rpc-gas-cap*))
-          ((zerop price) *rpc-gas-cap*)
+          ((zerop price) (min *rpc-gas-cap* (or (tx-gas-cap env) *rpc-gas-cap*)))
           (t (internal-error (format nil "~A: capping the gas of a priced request by the caller's fee token allowance is not implemented yet" what))))))
+
+(defun fail-invalid (e on-invalid)
+  (multiple-value-bind (code message) (invalid-request-error (executor:execution-failure-reason e))
+    (if on-invalid (funcall on-invalid code message) (rpc-fail code message))))
+
+(defun request-runner (b state request what &key state-overrides block-overrides)
+  "Everything a request's executions share: (values run price env), RUN taking a gas limit
+and optional plist changes and executing REQUEST on a fresh overlay of STATE (overrides applied)."
+  (when (aa-request-p request)
+    (internal-error (format nil "~A: Tempo AA call requests are not converted to executor requests yet" what)))
+  (let* ((price (normalize-request request (or (getf block-overrides :base-fee) (header-base-fee b))))
+         (env (call-env b block-overrides price)))
+    (values (lambda (gas &rest changes)
+              (let* ((ctx (executor:begin-call-block state (call-env b block-overrides price)
+                                                     :block-hash-fn (block-hash-fn)))
+                     (world (executor:call-block-world ctx)))
+                (apply-state-overrides world state-overrides)
+                (executor:call-request ctx (append changes (request-plist request world gas price)))))
+            price env)))
 
 (defun run-request (b state request what &key state-overrides block-overrides on-invalid ctx tracer)
   "Execute REQUEST on STATE in block B's environment, or in CTX after its earlier requests,
@@ -546,20 +574,16 @@ ON-INVALID with (code message), or fails with reth's error."
   (when (aa-request-p request)
     (internal-error (format nil "~A: Tempo AA call requests are not converted to executor requests yet" what)))
   (let* ((price (normalize-request request (or (getf block-overrides :base-fee) (header-base-fee b))))
-         (ctx (or ctx (executor:begin-call-block state (call-env b block-overrides price)
-                                                 :block-hash-fn (block-hash-fn))))
+         (env (call-env b block-overrides price))
+         (ctx (or ctx (executor:begin-call-block state env :block-hash-fn (block-hash-fn))))
          (world (executor:call-block-world ctx))
-         (gas (request-gas request price what)))
+         (gas (request-gas request price env what)))
     (apply-state-overrides world state-overrides)
-    (flet ((execute ()
-             (executor:execute-request ctx (request-plist request world gas price)
-                                       :skip-nonce-check t :skip-base-fee-check t :skip-gas-caps t)))
+    (flet ((execute () (executor:call-request ctx (request-plist request world gas price))))
       (values (handler-case (if tracer
                                 (clempo.tracing:with-tracer (tracer world) (execute))
                                 (execute))
-                (executor:invalid-transaction (e)
-                  (multiple-value-bind (code message) (invalid-request-error (executor:execution-failure-reason e))
-                    (if on-invalid (funcall on-invalid code message) (rpc-fail code message)))))
+                (executor:invalid-transaction (e) (fail-invalid e on-invalid)))
               gas
               ctx))))
 
@@ -574,21 +598,65 @@ ON-INVALID with (code message), or fails with reth's error."
         (run-request b state request "eth_call" :state-overrides state-overrides :block-overrides block-overrides)
       (hexbytes (call-result outcome gas "eth_call")))))
 
+(defun basic-transfer-p (request state)
+  "reth is_basic_transfer: no input and a target without code."
+  (let ((input (request-input request)) (to (req-to request)))
+    (and (or (null input) (zerop (length input)))
+         (integerp to)
+         (let ((world (state:make-world state)))
+           (zerop (state:code-size world to))))))
+
 (defrpc "eth_estimateGas" ((request tx-request) (block block-id :optional t)
                            (state-overrides state-override :optional t) (block-overrides block-overrides :optional t))
   "binary-search the gas a call needs"
   (multiple-value-bind (b state)
       (prepare-call request block "eth_estimateGas" :state-overrides state-overrides :block-overrides block-overrides)
-    (run-request b state request "eth_estimateGas" :state-overrides state-overrides :block-overrides block-overrides)
-    (internal-error "eth_estimateGas: reth's gas search (estimate.rs) is not implemented yet")))
+    (multiple-value-bind (run price env)
+        (request-runner b state request "eth_estimateGas" :state-overrides state-overrides
+                                                          :block-overrides block-overrides)
+      (unless (zerop price)
+        (internal-error "eth_estimateGas: the caller's fee token allowance for priced requests is not implemented yet"))
+      (let ((max-gas (min (or (tx-gas-cap env) +u64-max+) (executor:block-env-gas-limit env) *rpc-gas-cap*)))
+        (handler-case
+            (quantity->hex (executor:estimate-gas run :max-gas-limit max-gas :request-gas (req-gas request)
+                                                 :price-p (or (req-gas-price request) (req-max-fee request))
+                                                 :basic-transfer-p (and (null state-overrides)
+                                                                        (basic-transfer-p request state))))
+          (executor:invalid-transaction (e) (fail-invalid e nil))
+          (executor:estimate-failure (e)
+            (let ((gas (executor:estimate-failure-gas-limit e))
+                  (outcome (executor:estimate-failure-outcome e)))
+              (ecase (executor:estimate-failure-kind e)
+                (:gas-required-exceeds-allowance
+                 (rpc-fail -32000 (format nil "gas required exceeds allowance (~D)" gas)))
+                (:basic-out-of-gas
+                 (rpc-fail -32003 (format nil "out of gas: gas required exceeds: ~D" gas)))
+                ((:revert :halt) (call-result outcome gas "eth_estimateGas"))))))))))
 
 (defrpc "eth_createAccessList" ((request tx-request) (block block-id :optional t)
                                 (state-overrides state-override :optional t))
   "the access list a call touches and its gas"
   (multiple-value-bind (b state)
       (prepare-call request block "eth_createAccessList" :state-overrides state-overrides)
-    (run-request b state request "eth_createAccessList" :state-overrides state-overrides)
-    (internal-error "eth_createAccessList: recording the accessed addresses and slots is not implemented yet")))
+    (multiple-value-bind (run price env)
+        (request-runner b state request "eth_createAccessList" :state-overrides state-overrides)
+      (let ((gas (request-gas request price env "eth_createAccessList")))
+        (handler-case
+            (multiple-value-bind (list gas-used outcome)
+                (executor:create-access-list (lambda (plist)
+                                               (funcall run gas :access-list (getf plist :access-list)))
+                                             (list :access-list (access-list-plist request)))
+              (let ((error (and (not (executor:tx-outcome-status outcome))
+                                (handler-case (progn (call-result outcome gas "eth_createAccessList") nil)
+                                  (rpc-error (e) (rpc-error-message e))))))
+                (apply #'json:jobject
+                       "accessList" (coerce (loop for (address . slots) in list
+                                                  collect (json:jobject "address" (addr address)
+                                                                        "storageKeys" (map 'simple-vector (lambda (s) (integer->hex s :bytes 32)) slots)))
+                                            'simple-vector)
+                       "gasUsed" (quantity->hex gas-used)
+                       (when error (list "error" error)))))
+          (executor:invalid-transaction (e) (fail-invalid e nil)))))))
 
 (defun call-many (bundles context state-overrides what &key tracer render)
   "reth call_many: the bundles' requests run one after another on one overlay at the

@@ -9,6 +9,7 @@ senders and receipts, which are filled in on first use.")
   (:export #:cblock #:chain-block #:cblock-number #:cblock-hash #:cblock-header #:cblock-raw
            #:cblock-txs #:cblock-tx-hashes #:cblock-size #:cblock-sender #:cblock-receipts
            #:cblock-tx-raw #:cblock-timestamp #:cblock-base-fee #:cblock-inner
+           #:make-cblock #:cblock-senders
            #:header-json #:block-json #:tx-json #:receipt-json #:receipt-jsons #:log-json
            #:block-logs #:q #:hex32 #:addr #:hexbytes #:effective-gas-price #:tx-to))
 

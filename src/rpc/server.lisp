@@ -283,7 +283,8 @@ so far when this one pushed the oldest out, else NIL."
                        (progn (ignore-errors (sb-bsd-sockets:socket-close client)) (setf connection nil))
                        (push connection (server-connections server))))
                  (when connection
-                   (sb-thread:make-thread (lambda () (serve-connection server connection))
+                   ;; Calls and traces run the EVM on this thread: give it its own scratch.
+                   (sb-thread:make-thread (lambda () (clempo.evm:with-evm-thread (serve-connection server connection)))
                                           :name "rpc connection")))))))
 
 (defun start-server (&key (host "127.0.0.1") (port 8545) backend (max-connections 256)
