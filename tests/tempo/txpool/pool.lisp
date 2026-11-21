@@ -217,7 +217,6 @@
       (is= 0 (pool-count pool)))))
 
 (deftest inline-key-authorization-semantics-and-no-state-leak ()
-  (skip-test "needs executor stateless inline grant signer/account validation")
   (with-pool (pool reader)
     (let* ((authorization (fixture-key-authorization))
            (tx (fixture-transaction :key-private-key 2 :key-authorization authorization))
@@ -228,7 +227,6 @@
         (submit-transaction pool (fixture-transaction :private-key 3 :key-authorization authorization) reader)))))
 
 (deftest key-authorization-token-limits-reject-duplicates ()
-  (skip-test "needs keychain precompile T3 duplicate token-limit rejection")
   (with-pool (pool reader)
     (let* ((limit (list (integer->octets +fixture-token+ 20) 1000000))
            (authorization (fixture-key-authorization :limits (list limit limit))))

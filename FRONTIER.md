@@ -296,13 +296,26 @@ The heaviest sample improved about 3.5× in median and p95 (mean root consing
 Timings are wall-clock, including scheduling and any GC in the measured root
 call. This is not the full busy-range replay benchmark or an R4/R7 score.
 
-Pool/builder integration: strict combined tests report **56 passed, 0 failed,
-2 explicitly skipped** for executor inline-grant signer/account binding and the
-keychain precompile's T3 duplicate token-limit rejection. The pool has 43 passing
-tests; all 13 builder tests pass, including rebuilding 26 recorded mainnet blocks
-and a multi-transaction payload that re-executes to identical commitments.
+Pool/builder integration: strict combined tests report **58 passed, 0 failed,
+0 skipped**: 45 pool tests and all 13 builder tests. Executor inline-grant
+signer/account binding and T3 duplicate token-limit rejection are integrated and
+their tests enabled. Builder coverage includes rebuilding 26 recorded mainnet
+blocks and a multi-transaction payload that re-executes to identical commitments.
 `bin/clempo-dev pool-fixtures -iterations 10 -json` measures 40 admissions,
 50 expected rejections and 40 selections in 0.139344 s (645.9 validations/s),
 allocating 79,780,352 bytes including state construction and signing. These are
 end-to-end fixture costs, not pool-only throughput. No production validation is
-bypassed; the two named test skips remain explicit integration limitations.
+bypassed.
+
+Archive R1 command: `CLEMPO_RPC=http://127.0.0.1:8545 bin/clempo-dev r1-archive
+-threads 16 -batch 500 -result ~/scratch/clempo/r1-archive/full.json` checks archived
+raw blocks against independent full-block RPC responses, including byte-exact
+round trips, header/body commitments, transaction hashes, recovered senders and
+keychain key IDs. It records every failed block in JSONL and fails closed on
+missing archive chunks or transport errors. It does not check receipts or execute
+transactions; sampled R1 retains those receipt checks. A two-worker run over
+blocks 0..19,999 checked **20,000/20,000**, with 20,095 transactions and 96 actual
+cryptographic recoveries, in 4.369541 s: **4,577.1 blocks/s, 22.0 recoveries/s**.
+These are end-to-end rates including archive I/O, RPC, JSON, codecs, roots and
+recovery, not dense-transaction or crypto-only benchmarks. Evidence:
+`~/scratch/clempo/r1-archive/check-1795242754.json`.
