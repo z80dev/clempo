@@ -110,7 +110,11 @@ their fork is active (once; an account that already has code is left alone).")
   (let ((spec (block-env-spec env)))
     (when (blocks:block-withdrawals block)
       (fail-tx 'invalid-transaction nil "withdrawals are not permitted"))
-    (when (forks:fork>= spec :t10)
+    ;; deploy_zone_factory_at_boundary: a factory that already has code (genesis allocation
+    ;; or a completed installation) is left alone.
+    (when (and (forks:fork>= spec :t10)
+               (let ((a (store:db-account db #x5AF2000000000000000000000000000000000000)))
+                 (not (and a (not (octets= (store:account-code-hash a) clempo.trie:+empty-code-hash+))))))
       (fail-tx 'unsupported-transaction nil "T10 zone factory installation is not implemented"))
     (dolist (m *fork-markers*)
       (when (forks:fork>= spec (car m)) (deploy-marker db (cdr m))))))

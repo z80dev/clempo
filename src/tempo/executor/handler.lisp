@@ -21,9 +21,11 @@
   (section :start)                      ; :start :non-shared :system
   (non-shared-left 0) (non-payment-left 0)
   (cumulative 0) (block-gas 0) (receipts '()) (index 0)
-  skip-nonce-check skip-valid-after-check skip-base-fee-check skip-liquidity-check)
+  skip-nonce-check skip-valid-after-check skip-base-fee-check skip-liquidity-check
+  key-expiry)                           ; access-key expiry resolved for the running tx
 
 (defvar *tx-index* nil "Index of the transaction being executed, for conditions.")
+(defvar *ctx* nil "The block context of the running transaction.")
 
 (defun calc-gas-balance-spending (gas price)
   "Fee in TIP-20 base units: ceil(gas * price / 10^12)."
@@ -252,11 +254,13 @@ back as refund gas. Returns the refund to add."
 
 (defstruct (tx-outcome (:constructor make-tx-outcome
                            (status gas-used block-gas logs
-                            &key fee-token fallback-fee-token-p fee-payer key-expiry (validator-fee 0))))
+                            &key fee-token fallback-fee-token-p fee-payer key-expiry (validator-fee 0)
+                              storage-changes)))
   "One executed transaction: receipt status, gas, logs, and the fee metadata the pool and
 builder read (Rust TempoTxResult / ResolvedFeeToken / key_expiry)."
   status gas-used block-gas (logs '() :type list)
-  fee-token fallback-fee-token-p fee-payer key-expiry (validator-fee 0))
+  fee-token fallback-fee-token-p fee-payer key-expiry (validator-fee 0)
+  (storage-changes '() :type list))     ; ((address slot original current) ...) of TIP-20 slots
 
 (defun settle (ctx v fee price gas-left extra-refund floor &key (status t))
   "config.rs settle_transaction + evm2 finalize_gas. Returns the gas used."
@@ -355,7 +359,8 @@ builder read (Rust TempoTxResult / ResolvedFeeToken / key_expiry)."
             (state:warm-address world (first entry))
             (dolist (slot (rest entry)) (state:warm-slot world (first entry) slot)))
           (when (txv-authorizations v)
-            (fail-tx 'unsupported-transaction *tx-index* "EIP-7702 authorization lists"))
+            (state:add-refund world (apply-ethereum-authorizations (txv-authorizations v)
+                                                                   (block-env-chain-id env))))
           ;; before_execution: fee context and collection
           (let ((fee (resolve-fee-context ctx v (txv-sender v))))
             (collect-fee ctx fee nil)
@@ -428,13 +433,18 @@ INVALID-TRANSACTION with the block as it was before TX."
                       (when (and (txv-aa-p v) (= (ldb (byte 8 248) (txv-nonce-key v)) #x5b))
                         (invalid "subblock transactions are not supported"))
                       (if (txv-aa-p v)
-                          (fail-tx 'unsupported-transaction *tx-index* "0x76 handler not wired yet")
+                          (execute-aa-transaction ctx v)
                           (execute-ethereum-transaction ctx v)))))))
-        (let ((section (next-section ctx system-p nil (tx-outcome-block-gas outcome))))
+        (let ((section (next-section ctx system-p
+                                     (and (not system-p) (payment-transaction-p tx forks:*spec*))
+                                     (tx-outcome-block-gas outcome))))
+          (setf (tx-outcome-storage-changes outcome) (collect-storage-changes evm:*world*))
           (state:finalize-tx evm:*world*)
           (setf (ctx-section ctx) section)
           (when (eq section :non-shared)
-            (decf (ctx-non-shared-left ctx) (tx-outcome-block-gas outcome))))
+            (decf (ctx-non-shared-left ctx) (tx-outcome-block-gas outcome))
+            (unless (payment-transaction-p tx forks:*spec*)
+              (decf (ctx-non-payment-left ctx) (tx-outcome-block-gas outcome)))))
         (incf (ctx-cumulative ctx) (tx-outcome-gas-used outcome))
         (incf (ctx-block-gas ctx) (tx-outcome-block-gas outcome))
         (incf (ctx-index ctx))

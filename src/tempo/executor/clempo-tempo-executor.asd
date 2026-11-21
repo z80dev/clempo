@@ -10,11 +10,16 @@
                (:file "genesis")
                (:file "block")
                (:file "evm-glue")
+               (:file "authorizations")
+               (:file "lanes")
                (:file "handler")
+               (:file "aa")
                (:file "replay")))
 
 (defsystem "clempo-tempo-executor/tests"
   :depends-on ("clempo-tempo-executor" "clempo-io")
   :pathname "../../../tests/tempo/executor/"
   :serial t
-  :components ((:file "executor-tests")))
+  :components ((:file "executor-tests")
+               (:file "authorizations-tests")
+               (:file "lanes-tests")))
