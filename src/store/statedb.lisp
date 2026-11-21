@@ -22,6 +22,7 @@ committed blocks into a log and periodic checkpoints.")
    #:db-set-account #:db-delete-account #:db-set-storage #:db-wipe-storage
    #:db-put-code #:db-state-root
    #:db-begin-block #:db-commit-block #:db-revert-block #:db-block-open-p
+   #:with-speculative-blocks
    ;; block diffs
    #:block-diff #:block-diff-number #:block-diff-hash #:block-diff-root
    #:block-diff-accounts #:block-diff-codes
@@ -87,7 +88,10 @@ committed blocks into a log and periodic checkpoints.")
   (open-p nil)
   (touched (make-hash-table) :type hash-table)             ; address -> touch
   (saved-trie nil)
-  (new-codes '() :type list))
+  (new-codes '() :type list)
+  ;; speculation: committed blocks that WITH-SPECULATIVE-BLOCKS will undo, newest first
+  (speculation-depth 0 :type fixnum)
+  (speculative '() :type list))
 
 (defun db-block-open-p (db) (db-open-p db))
 (defun db-account-count (db) (hash-table-count (db-accounts db)))
@@ -302,25 +306,38 @@ committed blocks into a log and periodic checkpoints.")
                                     (reverse (db-new-codes db))))))
 
 (defun close-block (db)
-  (clrhash (db-touched db))
-  (setf (db-open-p db) nil
+  (setf (db-touched db) (make-hash-table)
+        (db-open-p db) nil
         (db-saved-trie db) nil
         (db-new-codes db) '()))
 
+(defstruct (speculative-block (:constructor make-speculative-block
+                                  (touched saved-trie number hash root recent)))
+  touched saved-trie number hash root recent)
+
+(defun copy-table (table)
+  (let ((copy (make-hash-table :size (max 16 (hash-table-count table)))))
+    (maphash (lambda (k v) (setf (gethash k copy) v)) table)
+    copy))
+
 (defun db-commit-block (db number hash)
   "Close the open block as block NUMBER with HASH: compute its state root, remember the
-hash for BLOCKHASH, and return the block's diff."
+hash for BLOCKHASH, and return the block's diff. Inside WITH-SPECULATIVE-BLOCKS the block's
+undo record is kept so the speculation can be unwound."
   (invariant (db-open-p db) "no open block")
   (let* ((root (db-state-root db))
          (diff (block-diff-from-touches db number hash root)))
+    (when (plusp (db-speculation-depth db))
+      (push (make-speculative-block (db-touched db) (db-saved-trie db) (db-number db) (db-hash db)
+                                    (db-root-hash db) (copy-table (db-recent db)))
+            (db-speculative db)))
     (close-block db)
     (setf (db-number db) number (db-hash db) hash (db-root-hash db) root)
     (db-note-block-hash db number hash)
     diff))
 
-(defun db-revert-block (db)
-  "Undo every write of the open block and close it."
-  (invariant (db-open-p db) "no open block")
+(defun undo-touches (db touched saved-trie)
+  "Put every account in TOUCHED back as it was before its block, and the account trie."
   (let ((accounts (db-accounts db)))
     (maphash
      (lambda (address tc)
@@ -342,11 +359,40 @@ hash for BLOCKHASH, and return the block's diff."
                               (if (zerop old) (remhash slot s) (setf (gethash slot s) old)))
                             (touch-old-slots tc))))
                (setf (gethash address accounts) a)))))
-     (db-touched db))
-    (setf (db-trie db) (db-saved-trie db))
-    (clrhash (db-dirty db))
-    (close-block db)
-    db))
+     touched)
+    (setf (db-trie db) saved-trie)
+    (clrhash (db-dirty db))))
+
+(defun db-revert-block (db)
+  "Undo every write of the open block and close it."
+  (invariant (db-open-p db) "no open block")
+  (undo-touches db (db-touched db) (db-saved-trie db))
+  (close-block db)
+  db)
+
+(defun unwind-speculation (db depth)
+  "Undo the open block and every speculative block committed since the list had DEPTH entries."
+  (when (db-open-p db) (db-revert-block db))
+  (loop while (> (length (db-speculative db)) depth)
+        do (let ((s (pop (db-speculative db))))
+             (undo-touches db (speculative-block-touched s) (speculative-block-saved-trie s))
+             (setf (db-number db) (speculative-block-number s)
+                   (db-hash db) (speculative-block-hash s)
+                   (db-root-hash db) (speculative-block-root s)
+                   (db-recent db) (speculative-block-recent s)))))
+
+(defmacro with-speculative-blocks ((db) &body body)
+  "Run BODY, in which blocks may be executed and committed on DB one after another (each
+building on the last), then undo all of them, on any exit. Nothing committed inside reaches
+the block log unless BODY logs it itself. May nest."
+  (let ((d (gensym "DB")) (depth (gensym "DEPTH")))
+    `(let* ((,d ,db)
+            (,depth (length (db-speculative ,d))))
+       (invariant (not (db-open-p ,d)) "speculation must start between blocks")
+       (incf (db-speculation-depth ,d))
+       (unwind-protect (progn ,@body)
+         (unwind-speculation ,d ,depth)
+         (decf (db-speculation-depth ,d))))))
 
 (defun db-apply-diff (db diff)
   "Apply a logged block DIFF as block (block-diff-number DIFF) and check its root.

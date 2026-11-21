@@ -72,6 +72,32 @@
 
 (defun is-equal-snapshot (a b) (is (equal a b) "snapshots differ"))
 
+(deftest speculative-blocks-unwind-to-the-head ()
+  (let ((db (make-statedb)) (rng (sb-ext:seed-random-state 13)))
+    (loop for n from 1 to 5 do (random-block db rng n) (db-commit-block db n (block-hash n)))
+    (let ((before (snapshot db)) (root (db-root-hash db)))
+      (with-speculative-blocks (db)
+        (loop for n from 6 to 9
+              do (random-block db rng n :writes 50)
+                 (db-commit-block db n (block-hash n))
+                 (is-equalp (reference-root db) (db-root-hash db)))
+        (with-speculative-blocks (db)
+          (random-block db rng 10)
+          (db-commit-block db 10 (block-hash 10))
+          (is= 10 (db-number db)))
+        (is= 9 (db-number db))
+        (random-block db rng 10))       ; left open: unwound too
+      (is= 5 (db-number db))
+      (is (null (db-block-hash db 6)))
+      (is-equalp (block-hash 5) (db-hash db))
+      (is (equal before (snapshot db)))
+      (is-equalp root (db-state-root db))
+      (is-equalp (reference-root db) (db-state-root db))
+      ;; and normal blocks continue from there
+      (random-block db rng 6)
+      (db-commit-block db 6 (block-hash 6))
+      (is-equalp (reference-root db) (db-root-hash db)))))
+
 (deftest block-diffs-replay-to-the-same-state ()
   (let ((db (make-statedb)) (copy (make-statedb)) (rng (sb-ext:seed-random-state 5)))
     (loop for n from 1 to 25
