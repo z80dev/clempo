@@ -49,8 +49,10 @@
   "Send DATA on a fresh connection, half-close, and return the whole answer."
   (multiple-value-bind (stream socket) (open-client port)
     (unwind-protect
-         (progn (send stream data)
-                (sb-bsd-sockets:socket-shutdown socket :direction :output)
+         ;; the server may refuse and close before taking everything: Linux then fails the
+         ;; rest of the send (EPIPE) or the shutdown (ENOTCONN); its answer is still readable
+         (progn (ignore-errors (send stream data))
+                (ignore-errors (sb-bsd-sockets:socket-shutdown socket :direction :output))
                 (read-all stream))
       (ignore-errors (close stream)))))
 
