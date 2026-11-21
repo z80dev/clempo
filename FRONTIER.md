@@ -541,3 +541,5 @@ Isolated Recent pairs against parent `4c2db4d` completed every comparison on
 [BENCH](docs/BENCH.md#native-p-384-and-repeated-nitro-signatures)).
 Sampled inclusive P384 share fell 37.3% -> 0.8%. Evidence:
 `~/scratch/clempo/p384/recent-{A1,A2,B1,B2}/replay.json`.
+
+Lead audit (2026-11-21, dc82753+): re-scored on main with `CLEMPO_RPC=http://127.0.0.1:8545 CLEMPO_BUILD=release bin/clempo-dev score -rung <R> -json`: R1 673/673, R2 yes, R3 50049999, R3e 61903/61903, R3p 4986/4992, R6 sim yes (r6-4 71/71, r6-5 73 certificates at height 74, r6-7 104/104, every ceremony 3/3; 20 s for all three scenarios now that BLS12-381 runs on limb arithmetic, against 13 minutes before). `scripts/verify.sh`: 589 passed, 0 failed, 0 layer violations.
