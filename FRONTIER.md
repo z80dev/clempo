@@ -5,7 +5,7 @@
 | R0 Gate | scaffold: base, io, keccak, RLP, JSON, http, JSON-RPC client, layer check | - | 2026-11-20 |
 | R1 Decode | mainnet 640/640 (T0..T13), moderato 33/33 | 1edd52f | 2026-11-21 |
 | R2 Genesis | yes: matching state roots and block hashes on mainnet and Moderato | `ec20b6b` | 2026-11-21 |
-| R3 Replay | - | | |
+| R3 Replay | 3,210 (every block 1..3210 matches gas, receipts root, bloom, state root; stops at 3211, the first user transaction, until the EVM lands) | `b74f4d8` | 2026-11-21 |
 | R3e EVM | - | | |
 | R3p Precompiles | - | | |
 | R4 Follow | - | | |
@@ -16,6 +16,14 @@
 ## Evidence
 
 Keccak-256 (macro-unrolled Keccak-f over 25 typed lane variables): 250 MB/s on 64 MiB with no allocation, 0.57 µs per 64-byte hash, SBCL 2.6.8 release build on the dev host (Apple Silicon, 16 cores).
+
+R3 = 3,210 (b74f4d8): `bin/clempo-dev replay -datadir ~/scratch/clempo/r3/dd -checkpoint 500000 -diagnose -result ~/scratch/clempo/r3/replay.json`
+executes mainnet from the R2 genesis over the archive (contiguous to 50,049,999), state in a
+clempo.store datadir. Blocks 1..3210 carry only the subblocks metadata system transaction;
+all 3210 match gas used, receipts root, logs bloom and state root (22k blocks/s). Block 3211
+(the first 0x76 transaction) stops in `block-mismatch` (execution: the EVM and Tempo
+precompiles are not wired in yet). `-heal K` heals from the reference's prestate diff and
+continues (tested on 3211: the healed root equals the header's).
 
 R2: `CLEMPO_RPC=http://127.0.0.1:8545 bin/clempo-dev score -rung R2 -json`
 compared both computed state roots and Tempo genesis block hashes against live
