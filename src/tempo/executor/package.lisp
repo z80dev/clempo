@@ -3,7 +3,9 @@
   (:local-nicknames (#:store #:clempo.store) (#:chainspec #:clempo.chainspec)
                     (#:forks #:clempo.forks) (#:tx #:clempo.transactions)
                     (#:receipts #:clempo.receipts) (#:headers #:clempo.headers)
-                    (#:blocks #:clempo.blocks) (#:rlp #:clempo.rlp))
+                    (#:blocks #:clempo.blocks) (#:rlp #:clempo.rlp)
+                    (#:state #:clempo.state) (#:evm #:clempo.evm)
+                    (#:contract #:clempo.contract) (#:pc #:clempo.precompiles))
   (:documentation "Tempo's block executor (tempo crates/evm/src/block.rs and handler.rs) over
 the committed state in clempo.store, and REPLAY-BLOCKS, which executes a range of blocks,
 checks every block against its header and stops at a mismatch in a BLOCK-MISMATCH condition
@@ -27,6 +29,11 @@ with RETRY-BLOCK, HEAL-FROM-REFERENCE, SKIP-BLOCK and ABORT-REPLAY restarts.")
    #:block-mismatch-fields #:block-mismatch-result #:heal-block #:apply-prestate-diff
    #:execution-failure #:execution-failure-tx-index #:execution-failure-reason
    #:invalid-transaction #:unsupported-transaction
+   ;; incremental execution (builder, pool, validators)
+   #:begin-block #:apply-transaction #:finish-block #:check-transaction #:block-context
+   #:tx-outcome #:tx-outcome-status #:tx-outcome-gas-used #:tx-outcome-block-gas
+   #:tx-outcome-logs #:tx-outcome-fee-token #:tx-outcome-fee-payer #:tx-outcome-key-expiry
+   #:tx-outcome-validator-fee #:tx-outcome-fallback-fee-token-p #:tempo-evm-spec
    ;; replay
    #:replay-blocks #:retry-block #:heal-from-reference #:skip-block #:abort-replay
    #:replay-result #:make-replay-result #:replay-result-from #:replay-result-to

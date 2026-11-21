@@ -75,9 +75,6 @@ from T4."
                  (eql (tx:transaction-chain-id tx) (block-env-chain-id env)))
       (fail-tx 'invalid-transaction index "system transaction fields must be zero"))))
 
-(defstruct (tx-outcome (:constructor make-tx-outcome (status gas-used block-gas logs)))
-  status gas-used block-gas (logs '() :type list))
-
 (defun execute-system-transaction (db env tx index)
   "config.rs execute_legacy, System: a system call from the zero address to the zero address
 with SYSTEM_CALL_GAS_LIMIT; its receipt reports success and no gas. The zero address carries
@@ -87,11 +84,6 @@ no code on Tempo chains, so the call runs no instruction and changes no state."
     (when (and target (not (octets= (store:account-code-hash target) clempo.trie:+empty-code-hash+)))
       (fail-tx 'unsupported-transaction index "system call into code at the zero address")))
   (make-tx-outcome t 0 0 '()))
-
-(defun execute-transaction (db env tx sender index)
-  (declare (ignore db env sender))
-  (fail-tx 'unsupported-transaction index "type ~D user transaction: the EVM is not wired in yet"
-           (tx:transaction-type tx)))
 
 ;;; Pre- and post-execution system changes
 
@@ -128,41 +120,13 @@ their fork is active (once; an account that already has code is left alone).")
 (defun execute-block (db block &key senders (chain *chain*))
   "Execute BLOCK on DB (opening a block on it) and return a BLOCK-RESULT. SENDERS, when
 given, is the list of recovered senders in transaction order."
-  (let* ((header (blocks:block-header block))
-         (env (header-block-env header :chain chain))
+  (let* ((*chain* chain)
+         (env (header-block-env (blocks:block-header block) :chain chain))
          (txs (blocks:block-transactions block))
          (senders (or senders (mapcar #'tx:transaction-sender txs)))
-         (cumulative 0) (block-gas 0) (receipts '()) (seen-system nil))
-    (forks:with-spec ((block-env-spec env))
-      (store:db-begin-block db)
-      (apply-pre-execution-changes db env block)
-      (loop for tx in txs for sender in senders for index from 0
-            do (let ((outcome
-                       (cond ((system-transaction-p tx)
-                              (when seen-system
-                                (fail-tx 'invalid-transaction index
-                                         "duplicate subblocks metadata system transaction"))
-                              (setf seen-system t)
-                              (execute-system-transaction db env tx index))
-                             (seen-system
-                              (fail-tx 'invalid-transaction index
-                                       "regular transaction can't follow system transaction"))
-                             (t (execute-transaction db env tx sender index)))))
-                 (incf cumulative (tx-outcome-gas-used outcome))
-                 (incf block-gas (tx-outcome-block-gas outcome))
-                 (push (receipts:make-receipt :type (tx:transaction-type tx)
-                                              :status (if (tx-outcome-status outcome) 1 0)
-                                              :cumulative-gas-used cumulative
-                                              :logs (tx-outcome-logs outcome))
-                       receipts)))
-      (setf receipts (nreverse receipts))
-      (make-block-result :number (block-env-number env)
-                         :gas-used block-gas
-                         :receipts receipts
-                         :receipts-root (receipts:receipts-root receipts)
-                         :bloom (receipts:receipts-bloom receipts)
-                         :state-root (store:db-state-root db)
-                         :tx-count (length txs)))))
+         (ctx (begin-block db env :block block)))
+    (loop for tx in txs for sender in senders do (apply-transaction ctx tx sender))
+    (finish-block ctx)))
 
 (defun block-mismatches (result header)
   "Header fields RESULT disagrees with, in checking order, as (field expected actual)."

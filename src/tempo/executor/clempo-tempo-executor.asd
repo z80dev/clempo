@@ -9,6 +9,8 @@
                (:file "conditions")
                (:file "genesis")
                (:file "block")
+               (:file "evm-glue")
+               (:file "handler")
                (:file "replay")))
 
 (defsystem "clempo-tempo-executor/tests"
