@@ -71,8 +71,9 @@ storage/evm.rs over an abstract HOST), HASHMAP-STORAGE, RECORDING-STORAGE.")
    #:defstorable #:defenum #:defcontract #:layout-of #:layout-fields #:layout-field
    #:field-name #:field-type #:field-slot #:field-offset #:field-bytes #:field-access
    #:field-since #:field-label #:field-reserved #:field-doc
-   #:layout-json #:layout-markdown #:contract-address #:enum-count
+   #:layout-json #:layout-markdown #:contract-address #:contract-source-file #:enum-count
    #:enum-value #:enum-name #:contracts
    ;; abi surface
    #:deferror #:defevent #:defcall #:defdispatch #:emit #:dispatch-calls
-   #:charge-input-cost #:has-duplicates-metered #:call-entry #:contract-calls #:contract-dispatcher))
+   #:charge-input-cost #:has-duplicates-metered #:call-entry #:contract-calls
+   #:contract-dispatcher #:contract-abi))

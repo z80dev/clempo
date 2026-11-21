@@ -11,6 +11,8 @@ schedule Tempo layers over Osaka (crates/hardfork: constants.rs, gas_params.rs).
    ;; gating
    #:fork-if #:since #:until
    #:fork-site #:fork-site-fork #:fork-site-kind #:fork-site-where #:fork-site-doc
+   #:fork-site-file #:fork-site-form-number #:fork-site-form-path
+   #:fork-site-definition #:fork-site-relation #:fork-source-position
    #:record-fork-site #:fork-sites #:*fork-site-context* #:with-fork-site-context
    ;; gas schedule
    #:gas-schedule #:gas #:schedule-for #:with-gas-parameters-only
@@ -89,30 +91,44 @@ schedule Tempo layers over Osaka (crates/hardfork: constants.rs, gas_params.rs).
 ;;; Fork sites. Every FORK-IF and every :since field or call records where it is, so
 ;;; (fork-sites :t8) lists what T8 changed.
 
-(defstruct (fork-site (:constructor make-fork-site (fork kind where doc)))
+(defstruct (fork-site (:constructor make-fork-site
+                          (fork kind where doc file form-number form-path definition relation)))
   (fork nil :type fork)
-  (kind nil :type keyword)            ; :branch, :field, :call, :precompile, ...
-  (where nil)                         ; the enclosing definition, e.g. (tip20 transfer)
-  (doc nil))
+  (kind nil :type keyword)
+  where doc file form-number form-path definition relation)
 
 (defvar *fork-sites* (make-hash-table :test 'equal)
-  "(fork kind where doc) -> fork-site; reloading a file replaces rather than duplicates.")
+  "Source identity -> fork-site; reloading the same declaration replaces its entry.")
 
-(defun record-fork-site (fork kind where &optional doc)
+(defun record-fork-site (fork kind where &optional doc source)
+  "Register a gate with the compile-time provenance returned by FORK-SOURCE-POSITION."
   (check-type fork fork)
-  (setf (gethash (list fork kind where doc) *fork-sites*) (make-fork-site fork kind where doc))
+  (let* ((file (getf source :file))
+         (form (getf source :form-number))
+         (path (getf source :form-path))
+         (relation (getf source :relation))
+         (key (list fork kind file form path relation
+                    (unless (and file (eq kind :branch)) where))))
+    (setf (gethash key *fork-sites*)
+          (make-fork-site fork kind where doc file form path
+                          (getf source :definition) relation)))
   fork)
 
+(defun fork-site-sort-key (site)
+  (let ((*package* (find-package :keyword)) (*print-pretty* nil))
+    (prin1-to-string (list (fork-site-file site) (fork-site-form-number site)
+                          (fork-site-form-path site) (fork-site-kind site)
+                          (fork-site-where site) (fork-site-relation site)))))
+
 (defun fork-sites (&optional fork)
-  "Recorded sites for FORK (all when NIL), sorted by fork then where."
+  "Every gate of FORK (all when NIL), sorted reproducibly by fork and source identity."
   (let ((sites (loop for s being the hash-values of *fork-sites*
                      when (or (null fork) (eq (fork-site-fork s) fork)) collect s)))
     (sort sites (lambda (a b)
                   (let ((fa (fork-index (fork-site-fork a))) (fb (fork-index (fork-site-fork b))))
                     (if (/= fa fb)
                         (< fa fb)
-                        (string< (prin1-to-string (fork-site-where a))
-                                 (prin1-to-string (fork-site-where b)))))))))
+                        (string< (fork-site-sort-key a) (fork-site-sort-key b))))))))
 
 (defvar *fork-site-context* nil
   "Names the definition a FORK-IF sits in when no lexical context does.")
@@ -123,19 +139,66 @@ schedule Tempo layers over Osaka (crates/hardfork: constants.rs, gas_params.rs).
 
 (defun site-context (env)
   (multiple-value-bind (expansion expanded-p) (macroexpand-1 '%fork-site% env)
-    (or (and expanded-p (second expansion))
-        *fork-site-context*
-        (and *compile-file-truename* (pathname-name *compile-file-truename*)))))
+    (or (and expanded-p (second expansion)) *fork-site-context*)))
+
+(defun source-definition (form)
+  (when (and (consp form) (symbolp (first form)))
+    (let ((operator (symbol-name (first form))))
+      (cond ((member operator '("DEFUN" "DEFMETHOD" "DEFMACRO" "DEFGENERIC")
+                     :test #'string=)
+             (second form))
+            ((string= operator "DEFCALL") (list (second form) (third form)))
+            ((string= operator "DEFDISPATCH") (list (second form) :dispatch))
+            ((string= operator "REGISTER-PRECOMPILE")
+             (let ((contract (third form)))
+               (when (and (consp contract) (eq (first contract) 'quote))
+                 (second contract))))
+            ((member operator '("DEFCONTRACT" "DEFSTORABLE") :test #'string=)
+             (second form))))))
+
+(defun relative-source-file (file)
+  (when file
+    (let* ((name (namestring file))
+           (start (or (search "/src/" name :from-end t)
+                      (search "/tests/" name :from-end t))))
+      (if start (subseq name (1+ start)) name))))
+
+(defun fork-source-position (&optional env definition relation)
+  "Capture the current SBCL 2.6 source location while a declaration macro expands.
+Form numbers are one-based; FORM-PATH indexes the original form's nested lists.
+The compiler's original source tree identifies DEFUN/DEFMETHOD names without
+shadowing Common Lisp definition operators or adding runtime instrumentation."
+  (let* ((info (and (boundp 'sb-c::*source-info*) sb-c::*source-info*))
+         (location (and info (sb-c::make-definition-source-location)))
+         (top (and location (sb-c:definition-source-location-toplevel-form-number location)))
+         (raw-path (and info sb-c::*current-path*))
+         (path (when (eq (first raw-path) 'sb-c::original-source-start)
+                 (cdr (reverse (cddr raw-path)))))
+         (forms (and info (sb-c::file-info-forms (sb-c::source-info-file-info info))))
+         (form (and top forms (< top (length forms)) (aref forms top)))
+         (enclosing (source-definition form)))
+    (dolist (index path)
+      (setf form (and (listp form) (integerp index) (nth index form)))
+      (let ((name (source-definition form)))
+        (when name (setf enclosing name))))
+    (list :file (relative-source-file
+                 (or *compile-file-truename*
+                     (and location (sb-c:definition-source-location-namestring location))
+                     *load-truename*))
+          :form-number (and top (1+ top)) :form-path path
+          :definition (or definition (site-context env) enclosing) :relation relation)))
 
 (defmacro fork-if ((relation fork &key doc) then &optional (else nil else-p) &environment env)
   "Run THEN when the active fork satisfies RELATION (:since or :before) FORK, else ELSE.
-Records the site at load time so FORK-SITES finds it."
+Every branch records its original source position and enclosing definition at load time."
   (check-type fork fork)
-  (let ((test (ecase relation
-                (:since `(fork>= *spec* ,fork))
-                (:before `(fork< *spec* ,fork)))))
+  (let* ((source (fork-source-position env nil relation))
+         (test (ecase relation
+                 (:since `(fork>= *spec* ,fork))
+                 (:before `(fork< *spec* ,fork)))))
     `(progn
-       (load-time-value (record-fork-site ,fork :branch ',(site-context env) ,doc) t)
+       (load-time-value
+        (record-fork-site ,fork :branch ',(getf source :definition) ,doc ',source) t)
        (if ,test ,then ,@(when else-p (list else))))))
 
 (defmacro since (fork) `(fork>= *spec* ,fork))

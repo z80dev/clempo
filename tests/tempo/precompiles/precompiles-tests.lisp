@@ -31,3 +31,16 @@
 (deftest t8-fork-sites ()
   ;; (fork-sites :t8) answers "what changed in T8"
   (is (listp (fork-sites :t8))))
+
+(deftest precompile-registration-source-provenance ()
+  (let ((site (find-if (lambda (site)
+                         (and (eq (fork-site-kind site) :precompile)
+                              (equal (fork-site-where site)
+                                     (list 'clempo.nonce:nonce-manager +nonce-address+))))
+                       (fork-sites :genesis))))
+    (is site)
+    (when site
+      (is= "src/tempo/precompiles/nonce.lisp" (fork-site-file site))
+      (is (plusp (fork-site-form-number site)))
+      (is= 'clempo.nonce:nonce-manager (fork-site-definition site))
+      (is= :since (fork-site-relation site)))))

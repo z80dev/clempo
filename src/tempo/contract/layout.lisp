@@ -108,7 +108,7 @@ LAYOUT-FIELDs with the reference allocator's slots, offsets and access."
 
 ;;; Structs.
 
-(defmacro defstorable (name &rest field-specs)
+(defmacro defstorable (name &rest field-specs &environment env)
   "A Storable struct (#[derive(Storable)]): fields packed like Solidity's, starting on a
 fresh slot. Defines the Lisp struct NAME (MAKE-NAME, NAME-FIELD accessors) for values and
 registers the layout for places; (field place 'f) navigates."
@@ -118,7 +118,8 @@ registers the layout for places; (field place 'f) navigates."
                     (reduce #'max fields :key (lambda (f) (+ (field-slot f) (type-slots (field-type f)))))
                     0))
          (conc (format nil "~A-" (symbol-name name)))
-         (ctor (intern (format nil "%MAKE-~A" (symbol-name name)))))
+         (ctor (intern (format nil "%MAKE-~A" (symbol-name name))))
+         (source (fork-source-position env name :since)))
     `(progn
        (defstruct (,name (:constructor ,(intern (format nil "MAKE-~A" (symbol-name name)))
                              (&key ,@(mapcar (lambda (f) (list (field-name f) (default-value (field-type f))))
@@ -136,6 +137,11 @@ registers the layout for places; (field place 'f) navigates."
                           fields))
           ',ctor
           ',fields))
+       ,@(loop for f in fields for index from 2
+               when (field-since f)
+                 collect `(record-fork-site
+                           ,(field-since f) :field '(,name ,(field-name f)) ,(field-doc f)
+                           ',(list* :form-path (append (getf source :form-path) (list index)) source)))
        ',name)))
 
 (defun default-value (spec)
@@ -161,8 +167,8 @@ registers the layout for places; (field place 'f) navigates."
 
 ;;; Contracts.
 
-(defstruct (contract-layout (:constructor make-contract-layout (name address fields)))
-  name address fields)
+(defstruct (contract-layout (:constructor make-contract-layout (name address fields source-file)))
+  name address fields source-file)
 
 (defvar *contracts* '() "Contract names in definition order.")
 
@@ -180,19 +186,24 @@ registers the layout for places; (field place 'f) navigates."
 
 (defun contract-address (name) (contract-layout-address (layout-of name)))
 
+(defun contract-source-file (name)
+  "Repository-relative source file declaring NAME, or NIL for an interactive declaration."
+  (contract-layout-source-file (layout-of name)))
+
 (defun mapping-depth (spec)
   (if (and (consp spec) (string= (symbol-name (first spec)) "MAPPING"))
       (1+ (mapping-depth (third spec)))
       0))
 
-(defmacro defcontract (name (&key address prefix) &body field-specs)
+(defmacro defcontract (name (&key address prefix) &body field-specs &environment env)
   "Declare a precompile's storage layout (#[contract]). Each field is
 (name type &key slot base-slot since reserved doc label). Defines one accessor per field,
 (FIELD self &optional key...) -> place, taking one key per mapping level, and the constant
 +NAME/FIELD+ holding its slot. With PREFIX (a string, or T for the contract's name)
 accessors are named PREFIX-FIELD, for packages holding several contracts."
   (let ((fields (allocate-fields field-specs :contract t))
-        (prefix (if (eq prefix t) (symbol-name name) prefix)))
+        (prefix (if (eq prefix t) (symbol-name name) prefix))
+        (source (fork-source-position env name :since)))
     (check-collisions name fields)
     (flet ((accessor (f)
              (if prefix
@@ -205,12 +216,16 @@ accessors are named PREFIX-FIELD, for packages holding several contracts."
     `(progn
        (eval-when (:compile-toplevel :load-toplevel :execute)
          (setf (get ',name 'contract-layout)
-               (make-contract-layout ',name ,address ',fields))
+               (make-contract-layout ',name ,address ',fields ,(getf source :file)))
          (pushnew ',name *contracts*))
-       ,@(loop for f in fields
+       ,@(loop for f in fields for index from 3
                for since = (field-since f)
                when since
-                 collect `(record-fork-site ,since :field '(,name ,(field-name f)) ,(field-doc f)))
+                 collect `(record-fork-site ,since :field '(,name ,(field-name f))
+                                            ,(field-doc f)
+                                            ',(list* :form-path
+                                                     (append (getf source :form-path) (list index))
+                                                     source)))
        ,@(loop for f in fields
                for const = (intern (format nil "+~A/~A+" (symbol-name name) (symbol-name (field-name f)))
                                    (symbol-package name))

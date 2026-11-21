@@ -68,3 +68,37 @@
   (is= 100 (gas :sstore-static :t1))
   (signals error
     (macroexpand-1 '(with-gas-parameters-only (:unknown-gas-parameter) nil))))
+
+(defun two-t8-branches ()
+  (list (fork-if (:since :t8) :first-new :first-old)
+        (fork-if (:since :t8) :second-new :second-old)))
+
+(defgeneric t8-method (value))
+(defmethod t8-method ((value integer))
+  (fork-if (:before :t8) value (1+ value)))
+
+(deftest fork-sites-preserve-source-identities ()
+  (let ((sites (remove-if-not (lambda (site)
+                                (eq (fork-site-definition site) 'two-t8-branches))
+                              (fork-sites :t8))))
+    (is= 2 (length sites))
+    (when (= (length sites) 2)
+      (is= "tests/tempo/forks/forks-tests.lisp" (fork-site-file (first sites)))
+      (is (plusp (fork-site-form-number (first sites))))
+      (is= (fork-site-form-number (first sites)) (fork-site-form-number (second sites)))
+      (is (not (equal (fork-site-form-path (first sites)) (fork-site-form-path (second sites)))))
+      (is (every (lambda (site) (eq (fork-site-relation site) :since)) sites))))
+  (let ((site (find 't8-method (fork-sites :t8) :key #'fork-site-definition)))
+    (is site)
+    (when site
+      (is= :before (fork-site-relation site))
+      (is= "tests/tempo/forks/forks-tests.lisp" (fork-site-file site)))))
+
+(deftest source-registration-is-idempotent ()
+  (let ((clempo.forks::*fork-sites* (make-hash-table :test 'equal))
+        (source '(:file "src/fixture.lisp" :form-number 2 :form-path (3)
+                  :definition fixture-function :relation :since)))
+    (record-fork-site :t8 :branch 'fixture-function "old documentation" source)
+    (record-fork-site :t8 :branch 'fixture-function "new documentation" source)
+    (is= 1 (length (fork-sites :t8)))
+    (is= "new documentation" (fork-site-doc (first (fork-sites :t8))))))

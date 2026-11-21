@@ -23,3 +23,8 @@
                           (list* "main" "score"
                                  (remove-if (lambda (n) (member n '("main" "score") :test #'string=))
                                             names)))))
+
+(defsystem "clempo-dev/tests"
+  :depends-on ("clempo-dev")
+  :pathname "../../tests/dev/"
+  :components ((:file "spec-tests")))

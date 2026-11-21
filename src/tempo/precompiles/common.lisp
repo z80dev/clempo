@@ -44,11 +44,15 @@
 
 (defvar *system-precompiles* (make-hash-table) "address -> (contract . fork)")
 
-(defun register-precompile (address contract fork)
-  "Make CONTRACT (whose DEFDISPATCH handles calls) the precompile at ADDRESS from FORK."
+(defun %register-precompile (address contract fork source)
   (setf (gethash address *system-precompiles*) (cons contract fork))
-  (record-fork-site fork :precompile (list contract address))
+  (record-fork-site fork :precompile (list contract address) nil source)
   contract)
+
+(defmacro register-precompile (address contract fork &environment env)
+  "Make CONTRACT the precompile at ADDRESS from FORK, recording this declaration's source."
+  `(%register-precompile ,address ,contract ,fork
+                         ',(fork-source-position env nil :since)))
 
 (defvar *tip20-contract* nil
   "The contract behind every TIP-20-prefixed address (set by the TIP-20 implementation).")
