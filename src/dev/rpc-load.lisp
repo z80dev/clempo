@@ -250,7 +250,7 @@ one warm-up request, all released together. Returns a plist."
         while comma))
 
 (defcommand "rpc-load" (args)
-  "RPC load and answer diff of two servers at one height: rpc-load -a URL -b URL -from N -to M [-n 200] [-total 400] [-concurrency 1,16,64] [-methods m,...] [-seed S] [-result FILE] [-no-diff] [-no-load]"
+  "RPC load and answer diff of two servers at one height: rpc-load -a URL -b URL -from N -to M [-n 200] [-total 400] [-concurrency 1,16,64] [-methods m,...] [-rounds 3] [-seed S] [-result FILE] [-no-diff] [-no-load]"
   (let* ((url-a (or (arg args :a) (return-from command (progn (log-line "rpc-load: -a URL required") 2))))
          (url-b (or (arg args :b) (return-from command (progn (log-line "rpc-load: -b URL required") 2))))
          (from (arg-int args :from)) (to (arg-int args :to))
@@ -267,25 +267,32 @@ one warm-up request, all released together. Returns a plist."
       (unless (arg-flag args :no-diff)
         (setf diffs (clempo.rpc-load:diff-corpus corpus url-a url-b methods)))
       (unless (arg-flag args :no-load)
+        (dotimes (round (arg-int args :rounds 3))
+          (dolist (m methods)
+            (dolist (c concurrency)
+              ;; alternate which server goes first at each step
+              (dolist (side (if (evenp (length results)) '(:a :b) '(:b :a)))
+                (let ((r (clempo.rpc-load:load-run (if (eq side :a) url-a url-b) m (gethash m corpus) c total)))
+                  (log-line "round ~D ~A ~A c=~D: ~,1F req/s p50 ~,3F ms p99 ~,3F ms errors ~D"
+                            round side m c (getf r :rps) (getf r :p50) (getf r :p99) (getf r :errors))
+                  (push (list* :side side :round round r) results)))))))
+      (setf results (nreverse results))
+      (format t "~&Medians over rounds; latency in ms.~%~%| Method | Clients | A req/s | B req/s | A/B | A p50/p99 | B p50/p99 | errors A/B |~%|---|---:|---:|---:|---:|---:|---:|---|~%")
+      (flet ((med (side m c key)
+               (let ((xs (sort (loop for r in results
+                                     when (and (eq (getf r :side) side) (string= (getf r :method) m)
+                                               (= (getf r :c) c))
+                                       collect (getf r key))
+                               #'<)))
+                 (and xs (if (eq key :errors) (reduce #'+ xs) (nth (floor (length xs) 2) xs))))))
         (dolist (m methods)
           (dolist (c concurrency)
-            ;; alternate which server goes first at each step
-            (dolist (side (if (evenp (length results)) '(:a :b) '(:b :a)))
-              (let ((r (clempo.rpc-load:load-run (if (eq side :a) url-a url-b) m (gethash m corpus) c total)))
-                (log-line "~A ~A c=~D: ~,1F req/s p50 ~,2F ms p99 ~,2F ms errors ~D"
-                          side m c (getf r :rps) (getf r :p50) (getf r :p99) (getf r :errors))
-                (push (list* :side side r) results))))))
-      (setf results (nreverse results))
-      (format t "~&| Method | Clients | A req/s | B req/s | A/B | A p50 ms | B p50 ms | A p99 ms | B p99 ms | errors A/B |~%|---|---:|---:|---:|---:|---:|---:|---:|---:|---|~%")
-      (dolist (m methods)
-        (dolist (c concurrency)
-          (let ((a (find-if (lambda (r) (and (eq (getf r :side) :a) (string= (getf r :method) m) (= (getf r :c) c))) results))
-                (b (find-if (lambda (r) (and (eq (getf r :side) :b) (string= (getf r :method) m) (= (getf r :c) c))) results)))
-            (when (and a b)
-              (format t "| `~A` | ~D | ~,1F | ~,1F | ~,2Fx | ~,2F | ~,2F | ~,2F | ~,2F | ~D/~D |~%"
-                      m c (getf a :rps) (getf b :rps) (/ (getf a :rps) (getf b :rps))
-                      (getf a :p50) (getf b :p50) (getf a :p99) (getf b :p99)
-                      (getf a :errors) (getf b :errors))))))
+            (when (and (med :a m c :rps) (med :b m c :rps))
+              (format t "| `~A` | ~D | ~:D | ~:D | ~,2F | ~,3F/~,3F | ~,3F/~,3F | ~D/~D |~%"
+                      m c (round (med :a m c :rps)) (round (med :b m c :rps))
+                      (/ (med :a m c :rps) (med :b m c :rps))
+                      (med :a m c :p50) (med :a m c :p99) (med :b m c :p50) (med :b m c :p99)
+                      (med :a m c :errors) (med :b m c :errors))))))
       (when diffs
         (format t "~&~%| Method | same | differ |~%|---|---:|---:|~%")
         (loop for (m same differ) in diffs do (format t "| `~A` | ~D | ~D |~%" m same differ)))
@@ -299,6 +306,7 @@ one warm-up request, all released together. Returns a plist."
            "load" (coerce (loop for r in results
                                 collect (clempo.json:jobject
                                          "side" (string-downcase (symbol-name (getf r :side)))
+                                         "round" (getf r :round)
                                          "method" (getf r :method) "c" (getf r :c) "n" (getf r :n)
                                          "errors" (getf r :errors) "rps" (getf r :rps)
                                          "p50_ms" (getf r :p50) "p90_ms" (getf r :p90)
