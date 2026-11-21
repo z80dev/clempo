@@ -36,7 +36,7 @@
         x
         `(logior (ldb (byte 64 0) (ash ,x ,n)) (ash ,x ,(- n 64))))))
 
-(defmacro keccak-rounds (state)
+(defmacro keccak-rounds (state &optional (words nil) data start out out-start)
   "Expands to 24 rounds of Keccak-f[1600] over 25 lane variables, fully unrolled
 within a round: theta, rho, pi and chi become straight-line register code."
   (let ((a (lane-symbols "A" 25))
@@ -45,7 +45,12 @@ within a round: theta, rho, pi and chi become straight-line register code."
         (d (lane-symbols "D" 5)))
     (flet ((a (x y) (nth (+ x (* 5 y)) a))
            (b (x y) (nth (+ x (* 5 y)) b)))
-      `(let (,@(loop for i below 25 collect `(,(nth i a) (aref ,state ,i))))
+      `(let (,@(loop for reg in a for i from 0
+                     collect `(,reg ,(cond ((not words) `(aref ,state ,i))
+                                           ((< i words) `(load-lane ,data (+ ,start ,(* i 8))))
+                                           ((= i words) 1)
+                                           ((= i 16) #x8000000000000000)
+                                           (t 0)))))
          (declare (type lane ,@a))
          (dotimes (round 24)
            (let* (,@(loop for x below 5
@@ -67,8 +72,13 @@ within a round: theta, rho, pi and chi become straight-line register code."
                                                        (logandc1 ,(b (mod (1+ x) 5) y)
                                                                  ,(b (mod (+ x 2) 5) y)))))))
              (setf ,(a 0 0) (logxor ,(a 0 0) (aref +round-constants+ round)))))
-         (setf ,@(loop for i below 25 nconc `((aref ,state ,i) ,(nth i a))))
-         ,state))))
+         ,@(if words
+               (loop for reg in a for i below 4 append
+                     (loop for j below 8 collect
+                           `(setf (aref ,out (+ ,out-start ,(+ (* 8 i) j)))
+                                  (ldb (byte 8 ,(* 8 j)) ,reg))))
+               `((setf ,@(loop for reg in a for i from 0 nconc `((aref ,state ,i) ,reg)))
+                 ,state))))))
 
 (defun keccak-f-portable (state)
   (declare (type keccak-state state) #.*hot*)
@@ -155,17 +165,19 @@ within a round: theta, rho, pi and chi become straight-line register code."
   "Pad, squeeze 32 bytes. Reset K before reusing it."
   (finalize-into k (make-octets 32) 0))
 
-(defun fixed-into (data start lanes state out out-start)
-  (declare (type octets data out) (type fixnum start out-start) (type keccak-state state)
-           (type (member 4 8) lanes) #.*hot*)
-  (dotimes (i lanes)
-    (setf (aref state i) (load-lane data (+ start (* 8 i)))))
-  (setf (aref state lanes) 1 (aref state 16) #x8000000000000000)
-  (squeeze-into (keccak-f state) out out-start))
+(defun fixed-into (data start size out out-start)
+  (declare (type octets data out) (type fixnum start out-start) (type (member 32 64) size) #.*hot*)
+  (if (= size 32)
+      #+(and arm64 darwin) (clempo.keccak-arm64:hash32-into data start out out-start +round-constants+)
+      #-(and arm64 darwin) (keccak-rounds nil 4 data start out out-start)
+      #+(and arm64 darwin) (clempo.keccak-arm64:hash64-into data start out out-start +round-constants+)
+      #-(and arm64 darwin) (keccak-rounds nil 8 data start out out-start))
+  out)
 
 (defun keccak256-into (data start end out out-start &optional k)
-  "Hash DATA[START,END) into OUT at OUT-START. With reusable K, allocates nothing.
-K's previous digest state is discarded. Return OUT."
+  "Hash DATA[START,END) into OUT at OUT-START and return OUT.
+32- and 64-byte inputs need no scratch. Other lengths allocate nothing with reusable K.
+K's previous digest state is discarded."
   (check-type data octets)
   (check-type out octets)
   (check-type k (or null keccak))
@@ -173,9 +185,8 @@ K's previous digest state is discarded. Return OUT."
   (assert (and (typep out-start 'fixnum) (<= 0 out-start (- (length out) 32))))
   (let ((size (- end start)))
     (cond ((or (= size 32) (= size 64))
-           (let ((state (if k (keccak-state (keccak-reset k))
-                            (make-array 25 :element-type '(unsigned-byte 64) :initial-element 0))))
-             (fixed-into data start (if (= size 32) 4 8) state out out-start)))
+           (when k (keccak-reset k))
+           (fixed-into data start size out out-start))
           (t
            (let ((k (if k (keccak-reset k) (%make-keccak))))
              (keccak-update k data :start start :end end)

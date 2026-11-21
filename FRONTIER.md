@@ -148,6 +148,11 @@ copy-free 32/64-byte paths reduced 64-byte hashes from **626 ns to 178 ns**
 On 64 MiB, throughput rose from **256 to 799 MB/s** (262 to 84 ms), with no
 measurable consing. The typed scalar permutation remains the fallback.
 
+`keccak256-into` now initializes all lanes directly in registers for 32- and
+64-byte slices and writes the digest to caller memory. A release run of one
+million 64-byte calls without a context measured **142 ns CPU/call, zero bytes
+consed**. The scalar fallback also measured zero consing for the same run.
+
 ```sh
 CLEMPO_BUILD=release sbcl --noinform --non-interactive --load scripts/build.lisp \
   --eval '(asdf:load-system "clempo-crypto-keccak")' \

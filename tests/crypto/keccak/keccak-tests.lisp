@@ -31,6 +31,18 @@
           (keccak-update k data :start start :end end)
           (is-equalp (keccak-final k) (keccak256 data :start start :end end)))))))
 
+(deftest keccak-fixed-size-overlapping-destination ()
+  (dolist (size '(32 64))
+    (let* ((data (make-octets 80)) (end (+ 3 size)))
+      (dotimes (i (length data)) (setf (aref data i) (mod (* 19 i) 253)))
+      (let ((k (make-keccak)))
+        (keccak-update k data :start 3 :end end)
+        (let ((expected (keccak-final k)))
+          (is (eq data (keccak256-into data 3 end data 7)))
+          (is-equalp expected (subseq data 7 39))
+          (is= (mod (* 6 19) 253) (aref data 6))
+          (is= (mod (* 39 19) 253) (aref data 39)))))))
+
 #+(and arm64 darwin)
 (deftest keccak-arm-permutation-matches-portable ()
   (let ((a (make-array 25 :element-type '(unsigned-byte 64))))
