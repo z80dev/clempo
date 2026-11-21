@@ -16,6 +16,7 @@ each block's receipts checked against its header's receipts root before they are
            #:backend-clear-pool
            #:backend-tx-location #:backend-receipts-raw #:backend-chain-id #:backend-chain
            #:with-backend-read #:with-backend-write #:call-outside-backend-read #:*backend* #:*head*
+           #:backend-block-cache
            #:archive-backend #:make-archive-backend #:archive-backend-head #:backend-state
            #:history-dir #:backend-history #:archive-backend-finalization-dir #:backend-record-receipts
            #:build-index #:index-dir #:index-covered-height
@@ -31,7 +32,10 @@ each block's receipts checked against its header's receipts root before they are
 (defclass backend ()
   ((lock :initform (sb-thread:make-mutex :name "backend") :reader backend-lock)
    (readers :initform 0 :accessor backend-readers)
+   (writers :initform 0 :accessor backend-writers)   ; writers waiting for the readers to finish
    (queue :initform (sb-thread:make-waitqueue) :reader backend-queue)
+   ;; Decoded blocks by number (clempo.rpc.render's CHAIN-BLOCK).
+   (block-cache :initform (make-hash-table :synchronized t) :reader backend-block-cache)
    ;; The chain spec served: genesis, fork schedule, chain id (anything LOAD-CHAINSPEC takes).
    (chain :initarg :chain :initform :mainnet)))
 
@@ -80,6 +84,12 @@ SENDER is the recovered sender as an integer and PENDING-P is false for a queued
 
 ;;; Readers and writers: many concurrent requests, one writer at a time between them.
 
+(defun release-read (backend)
+  "Drop one read hold (under the backend lock): the last reader out wakes a waiting writer.
+No writer waiting, no wakeup (a broadcast is a system call on every request)."
+  (when (and (zerop (decf (backend-readers backend))) (plusp (backend-writers backend)))
+    (sb-thread:condition-broadcast (backend-queue backend))))
+
 (defun call-with-backend-read (backend thunk)
   (let ((lock (backend-lock backend)))
     (sb-thread:with-mutex (lock) (incf (backend-readers backend)))
@@ -87,9 +97,7 @@ SENDER is the recovered sender as an integer and PENDING-P is false for a queued
          (let ((*backend* backend) (*head* (backend-head backend))
                (clempo.executor:*chain* (backend-chain backend)))
            (funcall thunk))
-      (sb-thread:with-mutex (lock)
-        (when (zerop (decf (backend-readers backend)))
-          (sb-thread:condition-broadcast (backend-queue backend)))))))
+      (sb-thread:with-mutex (lock) (release-read backend)))))
 
 (defmacro with-backend-read ((backend) &body body)
   `(call-with-backend-read ,backend (lambda () ,@body)))
@@ -99,9 +107,7 @@ SENDER is the recovered sender as an integer and PENDING-P is false for a queued
 blocks meanwhile (a request that waits for a block). The hold is taken again before returning
 and *HEAD* is snapshotted anew."
   (let* ((backend *backend*) (lock (backend-lock backend)))
-    (sb-thread:with-mutex (lock)
-      (when (zerop (decf (backend-readers backend)))
-        (sb-thread:condition-broadcast (backend-queue backend))))
+    (sb-thread:with-mutex (lock) (release-read backend))
     (unwind-protect (funcall thunk)
       (sb-thread:with-mutex (lock) (incf (backend-readers backend)))
       (setf *head* (backend-head backend)))))
@@ -110,8 +116,11 @@ and *HEAD* is snapshotted anew."
   "Wait until no request is running, then run THUNK with new requests held back."
   (let ((lock (backend-lock backend)))
     (sb-thread:with-mutex (lock)
-      (loop until (zerop (backend-readers backend))
-            do (sb-thread:condition-wait (backend-queue backend) lock))
+      (incf (backend-writers backend))
+      (unwind-protect
+           (loop until (zerop (backend-readers backend))
+                 do (sb-thread:condition-wait (backend-queue backend) lock))
+        (decf (backend-writers backend)))
       (funcall thunk))))
 
 (defmacro with-backend-write ((backend) &body body)
@@ -259,33 +268,57 @@ Returns (values header-start header-end tx-bounds) where tx-bounds is a list of 
           (write-index (index-path dir "txs") to tk tv)
           (values (length bk) (length tk)))))))
 
-(defstruct (hindex (:conc-name hindex-)) path stream offsets covered
-  (lock (sb-thread:make-mutex :name "index file")))
+(defstruct (hindex (:conc-name hindex-)) path sap (length 0 :type fixnum)
+  (offsets (make-array 0 :element-type '(unsigned-byte 64)) :type (simple-array (unsigned-byte 64) (*)))
+  covered)
 
 (defun open-index (path)
+  "Map the index file PATH read-only (NIL when absent). Its bucket table is copied out and
+checked against the file's length, so a lookup reads only inside the mapping."
   (when (probe-file path)
-    (let* ((in (open path :element-type '(unsigned-byte 8)))
-           (h (make-octets +index-header+))
-           (tab (make-octets (* 8 (1+ +buckets+))))
-           (offsets (make-array (1+ +buckets+) :element-type '(unsigned-byte 64))))
-      (read-sequence h in)
-      (read-sequence tab in)
-      (dotimes (i (1+ +buckets+))
-        (setf (aref offsets i) (octets->integer tab :start (* 8 i) :end (* 8 (1+ i)))))
-      (make-hindex :path path :stream in :offsets offsets
-                  :covered (octets->integer h :start 8 :end 16)))))
+    (let ((fd (sb-posix:open (namestring path) sb-posix:o-rdonly))
+          (table-end (+ +index-header+ (* 8 (1+ +buckets+)))))
+      (unwind-protect
+           (let ((length (sb-posix:stat-size (sb-posix:fstat fd))))
+             (unless (>= length table-end) (error "index ~A: too short" path))
+             (let* ((sap (sb-posix:mmap nil length sb-posix:prot-read sb-posix:map-shared fd 0))
+                    (offsets (make-array (1+ +buckets+) :element-type '(unsigned-byte 64))))
+               (flet ((u64 (pos) (let ((n 0)) (dotimes (i 8 n) (setf n (logior (ash n 8) (sb-sys:sap-ref-8 sap (+ pos i))))))))
+                 (dotimes (i (1+ +buckets+))
+                   (setf (aref offsets i) (u64 (+ +index-header+ (* 8 i)))))
+                 (unless (and (every (lambda (o) (<= (+ table-end (* 16 o)) length)) offsets)
+                              (loop for i below +buckets+ always (<= (aref offsets i) (aref offsets (1+ i)))))
+                   (sb-posix:munmap sap length)
+                   (error "index ~A: bucket table outside the file" path))
+                 (let ((index (make-hindex :path path :sap sap :length length :offsets offsets
+                                           :covered (u64 8))))
+                   (sb-ext:finalize index (lambda () (sb-posix:munmap sap length)) :dont-save t)
+                   index))))
+        (sb-posix:close fd)))))
 
 (defun index-lookup (index prefix)
-  "Every value stored under PREFIX."
-  (let* ((b (ash prefix -48))
-         (from (aref (hindex-offsets index) b)) (to (aref (hindex-offsets index) (1+ b)))
-         (buf (make-octets (* 16 (- to from)))))
-    (sb-thread:with-mutex ((hindex-lock index))
-      (file-position (hindex-stream index) (+ +index-header+ (* 8 (1+ +buckets+)) (* 16 from)))
-      (read-sequence buf (hindex-stream index)))
-    (loop for i from 0 below (- to from)
-          when (= prefix (octets->integer buf :start (* 16 i) :end (+ 8 (* 16 i))))
-            collect (octets->integer buf :start (+ 8 (* 16 i)) :end (+ 16 (* 16 i))))))
+  "Every value stored under PREFIX: a binary search of its bucket in the mapped file."
+  (declare (type (unsigned-byte 64) prefix))
+  (let* ((sap (hindex-sap index))
+         (offsets (hindex-offsets index))
+         (b (ash prefix -48))
+         (base (+ +index-header+ (* 8 (1+ +buckets+)))))
+    (declare (type sb-sys:system-area-pointer sap))
+    (flet ((u64 (pos)
+             (declare (type fixnum pos))
+             (let ((n 0))
+               (declare (type (unsigned-byte 64) n))
+               (dotimes (i 8 n)
+                 (setf n (logior (ldb (byte 64 0) (ash n 8)) (sb-sys:sap-ref-8 sap (+ pos i))))))))
+      (let ((lo (aref offsets b)) (hi (aref offsets (1+ b))))
+        (declare (type fixnum lo hi))
+        ;; the first entry whose key is at or after PREFIX
+        (loop while (< lo hi)
+              do (let ((mid (ash (+ lo hi) -1)))
+                   (if (< (u64 (+ base (* 16 mid))) prefix) (setf lo (1+ mid)) (setf hi mid))))
+        (loop for i of-type fixnum from lo below (aref offsets (1+ b))
+              while (= prefix (u64 (+ base (* 16 i))))
+              collect (u64 (+ base 8 (* 16 i))))))))
 
 ;;; Receipts store: per archive chunk, an append-only file of records
 ;;;   u64 block | u32 length | RLP list of receipt envelopes
@@ -418,22 +451,26 @@ ARCHIVE-BACKEND) is instantiated with the remaining INITARGS as well."
               (clempo.history:history-state h number)))))))
 
 (defun archive-chunk (b first)
-  (sb-thread:with-mutex ((chunk-lock b))
-    (let ((hit (assoc first (archive-backend-chunks b))))
-      (if hit
-          (progn (setf (archive-backend-chunks b) (cons hit (remove hit (archive-backend-chunks b))))
-                 (cdr hit))
-          (let ((chunk (archive:read-chunk first (archive-backend-dir b))))
-            (push (cons first chunk) (archive-backend-chunks b))
-            (when (> (length (archive-backend-chunks b)) 24)
-              (setf (archive-backend-chunks b) (subseq (archive-backend-chunks b) 0 24)))
-            chunk)))))
+  "The archive chunk starting at block FIRST. Read chunks are kept (the 24 most recently read)
+in a list that is replaced whole, so a hit takes no lock."
+  (let ((hit (assoc first (archive-backend-chunks b))))
+    (if hit
+        (cdr hit)
+        (sb-thread:with-mutex ((chunk-lock b))
+          (let ((hit (assoc first (archive-backend-chunks b))))
+            (if hit
+                (cdr hit)
+                (let ((chunk (archive:read-chunk first (archive-backend-dir b))))
+                  (setf (archive-backend-chunks b)
+                        (let ((chunks (cons (cons first chunk) (archive-backend-chunks b))))
+                          (if (> (length chunks) 24) (subseq chunks 0 24) chunks)))
+                  chunk)))))))
 
 (defmethod backend-block-raw ((b archive-backend) n)
   (when (and (integerp n) (<= 0 n (archive-backend-head b)))
     (let ((first (* archive:+chunk-blocks+ (floor n archive:+chunk-blocks+))))
       ;; a chunk already read is immutable: only an unread one costs a probe (a stat call)
-      (when (or (sb-thread:with-mutex ((chunk-lock b)) (assoc first (archive-backend-chunks b)))
+      (when (or (assoc first (archive-backend-chunks b))
                 (archive:chunk-present-p first (archive-backend-dir b)))
         (archive:chunk-block (archive-chunk b first) n)))))
 

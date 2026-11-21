@@ -4,7 +4,7 @@
   :depends-on ("clempo-base" "clempo-io" "clempo-crypto" "clempo-codec" "clempo-trie" "clempo-types"
                "clempo-sync" "clempo-consensus" "clempo-tempo-chainspec" "clempo-store" "clempo-tempo-executor"
                "clempo-tempo-txpool"
-               (:require "sb-bsd-sockets"))
+               (:require "sb-bsd-sockets") (:require "sb-posix"))
   :serial t
   :components ((:file "serde")
                (:file "defrpc")
