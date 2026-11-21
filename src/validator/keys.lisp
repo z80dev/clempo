@@ -247,10 +247,10 @@ IPv4-mapped IPv6."
           (let* ((raw (encode-1559 chain-id nonce tip max-fee gas to data (list y r s)))
                  (hash (call "eth_sendRawTransaction" (octets->hex raw))))
             (format *error-output* "sent ~A from ~A (nonce ~D, gas ~D)~%" hash (address-hex from) nonce gas)
-            (loop with deadline = (+ (get-universal-time) timeout-seconds)
+            (loop with deadline = (+ (clempo.io:now-seconds) timeout-seconds)
                   for receipt = (call "eth_getTransactionReceipt" hash)
                   do (when (and receipt (not (eq receipt :null))) (return receipt))
-                     (when (> (get-universal-time) deadline)
+                     (when (> (clempo.io:now-seconds) deadline)
                        (keys-fail "no receipt for ~A after ~D seconds" hash timeout-seconds))
                      (sleep 0.5))))))))
 
