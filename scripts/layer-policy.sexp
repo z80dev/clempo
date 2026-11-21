@@ -16,6 +16,7 @@
    ("WRITE-VARINT" 1 "Each continuation shifts seven bits out of a nonnegative integer."))
   ("src/codec/json.lisp"
    ("PARSE-JSON" 6 "Cursor advances through a fixed input, or rejects; nesting has its own limit.")
+   ("JSON-VALID-P" 5 "Cursor advances through a fixed input, or rejects, as in PARSE-JSON.")
    ("WRITE-JSON-INTEGER" 1 "Divides a fixnum by ten until zero (at most 19 digits).")
    ("WRITE-JSON-STRING" 1 "Runs over the characters of the finite string."))
   ("src/codec/rlp.lisp" ("DECODE-AT" 1 "A child consumes at least its prefix byte within the parent list slice."))

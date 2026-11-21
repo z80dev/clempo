@@ -272,8 +272,11 @@ under METHOD."
     (unless (member first '(#\{ #\[))
       (return-from handle-body (values 400 (error-response nil +parse-error+ "Parse error"))))
     ;; nesting is bounded per typed param (serde's recursion limit), not for the whole body:
-    ;; the reference answers a deeply nested param a method ignores
-    (let ((parsed (handler-case (json:parse-json text :max-depth nil) (json:json-error () :invalid))))
+    ;; the reference answers a deeply nested param a method ignores. A single object is only
+    ;; checked (the same grammar as PARSE-JSON, no values built); a batch needs its length.
+    (let ((parsed (if (char= first #\{)
+                      (if (json:json-valid-p text) :object :invalid)
+                      (handler-case (json:parse-json text :max-depth nil) (json:json-error () :invalid)))))
       (cond ((eq parsed :invalid) (values 200 (error-response nil +parse-error+ "Parse error")))
             ((char= first #\{)
              (values 200 (or (handle-request-object text start (length text)) "null")))
