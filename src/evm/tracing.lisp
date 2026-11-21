@@ -98,6 +98,10 @@ number of logs the block's earlier transactions emitted. Bad options signal TRAC
        (if (fork>= :berlin) 100 (gas-params-account-read gp)))
       (#x54 (if (fork>= :berlin) 100 (gas-params-sload gp)))
       (#xff (gas-params-selfdestruct gp))
+      (#x20 (gas-params-keccak gp))
+      (#x40 (gas-params-blockhash gp))
+      ((#xa0 #xa1 #xa2 #xa3 #xa4) (gas-params-log gp))
+      ((#xf0 #xf5) (gas-params-create gp))
       (t (let* ((info (op-info op)) (gas (and info (op-info-gas info))))
            (if (integerp gas) gas 0))))))
 

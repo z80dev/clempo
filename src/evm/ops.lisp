@@ -52,7 +52,7 @@
 
 ;;; 0x20: keccak
 
-(defop #x20 keccak256 (offset size) (:gas 30 :pushes 1)
+(defop #x20 keccak256 (offset size) (:gas (gas-params-keccak gp) :pushes 1)
   (mem-ensure offset size)
   (charge (* (gas-params-keccak-word gp) (ceiling size 32)))
   (push-word (octets->integer
@@ -113,7 +113,7 @@
 
 ;;; 0x40s: block
 
-(defop #x40 blockhash (n) (:gas 20 :pushes 1)
+(defop #x40 blockhash (n) (:gas (gas-params-blockhash gp) :pushes 1)
   (let ((current (block-env-number block)))
     (push-word (if (and (< n current) (<= (- current 256) n))
                    (let ((fn (block-env-block-hash-fn block)))
@@ -218,10 +218,11 @@ halt status and may spend gas.")
                 ,@(loop for n from 0 to 4
                         for topics = (loop for i from 1 to n collect (intern (format nil "TOPIC~D" i)))
                         collect `(defop ,(+ #xa0 n) ,(intern (format nil "LOG~D" n))
-                                     (offset size ,@topics) (:gas 375)
+                                     (offset size ,@topics) (:gas (gas-params-log gp))
                                    (static-guard)
                                    (mem-ensure offset size)
-                                   (charge (+ ,(* 375 n) (* (gas-params-log-data gp) size)))
+                                   (charge (+ (* ,n (gas-params-log-topic gp))
+                                              (* (gas-params-log-data gp) size)))
                                    (let ((entry (make-log-entry (frame-address frame)
                                                                 (list ,@topics)
                                                                 (memory-slice frame offset size))))
@@ -234,7 +235,7 @@ halt status and may spend gas.")
 
 ;;; 0xf0s: system
 
-(defop #xf0 create (value offset size) (:gas 32000 :pushes 1)
+(defop #xf0 create (value offset size) (:gas (gas-params-create gp) :pushes 1)
   (static-guard)
   (mem-ensure offset size)
   (sync-gas)
@@ -242,7 +243,7 @@ halt status and may spend gas.")
     (unless result (halt :out-of-gas))
     (reload-gas)
     (push-word result)))
-(defop #xf5 create2 (value offset size salt) (:gas 32000 :pushes 1)
+(defop #xf5 create2 (value offset size salt) (:gas (gas-params-create gp) :pushes 1)
   (static-guard)
   (mem-ensure offset size)
   (charge (* (gas-params-keccak-word gp) (ceiling size 32)))
