@@ -112,7 +112,10 @@ private devnets; CALL-WITH-VALIDATOR-NETWORK defaults are Tempo's production val
     (thr:with-mutex (mutex)
       (loop for remaining = (/ (- deadline (io:monotonic-ticks)) internal-time-units-per-second)
             while (and (zerop (queues-count queues)) (plusp remaining))
-            do (thr:condition-wait (queues-ready queues) mutex :timeout remaining))
+            ;; A timed-out CONDITION-WAIT may return without the mutex (SBCL on
+            ;; Linux futexes does); take it back before touching the rings.
+            do (unless (thr:condition-wait (queues-ready queues) mutex :timeout remaining)
+                 (unless (thr:holding-mutex-p mutex) (thr:grab-mutex mutex))))
       (loop repeat limit
             for (value present) = (multiple-value-list (queues-pop-locked queues))
             while present collect value))))
