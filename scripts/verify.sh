@@ -2,8 +2,9 @@
 # The gate. A rung counts only on a commit where this passes.
 #   1. a cold compile of every layer from source; warnings are errors
 #   2. every layer's tests
-#   3. the import-graph and determinism check (layers.sexp)
-#   4. compiled-form specification matches tracked spec/ outputs
+#   3. fixed-seed fuzzing of every target plus tests/fuzz/cases.sexp (a few seconds)
+#   4. the import-graph and determinism check (layers.sexp)
+#   5. compiled-form specification matches tracked spec/ outputs
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -13,6 +14,8 @@ rm -rf build/fasl/check
 "${SBCL[@]}" --load scripts/build.lisp \
   --eval '(clempo-build:load-all :strict t)' \
   --eval '(clempo-build:test-all :strict t)'
+
+bin/clempo-dev fuzz -target all -seed 1 -cases 150
 
 "${SBCL[@]}" --load scripts/build.lisp --load scripts/check-layers.lisp
 

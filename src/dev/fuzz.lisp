@@ -90,8 +90,8 @@ failed property); INPUT is what the case last recorded in *INPUT*."
     (octets (format nil "~A~:[~;...~] (~D bytes)"
                     (octets->hex input :end (min (length input) 256))
                     (> (length input) 256) (length input)))
-    (t (let ((*print-length* 20) (*print-level* 4))
-         (input-text (prin1-to-string input))))))
+    (cons (format nil "(~{~A~^ ~})" (mapcar #'input-text input)))
+    (t (prin1-to-string input))))
 
 (defun load-cases (path)
   "The entries of tests/fuzz/cases.sexp (see the package documentation)."
@@ -267,7 +267,10 @@ matched by a :known entry, and those that were."
           (expt 10d0 (- (rnd 600) 300))))
     ((4 5 6) (gen-json-string))
     (7 (coerce (loop repeat (rnd 5) collect (gen-json (1- depth))) 'simple-vector))
-    (t (cons :object (loop repeat (rnd 5) collect (cons (gen-json-string) (gen-json (1- depth))))))))
+    ;; distinct keys: with duplicates JSON-EQUAL's comparison is not defined
+    (t (cons :object (remove-duplicates
+                      (loop repeat (rnd 5) collect (cons (gen-json-string) (gen-json (1- depth))))
+                      :key #'car :test #'string=)))))
 
 (defun json-mutate (s)
   (let ((v (coerce s 'list)))
@@ -285,11 +288,16 @@ matched by a :known entry, and those that were."
           (1 (when (plusp n) (setf v (subseq v 0 (rnd n)))))
           (t (when (plusp n) (let ((p (rnd n))) (setf v (append (subseq v 0 p) (nthcdr (1+ p) v)))))))))))
 
-(defun check-json-round-trip (v)
+(defun check-json-round-trip (v &key (equal t))
+  "V's text parses, and writes back as the same text. EQUAL also compares the parsed value
+with V (only for generated values: a parsed object may repeat a key)."
   (let ((text (json:to-json-string v)))
     (let ((back (rejecting (json:json-error) (json:parse-json text))))
       (when (eq back :rejected) (fail "writer output does not parse: ~A" (input-text text)))
-      (unless (json:json-equal back v) (fail "round trip differs: ~A" (input-text text))))))
+      (let ((again (json:to-json-string back)))
+        (unless (string= again text) (fail "rewrite differs: ~A" (input-text again))))
+      (when (and equal (not (json:json-equal back v)))
+        (fail "round trip differs: ~A" (input-text text))))))
 
 (deffuzz "json" "SecurityAgent"
   "hostile text and octets: only JSON-ERROR, and whatever parses writes back equal"
@@ -304,17 +312,17 @@ matched by a :known entry, and those that were."
                              (make-list n :initial-element "]}")))))
          (setf *input* s)
          (let ((v (rejecting (json:json-error) (json:parse-json s))))
-           (unless (eq v :rejected) (check-json-round-trip v)))))
+           (unless (eq v :rejected) (check-json-round-trip v :equal nil)))))
     (2 (let ((o (if (chance 1 2)
                     (rbytes (rsize 64))
                     (mutate (string->octets (json:to-json-string (gen-json 2)))))))
          (setf *input* o)
          (let ((v (rejecting (json:json-error) (json:parse-json o))))
-           (unless (eq v :rejected) (check-json-round-trip v)))))
+           (unless (eq v :rejected) (check-json-round-trip v :equal nil)))))
     (t (let ((s (json-mutate (json:to-json-string (gen-json 3)))))
          (setf *input* s)
          (let ((v (rejecting (json:json-error) (json:parse-json s))))
-           (unless (eq v :rejected) (check-json-round-trip v)))))))
+           (unless (eq v :rejected) (check-json-round-trip v :equal nil)))))))
 
 ;;; ABI
 
