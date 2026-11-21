@@ -129,3 +129,8 @@ transactions touched."
   "T7 (TIP-1060): an EVM SSTORE crossing zero pays or mints storage credits on top of 5,100.")
 (defblock-test t7-sstore-storage-credits-2 29152424
   "T7 (TIP-1060): the second early T7 block with storage-credit SSTOREs.")
+
+(defblock-test t3-call-scope-prevalidation 16986086
+  "T3: an access key's call scopes are validated (metered) before the batch runs.")
+(defblock-test create-under-2d-nonce-pays-new-account 18337286
+  "A CREATE batch under a 2D nonce from an account with nonce 0 pays the new-account cost.")
