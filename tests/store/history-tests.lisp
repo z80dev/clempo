@@ -135,3 +135,70 @@
              (check-views h snapshots 0 120)
              (close-history h)))
       (sb-ext:delete-directory dir :recursive t))))
+
+(defun two-block-history (dir)
+  "A history over DIR: genesis and block 1 (slot 9 of address 1 = 111) flushed, block 2
+\(slot 9 = 222) in the tail. Returns (values history db)."
+  (let ((db (genesis-db)) (history (open-history dir)))
+    (history-start-writer history 0 db)
+    (history-record-state history db)
+    (flet ((run-block (n value)
+             (store:db-begin-block db)
+             (store:db-set-storage db 1 9 value)
+             (history-record-block history db (store:db-commit-block db n (block-hash n)))))
+      (run-block 1 111)
+      (history-flush history :db db)
+      (run-block 2 222))
+    (values history db)))
+
+(deftest a-view-keeps-its-blocks-across-a-flush ()
+  ;; A view made while block 2 was in the tail still reads block 2 after the flush moves
+  ;; the tail into a segment the view's probes do not list.
+  (let ((dir (temp-dir)))
+    (unwind-protect
+         (multiple-value-bind (history db) (two-block-history dir)
+           (let ((view (history-state history 2)))
+             (is= 222 (history-storage view 1 9))
+             (history-flush history :db db)
+             (is= 222 (history-storage view 1 9) "after the flush")
+             (is= 222 (history-storage (history-state history 2) 1 9))
+             (close-history history)
+             ;; closing forgets the segments but a view still in use reads its mapped pages
+             (is= 111 (history-storage (history-state-for-test view 1) 1 9))))
+      (sb-ext:delete-directory dir :recursive t))))
+
+(defun history-state-for-test (view n)
+  "A view of VIEW's probes at an earlier block N (the history may be closed)."
+  (clempo.history::%make-history-state (history-state-history view) n
+                                        (clempo.history::history-state-probes view) nil))
+
+(defun segment-paths (dir)
+  (sort (mapcar #'namestring (directory (merge-pathnames "seg-*.hist" dir))) #'string<))
+
+(defun corrupt-file (path fn)
+  (let ((bytes (clempo.io:read-file-octets path)))
+    (funcall fn bytes)
+    (clempo.io:write-file-octets path bytes)))
+
+(deftest damaged-segments-signal-instead-of-reading-outside-the-file ()
+  (let ((dir (temp-dir)))
+    (unwind-protect
+         (multiple-value-bind (history db) (two-block-history dir)
+           (history-flush history :db db)
+           (close-history history)
+           ;; the segment of blocks 1..1: its first record's suffix length runs past the
+           ;; 53-byte key buffer and the page
+           (let ((seg (find-if (lambda (p) (search "-000000000001-000000000001" p)) (segment-paths dir))))
+             (is seg)
+             (corrupt-file seg (lambda (b) (setf (aref b 1) 250)))
+             (let* ((h (open-history dir)) (view (history-state h 1)))
+               (is view)
+               (signals history-file-error (history-storage view 1 9))
+               (signals history-file-error (history-map-changes h 0 1 (lambda (a s) (declare (ignore a s)))))))
+           ;; a footer whose index offset points past the file: the segment does not open
+           (let ((seg (first (segment-paths dir))))
+             (corrupt-file seg (lambda (b)
+                                 (let ((at (+ (- (length b) 72) 8 32)))
+                                   (replace b (integer->octets (expt 2 40) 8) :start1 at))))
+             (signals history-file-error (clempo.history::open-segment seg))))
+      (sb-ext:delete-directory dir :recursive t))))

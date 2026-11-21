@@ -224,8 +224,11 @@ segments when a tier is full. Starts a new tail after it."
         (invariant (= (store:db-number db) (tail-to tail)) "history: checkpoint at ~D for a tail ending at ~D"
                    (store:db-number db) (tail-to tail))
         (store:write-checkpoint db (job-state-path dir job)))
-      (setf (history-tail history) (make-tail (1+ (tail-to tail))))
+      ;; Publish the segment before the tail it replaces goes: a reader always finds each
+      ;; block's versions in the tail, the segment list, or both (HISTORY-STATE's barrier).
       (history-refresh history)
+      (sb-thread:barrier (:write))
+      (setf (history-tail history) (make-tail (1+ (tail-to tail))))
       (merge-tiers history job))
     history))
 
@@ -238,19 +241,23 @@ segments when a tier is full. Starts a new tail after it."
 
 (defun cursor-next (c)
   "Advance to the next record; NIL at the end."
-  (let ((sap (segment-sap (cursor-seg c))) (pos (cursor-pos c)))
-    (declare (type fixnum pos))
-    (when (< pos (cursor-end c))
-      (with-sap-reader (sap pos)
-        (let* ((shared (u8)) (suffix (u8)) (kbuf (cursor-kbuf c)))
+  (let ((sap (segment-sap (cursor-seg c))) (pos (cursor-pos c)) (end (cursor-end c)))
+    (declare (type fixnum pos end))
+    (when (< pos end)
+      (with-sap-reader (sap pos end)
+        (let* ((shared (u8)) (suffix (u8)) (kbuf (cursor-kbuf c)) (klen (+ shared suffix)))
+          (unless (and (<= shared (cursor-klen c)) (or (= klen 21) (= klen 53)))
+            (corrupt-segment "bad key prefix"))
+          (need suffix)
           (dotimes (i suffix) (setf (aref kbuf (+ shared i)) (sb-sys:sap-ref-8 sap (+ pos i))))
           (incf pos suffix)
-          (setf (cursor-klen c) (+ shared suffix)
-                (cursor-key c) (let ((k (octets->integer kbuf :start 1 :end (+ shared suffix))))
-                                 (if (= (+ shared suffix) 53) (logior +slot-tag+ k) k))
+          (setf (cursor-klen c) klen
+                (cursor-key c) (let ((k (octets->integer kbuf :start 1 :end klen)))
+                                 (if (= klen 53) (logior +slot-tag+ k) k))
                 (cursor-first c) (varint)
                 (cursor-count c) (varint))
           (let ((len (varint)))
+            (need len)
             (setf (cursor-body-start c) pos (cursor-body-end c) (+ pos len)
                   (cursor-pos c) (+ pos len)))))
       c)))

@@ -145,49 +145,74 @@ STORAGE-P: it has nonzero storage."
 
 ;;; Byte input from a mapped file
 
-(defmacro with-sap-reader ((sap pos) &body body)
-  "Local readers over SAP at the place POS (a fixnum variable): U8, VARINT, BE, WORD."
-  `(flet ((u8 () (prog1 (sb-sys:sap-ref-8 ,sap ,pos) (incf ,pos)))
-          (varint ()
-            (let ((n 0) (shift 0))
-              (declare (type (unsigned-byte 62) n) (type (integer 0 63) shift))
-              (loop (let ((byte (sb-sys:sap-ref-8 ,sap ,pos)))
-                      (incf ,pos)
-                      (setf n (logior n (the (unsigned-byte 62) (ash (logand byte 127) shift))))
-                      (when (< byte 128) (return n))
-                      (incf shift 7)))))
-          (be (width)
-            (let ((n 0))
-              (dotimes (i width) (setf n (logior (ash n 8) (sb-sys:sap-ref-8 ,sap (+ ,pos i)))))
-              (incf ,pos width)
-              n)))
-     (declare (ignorable #'u8 #'varint #'be))
-     (flet ((word () (be (u8))))
-       (declare (ignorable #'word))
-       ,@body)))
+(defun corrupt-segment (what)
+  (file-error* "corrupt segment: ~A" what))
 
-(defun sap-octets (sap start n)
+(defmacro with-sap-reader ((sap pos limit) &body body)
+  "Local readers over SAP at the place POS (a fixnum variable), never past LIMIT (the end of
+the mapped bytes the caller may read): U8, VARINT, BE, WORD, SKIP. A read past LIMIT, an
+overlong varint or word signals HISTORY-FILE-ERROR, so a damaged file cannot make a lookup
+read outside its mapping (the readers run at the hot policy's safety)."
+  `(flet ((need (n)
+            (declare (type fixnum n))
+            (unless (<= (+ ,pos n) ,limit) (corrupt-segment "read past the end of a region"))))
+     (declare (ignorable #'need))
+     (flet ((u8 () (need 1) (prog1 (sb-sys:sap-ref-8 ,sap ,pos) (incf ,pos)))
+            (varint ()
+              (let ((n 0) (shift 0))
+                (declare (type (unsigned-byte 62) n) (type (integer 0 63) shift))
+                (loop (need 1)
+                      (let ((byte (sb-sys:sap-ref-8 ,sap ,pos)))
+                        (incf ,pos)
+                        (when (> shift 54) (corrupt-segment "overlong varint"))
+                        (setf n (logior n (the (unsigned-byte 62) (ash (logand byte 127) shift))))
+                        (when (< byte 128) (return n))
+                        (incf shift 7)))))
+            (be (width)
+              (declare (type fixnum width))
+              (need width)
+              (let ((n 0))
+                (dotimes (i width) (setf n (logior (ash n 8) (sb-sys:sap-ref-8 ,sap (+ ,pos i)))))
+                (incf ,pos width)
+                n))
+            (skip (n)
+              (declare (type fixnum n))
+              (need n)
+              (incf ,pos n)))
+       (declare (ignorable #'u8 #'varint #'be #'skip))
+       (flet ((word ()
+                (let ((len (u8)))
+                  (when (> len 32) (corrupt-segment "word longer than 32 bytes"))
+                  (be len))))
+         (declare (ignorable #'word))
+         ,@body))))
+
+(defun sap-octets (sap start n limit)
+  (declare (type fixnum start n limit))
+  (unless (<= 0 start (+ start n) limit) (corrupt-segment "read past the end of a region"))
   (let ((o (make-octets n)))
     (dotimes (i n o) (setf (aref o i) (sb-sys:sap-ref-8 sap (+ start i))))))
 
-(defun decode-aver (sap pos)
-  (declare (type fixnum pos))
-  (with-sap-reader (sap pos)
+(defun decode-aver (sap pos limit)
+  (declare (type fixnum pos limit))
+  (with-sap-reader (sap pos limit)
     (let ((flags (u8)))
       (if (logbitp 0 flags)
           (make-aver t (logbitp 1 flags) 0 0 +empty-code-hash+ nil)
           (let* ((nonce (varint)) (balance (word))
-                 (code (if (logbitp 3 flags) (sap-octets sap pos 32) +empty-code-hash+)))
+                 (code (if (logbitp 3 flags) (sap-octets sap pos 32 limit) +empty-code-hash+)))
             (make-aver nil (logbitp 1 flags) nonce balance code (logbitp 2 flags)))))))
 
-(defun skip-aver (sap pos)
-  (declare #.*hot* (type fixnum pos) (type sb-sys:system-area-pointer sap))
-  (with-sap-reader (sap pos)
+(defun skip-aver (sap pos limit)
+  (declare #.*hot* (type fixnum pos limit) (type sb-sys:system-area-pointer sap))
+  (with-sap-reader (sap pos limit)
     (let ((flags (u8)))
       (unless (logbitp 0 flags)
         (varint)
-        (let ((len (u8))) (incf pos len))
-        (when (logbitp 3 flags) (incf pos 32))))
+        (let ((len (u8)))
+          (when (> len 32) (corrupt-segment "word longer than 32 bytes"))
+          (skip len))
+        (when (logbitp 3 flags) (skip 32))))
     pos))
 
 ;;; Segment files
@@ -248,48 +273,76 @@ STORAGE-P: it has nonzero storage."
       (sb-posix:close fd))))
 
 (defun open-segment (path)
+  "Map the segment file PATH and read its footer, index and wipes, checking that every offset
+and count they hold lies inside the file."
   (multiple-value-bind (sap length) (map-file path)
-    (unless (and sap (>= length +footer-size+)) (file-error* "~A: too short" path))
-    (let ((pos (- length +footer-size+)))
-      (declare (type fixnum pos))
-      (flet ((magic-at (p) (octets= (sap-octets sap p 8) +magic+)))
-        (unless (and (magic-at pos) (magic-at (- length 8))) (file-error* "~A: bad footer" path))
-        (incf pos 8)
-        (with-sap-reader (sap pos)
-          (let* ((from (be 8)) (to (be 8)) (full (be 8)) (level (be 8))
-                 (index-offset (be 8)) (wipes-offset (be 8)) (versions (be 8))
-                 (seg (%make-segment :path path :from from :to to :full-p (= full 1) :level level
-                                     :sap sap :length length :index-offset index-offset
-                                     :versions versions)))
+    (unless (and sap (>= length +footer-size+))
+      (when sap (sb-posix:munmap sap length))
+      (file-error* "~A: too short" path))
+    (let ((box (cons sap length)))
+      ;; A segment a refresh drops may still be read by a view: it is unmapped only when
+      ;; nothing refers to it any more (its finalizer), or here if it never opens.
+      (handler-bind ((error (lambda (c) (declare (ignore c)) (unmap-box box))))
+        (let ((seg (read-segment-footer path sap length)))
+          (setf (segment-box seg) box)
+          (sb-ext:finalize seg (lambda () (unmap-box box)) :dont-save t)
+          seg)))))
+
+(defun read-segment-footer (path sap length)
+  (declare (type fixnum length))
+  (let* ((footer (- length +footer-size+))
+         (pos footer))
+    (declare (type fixnum footer pos))
+    (flet ((magic-at (p) (octets= (sap-octets sap p 8 length) +magic+))
+           (bad (what) (file-error* "~A: ~A" path what)))
+      (unless (and (magic-at pos) (magic-at (- length 8))) (bad "bad footer"))
+      (incf pos 8)
+      (with-sap-reader (sap pos length)
+        (let* ((from (be 8)) (to (be 8)) (full (be 8)) (level (be 8))
+               (index-offset (be 8)) (wipes-offset (be 8)) (versions (be 8)))
+          (unless (and (<= index-offset wipes-offset footer) (<= from to) (typep to 'fixnum)
+                       (typep versions 'fixnum) (typep level 'fixnum))
+            (bad "footer offsets outside the file"))
+          (let ((seg (%make-segment :path path :from from :to to :full-p (= full 1) :level level
+                                    :sap sap :length length :index-offset index-offset
+                                    :versions versions)))
             (setf pos index-offset)
-            (let* ((pages (be 8))
-                   (offsets (make-array pages :element-type 'fixnum))
-                   (blocks (make-array pages :element-type 'fixnum))
-                   (keys (make-array pages)))
-              (dotimes (i pages)
-                (setf (aref offsets i) (be 8) (aref blocks i) (be 8))
-                (let ((n (u8)))
-                  (setf (svref keys i) (let ((k (be n))) (if (= n 53) k (ldb (byte 160 0) k))))))
-              (setf (segment-page-offsets seg) offsets (segment-page-blocks seg) blocks
-                    (segment-page-keys seg) keys))
+            (with-sap-reader (sap pos wipes-offset)
+              (let ((pages (be 8)))
+                ;; each index entry takes at least 8 + 8 + 1 + 21 bytes
+                (unless (<= (* pages 38) (- wipes-offset pos)) (bad "page count exceeds the index"))
+                (let ((offsets (make-array pages :element-type 'fixnum))
+                      (blocks (make-array pages :element-type 'fixnum))
+                      (keys (make-array pages))
+                      (prev 0))
+                  (dotimes (i pages)
+                    (let ((offset (be 8)) (block (be 8)) (n (u8)))
+                      (unless (and (<= prev offset) (< offset index-offset) (typep block 'fixnum)
+                                   (or (= n 21) (= n 53)))
+                        (bad "bad page index entry"))
+                      (setf prev offset
+                            (aref offsets i) offset (aref blocks i) block
+                            (svref keys i) (let ((k (be n))) (if (= n 53) k (ldb (byte 160 0) k))))))
+                  (setf (segment-page-offsets seg) offsets (segment-page-blocks seg) blocks
+                        (segment-page-keys seg) keys))))
             (setf pos wipes-offset)
-            (setf (segment-wipes seg) (loop repeat (be 8) collect (let ((a (be 20))) (cons a (be 8)))))
-            (let ((box (cons sap length)))
-              ;; A segment a refresh drops may still be read by a view: unmap it only when
-              ;; nothing refers to it any more, or on CLOSE-HISTORY.
-              (setf (segment-box seg) box)
-              (sb-ext:finalize seg (lambda () (unmap-box box)) :dont-save t))
+            (with-sap-reader (sap pos footer)
+              (let ((count (be 8)))
+                (unless (<= (* count 28) (- footer pos)) (bad "wipe count exceeds the file"))
+                (setf (segment-wipes seg) (loop repeat count collect (let ((a (be 20))) (cons a (be 8)))))))
             seg))))))
 
 (defun unmap-box (box)
+  "Unmap BOX's mapping once: the first caller to clear the address unmaps it (the finalizer
+thread and a closing thread may race here)."
   (let ((sap (car box)))
-    (when sap
-      (setf (car box) nil)
+    (when (and sap (eq sap (sb-ext:compare-and-swap (car box) sap nil)))
       (sb-posix:munmap sap (cdr box)))))
 
 (defun close-segment (seg)
-  (when (segment-box seg) (unmap-box (segment-box seg)))
-  (setf (segment-sap seg) nil))
+  "Unmap SEG now. Only for a segment no view can hold (one a refresh opened and dropped at
+once); a published segment is unmapped by its finalizer."
+  (when (segment-box seg) (unmap-box (segment-box seg))))
 
 ;;; Lookup in a segment
 
@@ -317,25 +370,32 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
   (let ((page (find-page seg key n)))
     (when page
       (let* ((sap (segment-sap seg))
+             (limit (segment-index-offset seg))
              (pos (aref (segment-page-offsets seg) page))
              (end (if (< (1+ page) (length (segment-page-offsets seg)))
                       (aref (segment-page-offsets seg) (1+ page))
-                      (segment-index-offset seg)))
+                      limit))
              (buf (make-octets 53))
+             (klen 0)
              (found nil) (fstart 0) (fend 0) (ffirst 0) (fcount 0))
-        (declare (type fixnum pos end) (type sb-sys:system-area-pointer sap) (dynamic-extent buf))
-        (with-sap-reader (sap pos)
+        (declare (type fixnum pos end limit klen) (type sb-sys:system-area-pointer sap)
+                 (dynamic-extent buf))
+        (with-sap-reader (sap pos limit)
           (loop while (< pos end)
-                do (let* ((shared (u8)) (suffix (u8)) (klen (+ shared suffix)))
+                do (let* ((shared (u8)) (suffix (u8)))
+                     (unless (and (<= shared klen) (<= (+ shared suffix) 53))
+                       (corrupt-segment "bad key prefix"))
+                     (need suffix)
                      (dotimes (i suffix) (setf (aref buf (+ shared i)) (sb-sys:sap-ref-8 sap (+ pos i))))
                      (incf pos suffix)
+                     (setf klen (+ shared suffix))
                      (let* ((first (varint)) (count (varint)) (body-len (varint))
                             (cmp (octets-compare buf klen target tlen)))
                        (cond ((minusp cmp))
                              ((and (zerop cmp) (<= first n))
                               (setf found t fstart pos fend (+ pos body-len) ffirst first fcount count))
                              (t (loop-finish)))
-                       (incf pos body-len)))))
+                       (skip body-len)))))
         (when found (values fstart fend ffirst fcount))))))
 
 (defun octets-compare (a alen b blen)
@@ -347,16 +407,19 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
   (cond ((< alen blen) -1) ((> alen blen) 1) (t 0)))
 
 (defun last-slot-version (sap start end first n)
-  "(values block value) of the last slot version at or before N in a record body."
+  "(values block value) of the last slot version at or before N in a record body that
+SEGMENT-FLOOR bounded to START..END."
   (declare #.*hot* (type fixnum start end first n) (type sb-sys:system-area-pointer sap))
   (let ((pos start) (block first) (vblock first) (vpos start))
     (declare (type fixnum pos block vblock vpos))
-    (with-sap-reader (sap pos)
+    (with-sap-reader (sap pos end)
       (loop while (< pos end)
             do (let ((b (+ block (varint))))
                  (when (> b n) (loop-finish))
                  (setf block b vblock b vpos pos)
-                 (incf pos (1+ (sb-sys:sap-ref-8 sap pos)))))
+                 (let ((len (u8)))
+                   (when (> len 32) (corrupt-segment "word longer than 32 bytes"))
+                   (skip len))))
       (setf pos vpos)
       (values vblock (word)))))
 
@@ -364,13 +427,13 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
   (declare #.*hot* (type fixnum start end first n) (type sb-sys:system-area-pointer sap))
   (let ((pos start) (block first) (vblock first) (vpos start))
     (declare (type fixnum pos block vblock vpos))
-    (with-sap-reader (sap pos)
+    (with-sap-reader (sap pos end)
       (loop while (< pos end)
             do (let ((b (+ block (varint))))
                  (when (> b n) (loop-finish))
                  (setf block b vblock b vpos pos)
-                 (setf pos (skip-aver sap pos)))))
-    (values vblock (decode-aver sap vpos))))
+                 (setf pos (skip-aver sap pos end)))))
+    (values vblock (decode-aver sap vpos end))))
 
 ;;; The tail: versions not yet in a segment. key -> adjustable vector of (block . value),
 ;;; value an integer (slot) or an AVER (account).
@@ -498,8 +561,9 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
     (history-refresh (%make-history dir))))
 
 (defun close-history (history)
+  "Stop writing and forget the segments. Their mappings go with their finalizers once no
+view holds them, so a view still in use never reads an unmapped page."
   (sb-thread:with-mutex ((history-lock history))
-    (mapc #'close-segment (history-segments history))
     (setf (history-segments history) '())
     (when (history-code-out history)
       (close (history-code-out history))
@@ -533,12 +597,14 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
 
 ;;; Views
 
-(defstruct (history-state (:constructor %make-history-state (history number probes tail-p)))
+(defstruct (history-state (:constructor %make-history-state (history number probes tail)))
   "The state after block NUMBER: an execution backend (its backend methods live in the
 executor layer, which may see this one)."
   history (number 0 :type fixnum)
   (probes '() :type list)               ; ((segment . bound) ...) newest first, ending at a full one
-  tail-p)
+  ;; The tail the view reads, captured when it was made: a flush replaces the history's tail
+  ;; with an empty one and leaves this one intact, so the view keeps every version it saw.
+  tail)
 
 (defmethod print-object ((v history-state) stream)
   (print-unreadable-object (v stream :type t)
@@ -550,6 +616,9 @@ executor layer, which may see this one)."
          (tail-p (and tail (<= (tail-from tail) n) (>= (tail-to tail) (tail-from tail))))
          (probes '())
          (reach (if tail-p (1- (tail-from tail)) n)))
+    ;; HISTORY-FLUSH publishes a tail's segment before it replaces the tail: a reader that
+    ;; sees the new tail must also see the segment list holding the old one.
+    (sb-thread:barrier (:read))
     (when (and tail-p (> n (tail-to tail))) (return-from history-state nil))
     ;; Walk back from N through segments that end where the previous probe began.
     (loop for s in (history-segments history)
@@ -557,16 +626,17 @@ executor layer, which may see this one)."
                (push (cons s (min n (segment-to s))) probes)
                (when (segment-full-p s)
                  (return-from history-state
-                   (%make-history-state history n (nreverse probes) tail-p)))
+                   (%make-history-state history n (nreverse probes) (when tail-p tail))))
                (setf reach (1- (segment-from s)))))
     nil))
 
 (defun probe (view key fn-tail fn-seg)
   "The newest version of KEY visible from VIEW: (FN-TAIL entry) for a tail entry or
 (FN-SEG segment start end first count bound) for a segment record; NIL when none."
-  (let ((n (history-state-number view)))
-    (when (history-state-tail-p view)
-      (let ((e (tail-floor (history-tail (history-state-history view)) key n)))
+  (let ((n (history-state-number view))
+        (tail (history-state-tail view)))
+    (when tail
+      (let ((e (tail-floor tail key n)))
         (when e (return-from probe (funcall fn-tail e)))))
     (let* ((target (make-octets 53))
            (tlen (key-into key target)))
@@ -616,9 +686,10 @@ executor layer, which may see this one)."
         (let* ((history (history-state-history view))
                (n (history-state-number view))
                (wipe (let ((w (last-wipe history address n)))
-                       (when (history-state-tail-p view)
-                         (loop for (a . b) in (tail-wipes (history-tail history))
-                               when (and (= a address) (<= b n) (or (null w) (> b w))) do (setf w b)))
+                       (let ((tail (history-state-tail view)))
+                         (when tail
+                           (loop for (a . b) in (tail-wipes tail)
+                                 when (and (= a address) (<= b n) (or (null w) (> b w))) do (setf w b))))
                        w)))
           (if (and wipe (> wipe block)) 0 value)))))
 
@@ -652,31 +723,38 @@ executor layer, which may see this one)."
   (let* ((sap (segment-sap seg))
          (pos (if (plusp (length (segment-page-offsets seg))) (aref (segment-page-offsets seg) 0) 0))
          (end (segment-index-offset seg))
-         (buf (make-octets 53)))
-    (declare (type fixnum pos end) (type sb-sys:system-area-pointer sap))
-    (with-sap-reader (sap pos)
+         (buf (make-octets 53))
+         (klen 0))
+    (declare (type fixnum pos end klen) (type sb-sys:system-area-pointer sap))
+    (with-sap-reader (sap pos end)
       (loop while (< pos end)
-            do (let* ((shared (u8)) (suffix (u8)) (klen (+ shared suffix)))
-                 (declare (type fixnum shared suffix klen))
+            do (let* ((shared (u8)) (suffix (u8)))
+                 (declare (type fixnum shared suffix))
+                 (unless (and (<= shared klen) (<= (+ shared suffix) 53))
+                   (corrupt-segment "bad key prefix"))
+                 (need suffix)
                  (dotimes (i suffix) (setf (aref buf (+ shared i)) (sb-sys:sap-ref-8 sap (+ pos i))))
                  (incf pos suffix)
+                 (setf klen (+ shared suffix))
                  (let* ((first (varint)) (count (varint)) (body-len (varint))
-                        (body-end (+ pos body-len))
+                        (body-end (progn (need body-len) (+ pos body-len)))
                         (hit (cond ((> first to) nil)
                                    ((> first from) t)
                                    ;; walk the versions to the first one after FROM
-                                   (t (let ((p pos) (block first) (slot-p (= klen 53)))
-                                        (declare (type fixnum p block))
-                                        (loop repeat count
-                                              do (setf pos p)
-                                                 (incf block (varint))
-                                                 (when (> block from) (return (<= block to)))
-                                                 (setf p (if slot-p
-                                                             (+ pos 1 (sb-sys:sap-ref-8 sap pos))
-                                                             (skip-aver sap pos)))
-                                                 (setf pos p)))))))
+                                   (t (let ((block first) (slot-p (= klen 53)))
+                                        (declare (type fixnum block))
+                                        (with-sap-reader (sap pos body-end)
+                                          (loop repeat count
+                                                do (incf block (varint))
+                                                   (when (> block from) (return (<= block to)))
+                                                   (if slot-p
+                                                       (let ((len (u8)))
+                                                         (when (> len 32) (corrupt-segment "word longer than 32 bytes"))
+                                                         (skip len))
+                                                       (setf pos (skip-aver sap pos body-end))))))))))
                    (declare (type fixnum first count body-len body-end))
                    (when hit
+                     (when (< klen 21) (corrupt-segment "short key"))
                      (funcall fn (octets->integer buf :start 1 :end 21)
                               (when (= klen 53) (octets->integer buf :start 21 :end 53))))
                    (setf pos body-end)))))))
@@ -720,10 +798,10 @@ a storage wipe in the range."
   "The first blocks of the full segments (the jobs' starting states), ascending."
   (sort (loop for s in (history-segments history) when (segment-full-p s) collect (segment-from s)) #'<))
 
-(defun sample-keys (history n random-state)
-  "N keys drawn from the segments' page indexes (for benchmarks)."
+(defun sample-keys (history n)
+  "N keys drawn with clempo.io's entropy from the segments' page indexes (for benchmarks)."
   (let ((all (coerce (loop for s in (history-segments history) append (coerce (segment-page-keys s) 'list))
                      'simple-vector)))
     (when (plusp (length all))
       (let ((out (make-array n)))
-        (dotimes (i n out) (setf (svref out i) (svref all (random (length all) random-state))))))))
+        (dotimes (i n out) (setf (svref out i) (svref all (clempo.io:random-below (length all)))))))))

@@ -125,7 +125,7 @@
   (let* ((history (clempo.history:open-history (history-dir-arg args)))
          (n (arg-int args :n 100000))
          (rng (sb-ext:seed-random-state 42))
-         (keys (clempo.history::sample-keys history 4096 rng))
+         (keys (clempo.history::sample-keys history 4096))
          (ranges (clempo.history:history-ranges history))
          (hits 0))
     (when (or (null keys) (null ranges)) (format t "empty history~%") (return-from command 1))
