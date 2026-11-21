@@ -26,4 +26,5 @@
                (:file "authorizations-tests")
                (:file "lanes-tests")
                (:file "system-calls-tests")
-               (:file "mainnet-blocks-tests")))
+               (:file "mainnet-blocks-tests")
+               (:file "call-tests")))
