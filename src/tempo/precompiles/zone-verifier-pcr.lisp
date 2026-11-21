@@ -25,10 +25,21 @@
               bytes))
           (coerce values 'list)))
 
+(defun pcr-whitespace-p (character)
+  ;; Rust str::trim uses the Unicode White_Space property.
+  (let ((code (char-code character)))
+    (or (<= 9 code 13) (<= #x2000 code #x200a)
+        (member code '(32 #x85 #xa0 #x1680 #x2028 #x2029 #x202f #x205f #x3000)))))
+
+(defun pcr-trim (value)
+  (let ((start (position-if-not #'pcr-whitespace-p value)))
+    (if start
+        (subseq value start (1+ (position-if-not #'pcr-whitespace-p value :from-end t)))
+        "")))
+
 (defun pcr-split (value separator)
   (loop with start = 0 for end = (position separator value :start start)
-        collect (string-trim '(#\Space #\Tab #\Newline #\Return #\Page)
-                             (subseq value start end))
+        collect (pcr-trim (subseq value start end))
         while end do (setf start (1+ end))))
 
 (defun parse-pcr-policy (value)
@@ -37,8 +48,7 @@
     (dolist (entry (pcr-split value #\;))
       (unless (zerop (length entry))
         (let* ((equals (position #\= entry))
-               (name (when equals (string-trim '(#\Space #\Tab #\Newline #\Return #\Page)
-                                               (subseq entry 0 equals))))
+               (name (when equals (pcr-trim (subseq entry 0 equals))))
                (fork (if equals
                          (or (find name +forks+ :test #'string-equal :key #'symbol-name)
                              (error 'pcr-policy-error :reason :invalid-hardfork :value name))

@@ -206,7 +206,7 @@
       (with-storage ((make-hashmap-storage :static t))
         (multiple-value-bind (status output gas) (call-precompile +zone-verifier-address+ input 0)
           (is (eq status :success)) (is= 0 (octets->integer output))
-          (is= (* 30 (ceiling (length input) 32)) gas)))))
+          (is= (* 30 (ceiling (length input) 32)) gas))))))
 
 (deftest zone-verifier-pcr-policy ()
   (with-spec (:t12) (is (null (clempo.zone-verifier:approved-pcrs))))
