@@ -23,13 +23,21 @@
                      (svref batches workers)))
           (coerce out 'list)))))
 
+(defun call-with-recovery-scratch (function)
+  "Call FUNCTION with this thread's own signature arenas; they are never shared."
+  (let ((clempo.secp256k1:*recovery-scratch* (clempo.secp256k1:make-recovery-scratch))
+        (clempo.p256:*p256-scratch* (clempo.p256:make-p256-scratch)))
+    (funcall function)))
+
 (defun call-with-recovered-senders (function threads)
-  (clempo.node.workers:call-with-workers
-   (lambda (mapper)
-     (if mapper
-         (let ((batches (make-array (1+ threads))))
-           (dotimes (n (1+ threads))
-             (setf (svref batches n) (loop for i below n collect i)))
-           (funcall function (lambda (block) (recover-senders block mapper batches threads))))
-         (funcall function nil)))
-   :threads threads :name "transaction sender"))
+  (call-with-recovery-scratch
+   (lambda ()
+     (clempo.node.workers:call-with-workers
+      (lambda (mapper)
+        (if mapper
+            (let ((batches (make-array (1+ threads))))
+              (dotimes (n (1+ threads))
+                (setf (svref batches n) (loop for i below n collect i)))
+              (funcall function (lambda (block) (recover-senders block mapper batches threads))))
+            (funcall function nil)))
+      :threads threads :name "transaction sender" :worker-context #'call-with-recovery-scratch))))

@@ -141,11 +141,14 @@
   (force-output *error-output*))
 
 (defun follow-with-root-workers (threads follower &rest options)
-  (workers:call-with-workers
-   (lambda (mapper)
-     (trie:call-with-trie-hashing (lambda () (apply #'follow:follow-live follower options))
-                                  :parallel-map mapper))
-   :threads threads :name "trie subtree hash"))
+  ;; The follow thread recovers senders; RPC threads keep the fresh-arena fallback.
+  (let ((clempo.secp256k1:*recovery-scratch* (clempo.secp256k1:make-recovery-scratch))
+        (clempo.p256:*p256-scratch* (clempo.p256:make-p256-scratch)))
+    (workers:call-with-workers
+     (lambda (mapper)
+       (trie:call-with-trie-hashing (lambda () (apply #'follow:follow-live follower options))
+                                    :parallel-map mapper))
+     :threads threads :name "trie subtree hash")))
 
 (defun start-history-writer (node)
   "Append followed blocks to the backend's history when it ends exactly at the stored head;
