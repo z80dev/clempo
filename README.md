@@ -70,7 +70,7 @@ From the same forms, `bin/clempo-dev spec` writes `spec/`: every precompile's sl
 
 ## Quick start
 
-Requirements: [SBCL](https://www.sbcl.org) 2.6.8 (`brew install sbcl`), `curl`, `git`. Developed and measured on macOS on Apple Silicon. The arm64 assembly paths have portable fallbacks, but Linux and x86-64 have not been run end to end.
+Requirements: [SBCL](https://www.sbcl.org) 2.6.8 (`brew install sbcl` on macOS), `curl`, `git`. The gate passes on macOS on Apple Silicon and on Linux x86-64. On Linux we also verified mainnet and Moderato genesis, all 61,903 execution-spec-tests v5.4.0 state cases, and mainnet replay from genesis through block 1,000,000 with every state root checked. See [FRONTIER.md](FRONTIER.md#evidence) for commands and timings.
 
 ```sh
 git clone <this repository> clempo && cd clempo
@@ -115,7 +115,7 @@ base io crypto codec trie types store state evm tempo consensus p2p sync rpc sim
 - **Deviations from the reference** are numbered in [docs/DEVIATIONS.md](docs/DEVIATIONS.md). Examples: TLS goes through `curl`, and EVM memory past 4 GiB is treated as out of gas.
 - **Constant time.** Secret-key operations (signing, ECDH) are not hardened against timing or cache side channels.
 - **Not for production use.** Treat clempo as an independent implementation for testing and research. It has not been audited, and it has never run as a mainnet validator.
-- **One platform measured.** All results are from one Apple Silicon machine.
+- **Linux coverage is limited.** The full mainnet replay, live following, mixed-validator devnet, and Rust speed comparisons were run on Apple Silicon, not on Linux.
 
 ## How it was built
 

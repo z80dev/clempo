@@ -17,6 +17,24 @@ Paths under `logs/` are the measuring host's local run logs and result files; th
 
 ## Evidence
 
+**Linux x86-64** (`498155e`, Arch Linux, AMD Ryzen 7 9700X): the cold strict
+`scripts/verify.sh` gate passes with SBCL 2.6.8 built from the official source
+with `--fancy`; no source changes were needed. With `CLEMPO_BUILD=release`,
+`bin/clempo-dev genesis` and `genesis -chain moderato` computed the state roots;
+`bin/clempo-dev score -rung R2 -json` matched both roots and block hashes
+against public RPC. Using `fixtures_develop.tar.gz` from execution-spec-tests
+v5.4.0, `bin/clempo-dev statetest "$FIXTURES/state_tests/" -threads 4` passed
+61,903/61,903 in 10.3 s; `bin/clempo-dev score -rung R3e -threads 4 -json`
+confirmed the same score with the fixtures in the default cache.
+With archive chunks 0–100 in `~/cache/clempo/mainnet/` and a fresh datadir,
+`bin/clempo-dev replay -to 1000000 -datadir "$D" -result "$RESULT" -sender-threads 4`
+matched gas used, receipts root, logs bloom and state root at every block
+from 1 to 1,000,000, with no heals or skips: 9.12 s replay time (109,621
+blocks/s), 9.44 s command wall time. The release microbenchmarks below
+measured **417 MB/s** for Keccak-256 on 64 MiB (0.161 s wall) and **62.396 µs
+CPU / 62.452 µs wall** per ecrecover with caller-owned output and scratch
+([command](docs/BENCH.md#native-curve-kernels)). These use the portable crypto paths.
+
 R6 sim (b680aaf): `CLEMPO_BUILD=release bin/clempo-dev score -rung R6 -json` (or
 `bin/clempo-dev sim -scenario r6-4`) runs src/sim/scenarios.lisp: clempo.simplex voters
 (commonware 2026.10.1 voter, Random V1 elector) and one clempo.dkg manager per node, driven
