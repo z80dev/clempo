@@ -152,7 +152,7 @@ error paths of methods whose success needs a transaction pool.")
 (defrpc "admin_removeTrustedPeer" ((node any-node)) "accepted" :true)
 
 (dolist (name '("admin_peerEvents" "reth_subscribeChainNotifications" "reth_subscribePersistedBlock"
-                "eth_subscribe" "eth_unsubscribe"))
+                "reth_unsubscribeChainNotifications" "eth_subscribe" "eth_unsubscribe"))
   (setf (gethash name *methods*)
         (clempo.rpc::make-rpc-method :name name :doc "a subscription: HTTP callers get Internal error"
                                      :function (lambda (src) (declare (ignore src)) (internal-error)))))
