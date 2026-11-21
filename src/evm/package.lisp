@@ -20,7 +20,7 @@ Context lives in special variables: *WORLD* *SPEC* *BLOCK* *TX-ENV* *TRACER*.")
    #:*world* #:*spec* #:*block* #:*tx-env* #:*tracer*
    ;; tracing
    #:trace-tx-start #:trace-tx-end #:trace-call-start #:trace-call-end #:trace-step
-   #:trace-step-end #:trace-log #:trace-selfdestruct
+   #:trace-step-end #:trace-log #:trace-selfdestruct #:trace-unstarted
    ;; opcodes
    #:defop #:op-info #:op-info-name #:op-info-opcode #:op-info-gas #:op-info-since #:ops-since
    ;; frames and execution

@@ -89,8 +89,8 @@ one empty CALL frame."
   (when (plusp (state:code-size evm:*world* 0))
     (fail-tx 'unsupported-transaction index "system call into code at the zero address"))
   (when evm:*tracer*
-    (evm::trace-unstarted :call 0 0 0 0 (tx:transaction-input tx) state:+empty-code+
-                          +system-call-gas-limit+ 0 :stop +system-call-gas-limit+))
+    (evm:trace-unstarted :call 0 0 0 0 (tx:transaction-input tx) state:+empty-code+
+                         +system-call-gas-limit+ 0 :stop +system-call-gas-limit+))
   (make-tx-outcome t 0 0 '()))
 
 ;;; Pre- and post-execution system changes
