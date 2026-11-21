@@ -21,6 +21,20 @@
       (error "Unsafe specification filename for ~S" symbol))
     stem))
 
+(defstruct (spec-address (:constructor spec-address (value)))
+  "An address inside a printed fork-site form: prints as 0x and 40 hex digits."
+  value)
+
+(defmethod print-object ((a spec-address) stream)
+  (format stream "0x~(~40,'0x~)" (spec-address-value a)))
+
+(defun spec-hex-addresses (form)
+  "FORM with every integer wider than 32 bits (the addresses fork sites name) as a 0x
+address; small integers (form paths, versions) stay decimal."
+  (cond ((and (integerp form) (< 32 (integer-length form) 161)) (spec-address form))
+        ((consp form) (cons (spec-hex-addresses (car form)) (spec-hex-addresses (cdr form))))
+        (t form)))
+
 (defun spec-fork-site-markdown (site)
   (with-output-to-string (out)
     (format out "- Source: [~A](../../~A)~%- Top-level form: ~D (1-based)~%- Nested form path: `~S`~%- Definition: `~S`~%- Kind: `~S`~%- Relation: `~S`~%- Where: `~S`~%"
@@ -28,10 +42,10 @@
             (clempo.forks:fork-site-file site)
             (clempo.forks:fork-site-form-number site)
             (clempo.forks:fork-site-form-path site)
-            (clempo.forks:fork-site-definition site)
+            (spec-hex-addresses (clempo.forks:fork-site-definition site))
             (clempo.forks:fork-site-kind site)
             (clempo.forks:fork-site-relation site)
-            (clempo.forks:fork-site-where site))
+            (spec-hex-addresses (clempo.forks:fork-site-where site)))
     (when (clempo.forks:fork-site-doc site)
       (format out "~%~A~%" (clempo.forks:fork-site-doc site)))))
 

@@ -68,11 +68,7 @@ schedule Tempo layers over Osaka (crates/hardfork: constants.rs, gas_params.rs).
 (macrolet ((def-compare (name op)
              `(progn
                 (declaim (inline ,name))
-                (defun ,name (a b) (,op (fork-index a) (fork-index b)))
-                (define-compiler-macro ,name (&whole w a b)
-                  (if (keywordp b)
-                      `(,',op (fork-index ,a) ,(fork-index b))
-                      w)))))
+                (defun ,name (a b) (,op (fork-index a) (fork-index b))))))
   (def-compare fork>= >=)
   (def-compare fork> >)
   (def-compare fork< <)
@@ -82,14 +78,13 @@ schedule Tempo layers over Osaka (crates/hardfork: constants.rs, gas_params.rs).
   "The hardfork rules in force. Rebound per block by the executor, per case by tests.")
 (declaim (type fork *spec*))
 
-(defmacro spec>= (fork) `(fork>= *spec* ,fork))
-(defmacro spec< (fork) `(fork< *spec* ,fork))
-
 (defmacro with-spec ((fork) &body body)
   `(let ((*spec* ,fork)) ,@body))
 
-;;; Fork sites. Every FORK-IF and every :since field or call records where it is, so
-;;; (fork-sites :t8) lists what T8 changed.
+;;; Fork sites. Every gate records where it is, so (fork-sites :t8) lists what T8 changed:
+;;; FORK-IF branches, :since/:until fields and calls, precompile activations, and every raw
+;;; comparison of a fork against a literal fork (FORK>=, FORK>, FORK<, FORK<=, SPEC>=, SPEC<,
+;;; SINCE, UNTIL), whose compiler macros register the call site at load time.
 
 (defstruct (fork-site (:constructor make-fork-site
                           (fork kind where doc file form-number form-path definition relation)))
@@ -130,6 +125,7 @@ schedule Tempo layers over Osaka (crates/hardfork: constants.rs, gas_params.rs).
                         (< fa fb)
                         (string< (fork-site-sort-key a) (fork-site-sort-key b))))))))
 
+(eval-when (:compile-toplevel :load-toplevel :execute)
 (defvar *fork-site-context* nil
   "Names the definition a FORK-IF sits in when no lexical context does.")
 
@@ -188,21 +184,58 @@ shadowing Common Lisp definition operators or adding runtime instrumentation."
           :form-number (and top (1+ top)) :form-path path
           :definition (or definition (site-context env) enclosing) :relation relation)))
 
+(defun fork-gate (op fork)
+  "The fork a comparison (OP *spec* FORK) gates on and its relation, or NIL when it gates
+nothing (strictly after the last fork)."
+  (let ((next (second (member fork +forks+))))
+    (ecase op
+      (>= (values fork :since))
+      (< (values fork :before))
+      (> (when next (values next :since)))
+      (<= (when next (values next :before))))))
+
+(defun recorded-comparison (op a fork env)
+  "(OP (fork-index A) index-of-FORK), registering the site of the gate it is at load time."
+  (check-type fork fork)
+  (let ((test `(,op (fork-index ,a) ,(fork-index fork))))
+    (multiple-value-bind (gate relation) (fork-gate op fork)
+      (if gate
+          (let ((source (fork-source-position env nil relation)))
+            `(progn
+               (load-time-value
+                (record-fork-site ,gate :branch ',(getf source :definition) nil ',source) t)
+               ,test))
+          test)))))
+
+(macrolet ((def-recording (name op)
+             `(define-compiler-macro ,name (&whole w a b &environment env)
+                (if (keywordp b) (recorded-comparison ',op a b env) w))))
+  (def-recording fork>= >=)
+  (def-recording fork> >)
+  (def-recording fork< <)
+  (def-recording fork<= <=))
+
+(defmacro spec>= (fork &environment env)
+  (if (keywordp fork) (recorded-comparison '>= '*spec* fork env) `(fork>= *spec* ,fork)))
+(defmacro spec< (fork &environment env)
+  (if (keywordp fork) (recorded-comparison '< '*spec* fork env) `(fork< *spec* ,fork)))
+(defmacro since (fork &environment env)
+  (if (keywordp fork) (recorded-comparison '>= '*spec* fork env) `(fork>= *spec* ,fork)))
+(defmacro until (fork &environment env)
+  (if (keywordp fork) (recorded-comparison '< '*spec* fork env) `(fork< *spec* ,fork)))
+
 (defmacro fork-if ((relation fork &key doc) then &optional (else nil else-p) &environment env)
   "Run THEN when the active fork satisfies RELATION (:since or :before) FORK, else ELSE.
 Every branch records its original source position and enclosing definition at load time."
   (check-type fork fork)
   (let* ((source (fork-source-position env nil relation))
          (test (ecase relation
-                 (:since `(fork>= *spec* ,fork))
-                 (:before `(fork< *spec* ,fork)))))
+                 (:since `(>= (fork-index *spec*) ,(fork-index fork)))
+                 (:before `(< (fork-index *spec*) ,(fork-index fork))))))
     `(progn
        (load-time-value
         (record-fork-site ,fork :branch ',(getf source :definition) ,doc ',source) t)
        (if ,test ,then ,@(when else-p (list else))))))
-
-(defmacro since (fork) `(fork>= *spec* ,fork))
-(defmacro until (fork) `(fork< *spec* ,fork))
 
 ;;; Constants (crates/hardfork/src/constants.rs, evm2 interpreter/gas.rs).
 

@@ -8,7 +8,7 @@
 - Definition: `clempo.dex:stablecoin-dex`
 - Kind: `:precompile`
 - Relation: `:since`
-- Where: `(clempo.dex:stablecoin-dex 1271677694201010254022932798779500166517027241984)`
+- Where: `(clempo.dex:stablecoin-dex 0xdec0000000000000000000000000000000000000)`
 
 ## Site 2
 
@@ -18,7 +18,7 @@
 - Definition: `clempo.fee-manager:fee-manager`
 - Kind: `:precompile`
 - Relation: `:since`
-- Where: `(clempo.fee-manager:fee-manager 1455346631656108466216620974473032071880281948160)`
+- Where: `(clempo.fee-manager:fee-manager 0xfeec000000000000000000000000000000000000)`
 
 ## Site 3
 
@@ -28,7 +28,7 @@
 - Definition: `clempo.keychain:account-keychain`
 - Kind: `:precompile`
 - Relation: `:since`
-- Where: `(clempo.keychain:account-keychain 974334424660413700855164246168605608149442887680)`
+- Where: `(clempo.keychain:account-keychain 0xaaaaaaaa00000000000000000000000000000000)`
 
 ## Site 4
 
@@ -38,7 +38,7 @@
 - Definition: `clempo.nonce:nonce-manager`
 - Kind: `:precompile`
 - Relation: `:since`
-- Where: `(clempo.nonce:nonce-manager 447069856643881394829641228152404285745849696256)`
+- Where: `(clempo.nonce:nonce-manager 0x4e4f4e4345000000000000000000000000000000)`
 
 ## Site 5
 
@@ -48,7 +48,7 @@
 - Definition: `clempo.tip20-factory:tip20-factory`
 - Kind: `:precompile`
 - Relation: `:since`
-- Where: `(clempo.tip20-factory:tip20-factory 188307492456392581807127605094242764556498632704)`
+- Where: `(clempo.tip20-factory:tip20-factory 0x20fc000000000000000000000000000000000000)`
 
 ## Site 6
 
@@ -58,7 +58,7 @@
 - Definition: `clempo.tip403:tip403-registry`
 - Kind: `:precompile`
 - Relation: `:since`
-- Where: `(clempo.tip403:tip403-registry 366713454044637566939413351275429656604341960704)`
+- Where: `(clempo.tip403:tip403-registry 0x403c000000000000000000000000000000000000)`
 
 ## Site 7
 
@@ -68,7 +68,7 @@
 - Definition: `clempo.validator-config-v2:validator-config-v2`
 - Kind: `:precompile`
 - Relation: `:since`
-- Where: `(clempo.validator-config-v2:validator-config-v2 1169201309592496441026197095402326729779331465217)`
+- Where: `(clempo.validator-config-v2:validator-config-v2 0xcccccccc00000000000000000000000000000001)`
 
 ## Site 8
 
@@ -78,5 +78,5 @@
 - Definition: `clempo.validator-config:validator-config`
 - Kind: `:precompile`
 - Relation: `:since`
-- Where: `(clempo.validator-config:validator-config 1169201309592496441026197095402326729779331465216)`
+- Where: `(clempo.validator-config:validator-config 0xcccccccc00000000000000000000000000000000)`
 

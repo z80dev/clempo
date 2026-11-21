@@ -179,3 +179,16 @@
                               :key (lambda (call) (clempo.json:jget call "signature")))))))
         (setf (gethash selector calls) entry))
       (is= before (output-content (clempo.dev::spec-outputs) path)))))
+
+(deftest spec-prints-addresses-as-hex ()
+  (is (string= "(0xaacc000000000000000000000000000000000000 3 \"x\")"
+               (format nil "~S" (clempo.dev::spec-hex-addresses
+                                 (list #xAACC000000000000000000000000000000000000 3 "x")))))
+  ;; Every generated fork page names addresses in hex, never as long decimal integers.
+  (let ((outputs (clempo.dev::spec-outputs)))
+    (dolist (entry outputs)
+      (when (search "forks/" (car entry))
+        (is (not (search "configurable-account 9" (cdr entry))))))
+    (is (search "0xaacc000000000000000000000000000000000000" (output-content outputs "forks/t14.md")))
+    ;; T1B's executor gates are listed (the page once read "No recorded source sites").
+    (is (search "src/tempo/executor/aa.lisp" (output-content outputs "forks/t1b.md")))))

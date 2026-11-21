@@ -102,3 +102,21 @@
     (record-fork-site :t8 :branch 'fixture-function "new documentation" source)
     (is= 1 (length (fork-sites :t8)))
     (is= "new documentation" (fork-site-doc (first (fork-sites :t8))))))
+
+;;; Raw comparisons against a literal fork register their sites like FORK-IF.
+(defun raw-gates (fork)
+  (list (spec>= :t9) (spec< :t9) (since :t9) (until :t9)
+        (fork>= fork :t9) (fork< fork :t9) (fork> fork :t8) (fork<= fork :t8)))
+
+(deftest raw-comparisons-record-their-sites ()
+  (with-spec (:t9) (is (equal '(t nil t nil t nil t nil) (raw-gates :t9))))
+  (with-spec (:t8) (is (equal '(nil t nil t nil t nil t) (raw-gates :t8))))
+  (let ((sites (remove 'raw-gates (fork-sites :t9) :key #'fork-site-definition :test-not #'eq)))
+    ;; FORK> :t8 gates on T9 :since, FORK<= :t8 on T9 :before.
+    (is= 8 (length sites))
+    (is= 4 (count :since sites :key #'fork-site-relation))
+    (is= 4 (count :before sites :key #'fork-site-relation))
+    (is (every (lambda (s) (equal "tests/tempo/forks/forks-tests.lisp" (fork-site-file s))) sites))
+    (is= 8 (length (remove-duplicates (mapcar #'fork-site-form-path sites) :test #'equal))))
+  ;; A comparison after the last fork gates nothing and records nothing.
+  (is (not (fork> :t15 :t15))))

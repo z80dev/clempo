@@ -95,17 +95,17 @@ one empty CALL frame."
 
 ;;; Pre- and post-execution system changes
 
-(defparameter *fork-markers*
-  '((:t2 . #xCCCCCCCC00000000000000000000000000000001)  ; ValidatorConfigV2
-    (:t3 . #x5165300000000000000000000000000000000000)  ; SignatureVerifier
-    (:t3 . #xFDC0000000000000000000000000000000000000)  ; AddressRegistry
-    (:t5 . #x4D50500000000000000000000000000000000000)  ; TIP20ChannelReserve
-    (:t6 . #xB10C000000000000000000000000000000000000)  ; ReceivePolicyGuard
-    (:t7 . #x1060000000000000000000000000000000000000)  ; StorageCredits
-    (:t8 . #xC077E00000000000000000000000000000000000)  ; CurrentCommittee
-    (:t14 . #xAACC000000000000000000000000000000000000)); ConfigurableAccount
+(defun fork-marker-addresses (spec)
   "block.rs apply_pre_execution_changes: precompiles that receive the 0xEF marker code when
-their fork is active (once; an account that already has code is left alone).")
+their fork is active (once; an account that already has code is left alone)."
+  (append (when (forks:fork>= spec :t2) '(#xCCCCCCCC00000000000000000000000000000001)) ; ValidatorConfigV2
+          (when (forks:fork>= spec :t3) '(#x5165300000000000000000000000000000000000   ; SignatureVerifier
+                                          #xFDC0000000000000000000000000000000000000)) ; AddressRegistry
+          (when (forks:fork>= spec :t5) '(#x4D50500000000000000000000000000000000000)) ; TIP20ChannelReserve
+          (when (forks:fork>= spec :t6) '(#xB10C000000000000000000000000000000000000)) ; ReceivePolicyGuard
+          (when (forks:fork>= spec :t7) '(#x1060000000000000000000000000000000000000)) ; StorageCredits
+          (when (forks:fork>= spec :t8) '(#xC077E00000000000000000000000000000000000)) ; CurrentCommittee
+          (when (forks:fork>= spec :t14) '(#xAACC000000000000000000000000000000000000)))) ; ConfigurableAccount
 
 (defun deploy-marker (db address)
   "block.rs deploy_precompile_at_boundary with no storage."
@@ -115,11 +115,10 @@ their fork is active (once; an account that already has code is left alone).")
                             (store:db-put-code db (octets-of #xef))))))
 
 (defun apply-pre-execution-changes (db env block)
-  (let ((spec (block-env-spec env)))
-    (when (and block (blocks:block-withdrawals block))
-      (fail-tx 'invalid-transaction nil "withdrawals are not permitted"))
-    (dolist (m *fork-markers*)
-      (when (forks:fork>= spec (car m)) (deploy-marker db (cdr m))))))
+  (when (and block (blocks:block-withdrawals block))
+    (fail-tx 'invalid-transaction nil "withdrawals are not permitted"))
+  (dolist (address (fork-marker-addresses (block-env-spec env)))
+    (deploy-marker db address)))
 
 (defmacro untracked ((world) &body body)
   "Run BODY with WORLD's observer off: evm2's account_info_untracked / storage_slot_untracked,
@@ -133,11 +132,10 @@ so)."
 
 (defun deploy-markers-in-world (world env)
   "APPLY-PRE-EXECUTION-CHANGES's markers written into WORLD (an overlay block: no database)."
-  (let ((spec (block-env-spec env)))
-    (dolist (m *fork-markers*)
-      (when (and (forks:fork>= spec (car m)) (zerop (untracked (world) (state:code-size world (cdr m)))))
-        (state:set-code world (cdr m) (octets-of #xef))))
-    (state:finalize-tx world)))
+  (dolist (address (fork-marker-addresses (block-env-spec env)))
+    (when (zerop (untracked (world) (state:code-size world address)))
+      (state:set-code world address (octets-of #xef))))
+  (state:finalize-tx world))
 
 ;;; The block
 
