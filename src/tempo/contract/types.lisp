@@ -11,7 +11,8 @@
   name
   fields                          ; vector of SFIELD
   (slots 1 :type fixnum)
-  constructor)                    ; function of the field values in order
+  constructor                     ; function of the field values in order
+  (field-memo '()))               ; name -> (slot stype packed-offset), see RESOLVE-FIELD
 
 (defstruct (sfield (:constructor make-sfield (name spec slot offset reader)))
   name spec slot offset reader
@@ -595,22 +596,32 @@ and an SSTORE."
                                   (vec-packed-p elem))))
       (:vec (vec-element place key)))))
 
+(defun resolve-field (layout name)
+  "(slot stype packed-offset) of field NAME in LAYOUT, memoized on the layout by NAME."
+  (let ((hit (assoc name (struct-layout-field-memo layout) :test #'eq)))
+    (if hit
+        (cdr hit)
+        (let* ((all (struct-layout-fields layout))
+               (f (or (find name all :key #'sfield-name :test #'string=)
+                      (error "~S has no field ~S" (struct-layout-name layout) name)))
+               (fst (sfield-stype f))
+               (fields (direct-fields layout))
+               (idx (position f fields))
+               (shares (and idx
+                            (or (and (> idx 0) (= (sfield-slot (aref fields (1- idx))) (sfield-slot f)))
+                                (and (< (1+ idx) (length fields))
+                                     (= (sfield-slot (aref fields (1+ idx))) (sfield-slot f))))))
+               (entry (list (sfield-slot f) fst (and shares (stype-packable fst) (sfield-offset f)))))
+          ;; readers on other threads see the old list or the new one, both complete
+          (setf (struct-layout-field-memo layout)
+                (acons name entry (struct-layout-field-memo layout)))
+          entry))))
+
 (defun field (place name)
   "The place of field NAME of the struct at PLACE."
-  (let* ((st (place-type place))
-         (layout (or (stype-struct st) (error "~S is not a struct place" place)))
-         (all (struct-layout-fields layout))
-         (f (or (find name all :key #'sfield-name :test #'string=)
-                (error "~S has no field ~S" (struct-layout-name layout) name)))
-         (fst (sfield-stype f))
-         (fields (direct-fields layout))
-         (idx (position f fields))
-         (shares (and idx
-                      (or (and (> idx 0) (= (sfield-slot (aref fields (1- idx))) (sfield-slot f)))
-                          (and (< (1+ idx) (length fields))
-                               (= (sfield-slot (aref fields (1+ idx))) (sfield-slot f)))))))
-    (make-place (place-address place) (slot+ (place-slot place) (sfield-slot f)) fst
-                (and shares (stype-packable fst) (sfield-offset f)))))
+  (let ((layout (or (stype-struct (place-type place)) (error "~S is not a struct place" place))))
+    (destructuring-bind (slot fst offset) (resolve-field layout name)
+      (make-place (place-address place) (slot+ (place-slot place) slot) fst offset))))
 
 (defun vec-length (place)
   "VecHandler::len: one SLOAD."

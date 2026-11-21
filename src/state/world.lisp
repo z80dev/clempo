@@ -48,7 +48,8 @@
   ;; mostly hit one contract, and its address is a bignum, costly to hash.
   (last-account nil :type (or null account))
   (last-slots-address nil)
-  (last-slots nil :type (or null hash-table)))
+  (last-slots nil :type (or null hash-table))
+  (last-warm-address -1))               ; -1: no address
 
 (defun make-world (backend)
   "A world state over BACKEND, empty of changes."
@@ -324,16 +325,23 @@ as (observer account slot original): every storage read and write goes through h
 ;;; Access lists (EIP-2929)
 
 (defun address-warm-p (world address)
-  (values (gethash address (world-warm-addresses world))))
+  (or (eql address (world-last-warm-address world))
+      (values (gethash address (world-warm-addresses world)))))
 
 (defun warm-address (world address)
   "Mark ADDRESS warm. Returns T when it already was."
   (declare #.*hot*)
-  (let ((table (world-warm-addresses world)))
-    (or (gethash address table)
-        (progn (setf (gethash address table) t)
-               (journal world (lambda () (remhash address table)))
-               nil))))
+  (if (eql address (world-last-warm-address world))
+      t
+      (let ((table (world-warm-addresses world)))
+        (prog1 (or (gethash address table)
+                   (progn (setf (gethash address table) t)
+                          (journal world (lambda ()
+                                           (remhash address table)
+                                           (when (eql address (world-last-warm-address world))
+                                             (setf (world-last-warm-address world) -1))))
+                          nil))
+          (setf (world-last-warm-address world) address)))))
 
 (defun warm-slots-of (world address create)
   "ADDRESS's table of warm slots (made when CREATE), or NIL."
@@ -410,7 +418,8 @@ unless SKIP-COLD, when it stays cold and SKIPPED-P is true."
         (world-logs world) '()
         (world-tx-accounts world) '()
         (world-last-slots-address world) nil
-        (world-last-slots world) nil)
+        (world-last-slots world) nil
+        (world-last-warm-address world) -1)
   (clrhash (world-warm-addresses world))
   (clrhash (world-warm-slots world))
   (clrhash (world-transient world)))
