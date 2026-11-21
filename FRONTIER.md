@@ -103,3 +103,13 @@ from 593,425,824 to 393,454,144 bytes (**33.7% less**, about 6.15 KB/block).
 R1 remains 640/640 mainnet and 33/33 moderato. The shared body verifier also
 checks ommer hashes and withdrawal presence/roots; sender-scoped transaction
 identifiers hash the signing envelope plus the sender for pool replay checks.
+
+R4 upstream RPC path (partial, `e1fbffd`):
+`CLEMPO_RPC=http://127.0.0.1:8545 bin/clempo-dev follow -last 1000 -seconds 20 -no-archive -json`
+linked and checked 1,038 blocks through height 50,059,685, with zero lag
+against each polled tip after catch-up. A release run of
+`bin/clempo-dev follow -last 21000 -once -batch 500 -archive DIR -json`
+against the same upstream verified 21,000 blocks (11,401 transactions)
+in 1.312 s and wrote two complete 10,000-block chunks. These runs checked
+canonical linkage and transaction, ommer, and withdrawal roots; they did
+not execute blocks or check finalization.
