@@ -62,5 +62,5 @@ Warnings and undefined functions fail the strict build. Style warnings other tha
 ## Working in parallel
 
 - One directory, one agent. Shared files (`layers.sexp`, `FRONTIER.*`, `README.md`, `docs/DEVIATIONS.md`) take small edits; on rebase conflicts keep both sides.
-- Clone `~/clempo.git` into `~/clempo-wt/<role>`, commit small verified slices, then `git pull --rebase origin main && scripts/verify.sh && git push origin main`. Unpushed work dies with the agent.
+- Clone `~/clempo.git` into `~/clempo-wt/<role>`, commit small verified slices, then `git pull --rebase origin main && scripts/verify.sh && git push origin main`. If origin moved during the gate and the rebase is clean, push without re-gating, then run the gate on what you pushed and fix forward at once if it fails. Unpushed work dies with the agent.
 - Ask the owner of another directory for an interface instead of editing their code.
