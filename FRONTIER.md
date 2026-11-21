@@ -61,6 +61,13 @@ both nodes at the same block: 17/17 identical results or error code and message,
 mapping the commitment-mismatch error. R3p stays 4,986/4,992 (SignatureVerifier 318/318)
 with the verifier on clempo.signatures' configurable-signature code.
 
+Zero fee recipient (2026-11-21): on a fresh T15 devnet (`--base-port 25000`, `start
+--clempo 3`), a0 (the V2 owner) set slot 3's fee recipient to the zero address at block 61.
+Every block slot 3 proposed after that, 46 by head 237, has miner `0x0`, and the Rust
+validators finalized all of them (finalized = head = 237 on all three Rust nodes). The
+clempo builder now takes any recorded recipient, zero included, as lib.rs
+maybe_override_fee_recipient does. Test: `zero-fee-recipient-overrides-suggested-beneficiary`.
+
 R6 sim (b680aaf): `CLEMPO_BUILD=release bin/clempo-dev score -rung R6 -json` (or
 `bin/clempo-dev sim -scenario r6-4`) runs src/sim/scenarios.lisp: clempo.simplex voters
 (commonware 2026.10.1 voter, Random V1 elector) and one clempo.dkg manager per node, driven

@@ -43,7 +43,7 @@ every Tempo chain clempo.chainspec knows.")
                       target-gas-limit)))
   "What consensus asks the builder for. TIMESTAMP is in seconds and TIMESTAMP-MILLIS-PART
 (0..999) its sub-second milliseconds. SUGGESTED-FEE-RECIPIENT is the beneficiary unless
-PROPOSER-PUBLIC-KEY (32 octets) resolves to a non-zero fee recipient in ValidatorConfigV2.
+PROPOSER-PUBLIC-KEY (32 octets) has a ValidatorConfigV2 record: then its fee recipient, zero included.
 EXTRA-DATA carries the DKG dealer log or the encoded DKG outcome exactly as consensus encodes
 them. TARGET-GAS-LIMIT, when given, is the desired gas limit (bounded by the parent's)."
   (timestamp 0 :type (unsigned-byte 64))
@@ -116,10 +116,12 @@ plus or minus (parent / 1024) - 1."
                                 :proposer (when context
                                             (headers:consensus-context-proposer context)))))
       ;; lib.rs maybe_override_fee_recipient: resolved before execution, outside any block.
+      ;; Any recorded recipient wins, the zero address included: T14+ executors reject a
+      ;; beneficiary that differs from it.
       (let ((key (payload-attributes-proposer-public-key attributes)))
         (when key
           (let ((recipient (ex:proposer-fee-recipient db (env) key)))
-            (when (and recipient (plusp recipient))
+            (when recipient
               (setf (next-beneficiary plan) recipient)))))
       (setf (next-env plan) (env)))
     plan))

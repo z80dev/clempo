@@ -343,3 +343,39 @@ no gas, no logs) is appended. Returns the BUILT-PAYLOAD."
              (is (not (clempo.builder::fee-balance-insufficient-p
                        db decreased p tx (clempo.builder::fallback-fee-tokens :t13)))))
         (store:db-revert-block db)))))
+
+;;; lib.rs maybe_override_fee_recipient: a proposer with a ValidatorConfigV2 record gets its
+;;; fee recipient as the beneficiary even when that is the zero address (T14 executors reject
+;;; any other). On the T15 devnet fixture (tests/tempo/executor/data/t15-devnet-*), after
+;;; block 10 with the proposer's recorded recipient zeroed.
+
+(deftest zero-fee-recipient-overrides-suggested-beneficiary ()
+  (let* ((dir (asdf:system-relative-pathname "clempo-tempo-builder" "../../../tests/tempo/executor/data/"))
+         (chain (clempo.chainspec:load-chainspec (merge-pathnames "t15-devnet-genesis.json" dir)))
+         (ex:*chain* chain)
+         (blocks (with-input-from-string (in (clempo.io:read-file-string
+                                              (merge-pathnames "t15-devnet-blocks.txt" dir)))
+                   (loop for line = (read-line in nil) while line
+                         unless (string= line "") collect (blocks:decode-block (hex->octets line)))))
+         (db (ex:genesis-db :chain chain)))
+    (loop for block in (subseq blocks 0 10) for n from 1
+          do (ex:execute-block db block :chain chain)
+             (store:db-commit-block db n (blocks:block-hash block)))
+    (let* ((next (blocks:block-header (nth 10 blocks)))
+           (key (headers:consensus-context-proposer (headers:header-consensus-context next)))
+           (parent (blocks:block-header (nth 9 blocks)))
+           (attributes (make-payload-attributes
+                        :timestamp (1+ (headers:header-timestamp parent))
+                        :suggested-fee-recipient #x1234 :proposer-public-key key
+                        :consensus-context (headers:header-consensus-context next)))
+           (vc2 clempo.precompiles:+validator-config-v2-address+)
+           (index (store:db-storage db vc2 (octets->integer
+                                            (clempo.keccak:keccak256-concat key (integer->octets 3 32)))))
+           (slot (+ (octets->integer (clempo.keccak:keccak256 (integer->octets 1 32)))
+                    (* 6 (1- index)) 4)))
+      (is (plusp index))
+      (is (plusp (ldb (byte 160 0) (store:db-storage db vc2 slot))) "devnet recipients are set")
+      (store:db-begin-block db)
+      (store:db-set-storage db vc2 slot (logandc2 (store:db-storage db vc2 slot) (1- (ash 1 160))))
+      (store:db-commit-block db 10 (blocks:block-hash (nth 9 blocks)))
+      (is= 0 (ex:block-env-beneficiary (next-block-env db parent attributes :chain chain))))))
