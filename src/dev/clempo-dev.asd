@@ -3,7 +3,8 @@
 
 (defsystem "clempo-dev"
   :description "clempo-dev measurement and development commands"
-  :depends-on ("clempo-base" "clempo-io" "clempo-codec" "clempo-sync")
+  :depends-on ("clempo-base" "clempo-io" "clempo-crypto" "clempo-codec" "clempo-types" "clempo-trie"
+               "clempo-state" "clempo-evm" "clempo-tempo" "clempo-sync")
   :serial t
   :components #.(let* ((here (make-pathname :name nil :type nil :defaults *load-truename*))
                        (names (sort (mapcar #'pathname-name (directory (merge-pathnames "*.lisp" here)))
