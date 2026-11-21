@@ -244,12 +244,17 @@ quantity."
 ;;; Proofs: the store's proof readers over the committed tries. An archive backend's head
 ;;; state is a flat history view; its tries come from clempo.rpc.tries.
 
-(defun trie-state-at (id)
-  "STATE-AT for the methods that read tries (proofs, storage roots): a state database."
+(defun call-with-trie-state-at (id fn)
+  "Call FN with a state database with tries after block ID: the backend's own, the head's
+tries, or the backend's trie cursor moved to an earlier block (checked against its header's
+state root) and held for the call."
   (multiple-value-bind (state n) (state-at id)
-    (if (or (typep state 'store:statedb) (/= n chain:*head*))
-        state
-        (clempo.rpc.tries:head-trie-state))))
+    (cond ((typep state 'store:statedb) (funcall fn state))
+          ((= n chain:*head*) (funcall fn (clempo.rpc.tries:head-trie-state)))
+          (t (clempo.rpc.tries:call-with-trie-state n fn)))))
+
+(defmacro with-trie-state-at ((db id) &body body)
+  `(call-with-trie-state-at ,id (lambda (,db) ,@body)))
 
 (defun proof-db (state)
   (if (typep state 'store:statedb)
@@ -310,11 +315,12 @@ quantity."
 
 (defrpc "eth_getAccount" ((address address) (block block-id)) "nonce, balance, storage root and code hash"
   (ensure-within-proof-window block)
-  (multiple-value-bind (exists nonce balance code-hash storage-root) (account-fields (trie-state-at block) address)
-    (if exists
-        (json:jobject "nonce" (q nonce) "balance" (q balance)
-                      "storageRoot" (hex32 storage-root) "codeHash" (hex32 code-hash))
-        :null)))
+  (with-trie-state-at (db block)
+    (multiple-value-bind (exists nonce balance code-hash storage-root) (account-fields db address)
+      (if exists
+          (json:jobject "nonce" (q nonce) "balance" (q balance)
+                        "storageRoot" (hex32 storage-root) "codeHash" (hex32 code-hash))
+          :null))))
 
 (defrpc "eth_getAccountInfo" ((address address) (block block-id)) "balance, nonce and code"
   (let ((db (state-at block)))
@@ -327,7 +333,7 @@ quantity."
   (when (> (length keys) +max-proof-slots+)
     (rpc-fail +invalid-params+ (format nil "storage key count ~D exceeds limit ~D" (length keys) +max-proof-slots+)))
   (ensure-within-proof-window block)
-  (proof-json (trie-state-at block) address keys))
+  (with-trie-state-at (db block) (proof-json db address keys)))
 
 (defrpc "eth_getMultiProof" ((targets proof-targets) (block block-id :optional t))
   "EIP-1186 proofs for several accounts"
@@ -340,7 +346,7 @@ quantity."
   ;; No targets: the answer is empty whatever the state holds.
   (if (null targets)
       (progn (state-block block) #())
-      (let ((db (trie-state-at block)))
+      (with-trie-state-at (db block)
         (map 'simple-vector
              (lambda (target)
                (proof-json db (car target)

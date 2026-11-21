@@ -78,12 +78,13 @@ eth_capabilities answer recorded at the reference's head, compared at clempo's."
       (walk want))))
 
 (defun case-category (c)
-  "How case C is graded: \"value\" (the recorded answer, compared exactly), \"shape\" (it
-follows the head or the moment: same keys, types and error code), \"node\" (it depends on
-the reference node itself: compared by shape, never counted toward R5), or
+  "How case C is graded: \"value\" (the recorded answer compared exactly, or a \"verified\"
+proof checked against the reference's recorded root and values), \"shape\" (it follows the
+head or the moment: same keys, types and error code), \"node\" (it depends on the
+reference node itself: compared by shape, never counted toward R5), or
 \"reference-timeout\"."
   (let ((class (case-compare-class c)))
-    (cond ((string= class "stable") "value")
+    (cond ((member class '("stable" "verified") :test #'string=) "value")
           ((string= class "node") "node")
           ((string= class "reference-timeout") class)
           (t "shape"))))
@@ -190,19 +191,36 @@ compare with. A \"headRelative\" case is value-checked after HEAD-RELATIVE."
 (defun unsafe-probe-p (method)
   (member method *probe-unsafe* :test #'string=))
 
+(defun verified-case-p (c) (equal "verified" (clempo.json:jget c "class")))
+
 (defun run-rpcdiff (url server cases &key (threads 16))
-  "Replay CASES. Mutating requests are only sent to the server rpcdiff owns."
-  (parallel-map
-   (lambda (c)
-     (multiple-value-bind (status response)
-         (cond ((and (not server) (unsafe-probe-p (clempo.json:jget c "method")))
-                (values nil "mutation not sent to external URL"))
-               ((equal "ws" (clempo.json:jget c "transport"))
-                (handler-case (replay-ws-case url server c)
-                  (error (e) (values nil (princ-to-string e)))))
-               (t (post-raw url (clempo.json:jget c "request") :retries 0)))
-       (list c status response (case-matches c status response))))
-   cases threads))
+  "Replay CASES. Mutating requests are only sent to the server rpcdiff owns. Verified proof
+cases run last, against the owned server with its proof window opened (the reference's
+window is 0; an external URL keeps its own and fails them)."
+  (append
+   (parallel-map
+    (lambda (c)
+      (multiple-value-bind (status response)
+          (cond ((and (not server) (unsafe-probe-p (clempo.json:jget c "method")))
+                 (values nil "mutation not sent to external URL"))
+                ((equal "ws" (clempo.json:jget c "transport"))
+                 (handler-case (replay-ws-case url server c)
+                   (error (e) (values nil (princ-to-string e)))))
+                (t (post-raw url (clempo.json:jget c "request") :retries 0)))
+        (list c status response (case-matches c status response))))
+    (remove-if #'verified-case-p cases) threads)
+   (let ((verified (remove-if-not #'verified-case-p cases))
+         (window clempo.rpc.state:*eth-proof-window*))
+     (unwind-protect
+          (progn
+            (when server (setf clempo.rpc.state:*eth-proof-window* most-positive-fixnum))
+            (parallel-map (lambda (c)
+                            (multiple-value-bind (status response ok)
+                                (handler-case (replay-verified-case url c)
+                                  (error (e) (values nil (princ-to-string e) nil)))
+                              (list c status response ok)))
+                          verified 2))
+       (setf clempo.rpc.state:*eth-proof-window* window)))))
 
 (defun served-reference-methods (url server)
   "(values served missing) among the reference's method names, on their native transport."
