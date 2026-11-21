@@ -46,6 +46,40 @@ order, and never edit a checkout while a run is using it (`bin/clempo-dev`
 recompiles changed files at startup). Never run two benchmarks at once on the
 shared host.
 
+### Native curve kernels
+
+`217b0c1` measured **28.467858 s replay wall / 61.244520 s CPU**,
+**1,106.487 Mgas/s**, 1.999 GB peak RSS on Busy, with eight recovery participants.
+The result is complete, with every block checked:
+`~/scratch/clempo/busy/20261121-085152-217b0c1-1/replay.json`.
+It used the commands above with parent
+`~/scratch/clempo/busy/parent-9889999`. This single observation versus the older
+127.429-s run includes other replay changes; it does not isolate crypto.
+
+The isolated, alternating A/B pairs use baseline `d3aace8` and its `53adb01`
+application of `217b0c1`: mean CPU **79.373 -> 57.751 s (27.2% less)**,
+wall **24.760 -> 24.627 s**, essentially unchanged because the replay thread
+is now critical. All four results completed the same Busy fixture. JSON and
+logs are under `~/scratch/clempo/busy/es/*A-d3aa*` and `*B-curves*`.
+
+For the native kernel microbench:
+
+```sh
+CLEMPO_BUILD=release sbcl --dynamic-space-size 2048 --non-interactive \
+  --load scripts/build.lisp \
+  --eval '(asdf:load-system "clempo-crypto-ec/tests")' \
+  --load tests/crypto/ec/secp256k1/speed.lisp
+```
+
+The GC-safe release build measures ecrecover **45.094 µs CPU / 45.097 µs wall**
+and **zero bytes consed** with caller-owned output/scratch; P256 verifies in
+**152.765 µs CPU**, zero consing with scratch. With persistent scratch, fresh
+pubkey results allocate 80 bytes; direct `ecrecover-address` returns one 32-byte address
+bignum. Bind `clempo.secp256k1:*recovery-scratch*` and
+`clempo.p256:*p256-scratch*` separately per worker, never globally share them.
+The 25-µs recovery target remains unmet. See
+[arithmetic, GC safety, exact timings and allocation-counter rounding](../tests/crypto/ec/secp256k1/performance.md).
+
 ## Rust reference
 
 Use a detached datadir (a clone of a stopped archive node, or extract the immutable download). Never unwind or import against the live reference node:

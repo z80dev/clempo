@@ -81,7 +81,7 @@ SBCL 2.6.8, Darwin ARM64, 8 GiB heap. Initial arena cutover measurements:
 |---|---:|---:|---:|
 | Previous ecrecover, 10,000 calls | 94.147 us | 172.906 us | 288,148 |
 | Arena ecrecover, supplied output/scratch, 20,000 calls | 73.008 us | 90.324 us | 0 |
-| Arena ecrecover, fresh pubkey, 10,000 calls | 73.346 us | 98.483 us | about 80 |
+| Arena ecrecover, fresh pubkey/bound scratch, 10,000 calls | 73.346 us | 98.483 us | about 80 |
 | Previous P256, 1,000 calls | 307.102 us | 379.740 us | 648,362 |
 | P256 verification, supplied scratch, 2,000 calls | 182.005 us | not recorded | 0 |
 | Dependent Fp multiplication, 1,000,000 calls | 20.914 ns | 20.883 ns | 0 |
@@ -94,7 +94,7 @@ benchmark slot was released:
 |---|---:|---:|---:|
 | ecrecover, supplied output/scratch, 20,000 calls | 45.094 us | 45.097 us | 0 |
 | ecrecover-address, supplied scratch, 20,000 calls | 44.992 us | 45.001 us | 29.5 |
-| ecrecover, fresh pubkey, 10,000 calls | 44.960 us | 44.991 us | 78.6 |
+| ecrecover, fresh pubkey/bound scratch, 10,000 calls | 44.960 us | 44.991 us | 78.6 |
 | P256 verification, supplied scratch, 2,000 calls | 152.765 us | not recorded | 0 |
 | Dependent Fp multiplication, 1,000,000 calls | 13.570 ns | 13.553 ns | 0 |
 
@@ -142,6 +142,15 @@ unchanged (24.760 s versus 24.627 s). The replay thread, rather than concurrent
 sender recovery, is now the wall-time critical path. These pairs isolate the
 kernel patch; comparisons against the older 127.4-s Busy baseline also include
 other agents' replay/pipeline changes and must not be attributed solely to crypto.
+
+The standalone `217b0c1` Busy run using the standard runner with only its
+checkout root changed completed in **28.467858 s replay wall / 61.244520 s CPU**,
+1,106.487 Mgas/s, 1.999 GB peak RSS. Its result is
+`~/scratch/clempo/busy/20261121-085152-217b0c1-1/replay.json`; it completed the
+same 20,000 blocks, 659,246 transactions and 31,499,321,696 gas. The wrapper's
+39.64-s process wall time also includes release compilation and initialization,
+which are outside the replay interval. This is not an isolated comparison
+against either the earlier 127.429-s baseline or the newer pipelined pairs.
 
 ## Regression coverage
 

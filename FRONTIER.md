@@ -108,6 +108,7 @@ transactions and 31,499,321,696 gas).
 |---|---:|---:|---:|---:|
 | `648e0a5` serial `bench` | 201.729 | 195.935 | 156.146 | 1.563 |
 | `3d99e1b` persistent 8-participant `bench` | 127.429 | 145.884 | 247.191 | 1.612 |
+| `217b0c1` guarded native recovery, 8 participants | 28.468 | 61.245 | 1106.487 | 1.999 |
 
 See [commands](docs/BENCH.md). These are single observations under active
 development workloads, not a paired comparison or an R7 score. An interim
@@ -117,6 +118,17 @@ The separate CPU profile (`92ec1f3`, 23,706 samples including worker
 threads) attributes **55.7%** inclusive to secp256k1 recovery, **5.5%** to
 state-root update, **3.2%** to trie hashing, **0.5%** to block decoding and
 **0.4%** to EVM bytecode execution. Inclusive costs overlap.
+
+Native curves (`217b0c1`): ecrecover fell from **94.147 to 45.094 µs CPU**
+and 288 KB to **zero bytes consed** with caller-owned output/scratch.
+Direct address recovery takes 44.992 µs and allocates only its 32-byte result;
+P256 verification fell from 307.102 to **152.765 µs CPU**, 648 KB to zero
+with supplied scratch. The 25-µs recovery target is not attained. The separate
+28.468-s Busy observation above is
+`~/scratch/clempo/busy/20261121-085152-217b0c1-1/replay.json`, complete through
+9,909,999. Its improvement over 127.429 s includes other replay changes;
+the paired kernel-only CPU comparison is below. See
+[commands and allocation contracts](docs/BENCH.md#native-curve-kernels).
 
 Busy replay-thread work (paired, alternating, root-checked on all 20,000 blocks,
 `~/scratch/clempo/busy/es/`). Original `e55a532` vs `d3aace8 + 217b0c1` (= pushed
