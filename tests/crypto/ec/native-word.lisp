@@ -26,7 +26,7 @@
     (labels ((next-word ()
                (setf state (ldb (byte 64 0) (logxor state (ash state 13)))
                      state (logxor state (ash state -7))
-                     state (ldb (byte 64 0) (logxor state (ash state 17)))))
+                     state (ldb (byte 64 0) (logxor state (ash state 17))))))
       (let ((words (append '(0 1 #xffffffff #x100000000 #x7fffffffffffffff
                              #x8000000000000000 #xfffffffffffffffe #xffffffffffffffff)
                            (loop repeat 24 collect (next-word)))))
