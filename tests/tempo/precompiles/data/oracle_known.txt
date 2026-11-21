@@ -123,18 +123,6 @@ channel/open/T11
 channel/open/T12
 channel/open/T13
 channel/open/T14
-channel/open-no-context/T11
-channel/open-no-context/T12
-channel/open-no-context/T13
-channel/open-no-context/T14
-channel/open-zero-deposit/T11
-channel/open-zero-deposit/T12
-channel/open-zero-deposit/T13
-channel/open-zero-deposit/T14
-channel/open-exists/T11
-channel/open-exists/T12
-channel/open-exists/T13
-channel/open-exists/T14
 channel/open-too-much/T11
 channel/open-too-much/T12
 channel/open-too-much/T13
@@ -142,7 +130,6 @@ channel/open-too-much/T14
 channel/open-retired-payer/T11
 channel/open-retired-payer/T12
 channel/open-retired-payer/T13
-channel/open-retired-payer/T14
 channel/open-signer/T11
 channel/open-signer/T12
 channel/open-signer/T13
@@ -150,7 +137,6 @@ channel/open-signer/T14
 channel/open-retired-signer/T11
 channel/open-retired-signer/T12
 channel/open-retired-signer/T13
-channel/open-retired-signer/T14
 channel/open-retired-payer-active-signer/T11
 channel/open-retired-payer-active-signer/T12
 channel/open-retired-payer-active-signer/T13
@@ -1422,10 +1408,6 @@ T7-7/reserve/open-three-credits/T6
 T7-7/reserve/open-three-credits/T7
 T7-7/reserve/open-credits-not-backed/T6
 T7-7/reserve/open-credits-not-backed/T7
-T7-7/reserve/open-exists/T6
-T7-7/reserve/open-exists/T7
-T7-7/reserve/open-no-context/T6
-T7-7/reserve/open-no-context/T7
 T7-7/reserve/close-credits-payer/T6
 T7-7/reserve/close-credits-payer/T7
 T7-7/reserve/close-payer-has-credits/T6

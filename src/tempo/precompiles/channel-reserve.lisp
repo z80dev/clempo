@@ -155,6 +155,7 @@
                   (credit-channel-storage-slots payer (max 0 (- current spent)))))))))))
 
 (defun open-channel (sender payee operator token deposit salt authorized-signer)
+  (declare (notinline clempo.tip20:recipient-target))
   (when (or (zerop payee) (tip20-address-p payee)
             (and (= (ldb (byte 80 48) payee) #xfdfdfdfdfdfdfdfdfdfd)
                  (or (zerop operator)
@@ -191,6 +192,7 @@
       id)))
 
 (defun settle-channel (sender descriptor cumulative signature)
+  (declare (notinline clempo.tip20:recipient-target))
   (let* ((id (channel-id descriptor))
          (state (load-existing-state id)))
     (ensure-payee-or-operator sender descriptor)
@@ -216,6 +218,7 @@
       (emit +channel-reserve-address+ 'settled id payer payee cumulative delta cumulative))))
 
 (defun top-up-channel (sender descriptor additional)
+  (declare (notinline clempo.tip20:recipient-target))
   (let* ((id (channel-id descriptor)) (state (load-existing-state id))
          (had-close (/= 0 (packed-channel-state-close-requested-at state)))
          (payer (first descriptor)) (payee (second descriptor)))
@@ -254,6 +257,7 @@
           (ldb (byte 64 0) (+ (min u64-max (block-timestamp)) +close-grace-period+)))))
 
 (defun close-channel (sender descriptor cumulative capture signature)
+  (declare (notinline clempo.tip20:recipient-target))
   (let* ((id (channel-id descriptor)) (state (load-existing-state id))
          (previous (packed-channel-state-settled state))
          (payer (first descriptor)) (payee (second descriptor)))
