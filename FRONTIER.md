@@ -7,7 +7,7 @@
 | R2 Genesis | yes: matching state roots and block hashes on mainnet and Moderato | `ec20b6b` | 2026-11-21 |
 | R3 Replay | 3,210 (every block 1..3210 matches gas, receipts root, bloom, state root; stops at 3211, the first user transaction, until the EVM lands) | `b74f4d8` | 2026-11-21 |
 | R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `750c66b` | 2026-11-21 |
-| R3p Precompiles | - | | |
+| R3p Precompiles | 2,884/4,992 (validator config v1/v2 + committee, keychain, signature verifier, configurable account, nonce complete; TIP-20, TIP-403, fee manager, DEX, channel, zone landing) | `15d04a0` | 2026-11-21 |
 | R4 Follow | - | | |
 | R5 RPC | 109/132 methods, 5,426/8,221 cases; 107/156 reference methods served (blocks 3,890/3,890, logs 366/366, envelope 50/50, static 106/119; state, calls and traces wait on the executor) | rpc slice 4 | 2026-11-21 |
 | R6 Validator | sim yes: 4, 5 and 7 seeded validators with faults, 3 epochs each with a successful reshare, every chain certified by the mainnet verifier (devnet with Rust validators: -) | `cb8ae2e` | 2026-11-21 |
