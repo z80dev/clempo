@@ -262,27 +262,40 @@ invalid type, anything else an invalid type against EXPECTED."
               (t (serde-fail-here src "invalid value: integer `~D`, expected ~A" n expected))))
       (invalid-type src expected)))
 
+(defconstant +recursion-limit+ 128 "serde_json's remaining_depth: nested arrays and objects it buffers.")
+
 (defun skip-value (src &optional numbers)
   "Consume the next value. With NUMBERS, numbers are converted as serde_json does when it
 buffers a value (a Value or a flattened struct's Content), so one beyond the double range
-fails where it ends; without, they are only scanned (serde's IgnoredAny)."
-  (ecase (peek-kind src)
-    (:string (read-string src))
-    (:number (if numbers (read-number src) (skip-number src)))
-    (:true (read-literal src "true"))
-    (:false (read-literal src "false"))
-    (:null (read-literal src "null"))
-    (:object (advance src 1)
-     (unless (eql (peek src) #\})
-       (loop (read-string src) (peek src) (advance src 1) (skip-value src numbers)
-             (if (eql (peek src) #\,) (advance src 1) (return))))
-     (peek src) (advance src 1))
-    (:array (advance src 1)
-     (unless (eql (peek src) #\])
-       (loop (skip-value src numbers) (if (eql (peek src) #\,) (advance src 1) (return))))
-     (peek src) (advance src 1))
-    (:eof (eof-error src))
-    (:invalid (serde-fail-here src "expected value"))))
+fails where it ends, and nesting deeper than +RECURSION-LIMIT+ fails as serde_json's
+recursion limit does; without, they are only scanned and nesting is unbounded (serde's
+IgnoredAny). Iterative: no input exhausts the control stack."
+  (prog ((stack '()) (depth 0))          ; closers (#\] or #\}) of the open containers
+   value
+     (ecase (peek-kind src)
+       (:string (read-string src))
+       (:number (if numbers (read-number src) (skip-number src)))
+       (:true (read-literal src "true"))
+       (:false (read-literal src "false"))
+       (:null (read-literal src "null"))
+       ((:object :array)
+        (let ((closer (if (eq (peek-kind src) :object) #\} #\])))
+          (advance src 1)
+          (when (and numbers (>= (incf depth) +recursion-limit+))
+            (serde-fail-here src "recursion limit exceeded"))
+          (push closer stack)
+          (unless (eql (peek src) closer)
+            (when (eql closer #\}) (read-string src) (peek src) (advance src 1))
+            (go value))))
+       (:eof (eof-error src))
+       (:invalid (serde-fail-here src "expected value")))
+   after                                ; a value ended: next element, or close
+     (when (null stack) (return))
+     (cond ((eql (peek src) #\,)
+            (advance src 1)
+            (when (eql (first stack) #\}) (read-string src) (peek src) (advance src 1))
+            (go value))
+           (t (peek src) (advance src 1) (pop stack) (decf depth) (go after)))))
 
 (defun read-raw-value (src &optional numbers)
   "The raw text of the next value (NUMBERS as for SKIP-VALUE)."

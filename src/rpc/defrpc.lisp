@@ -194,7 +194,17 @@ notification."
                                                               (peek seq)))))))))
                    (cond (notification nil)
                          (err (response-string id-raw :error err))
-                         (t (response-string id-raw :result result)))))))))))
+                         (t (capped-response id-raw (response-string id-raw :result result))))))))))))
+
+(defparameter *response-max* (* 160 1024 1024)
+  "Largest response, as reth's default --rpc.max-response-size (160 MiB) caps it.")
+
+(defun response-too-big (id-raw)
+  (error-response id-raw -32008 "Response is too big"
+                  (format nil "Exceeded max limit of ~D" *response-max*)))
+
+(defun capped-response (id-raw response)
+  (if (> (length response) *response-max*) (response-too-big id-raw) response))
 
 (defun value-spans (text start end)
   "Start and end positions of each element of the array in TEXT[START,END)."
@@ -226,6 +236,7 @@ notification."
                                        (handle-request-object text s e)
                                        (error-response nil +invalid-request+ "Invalid request"))
                            when r collect r)))
-               (values 200 (if responses
-                               (format nil "[~{~A~^,~}]" responses)
-                               "null"))))))))
+               (values 200 (cond ((null responses) "null")
+                                 ((> (reduce #'+ responses :key #'length) *response-max*)
+                                  (response-too-big nil))
+                                 (t (format nil "[~{~A~^,~}]" responses))))))))))

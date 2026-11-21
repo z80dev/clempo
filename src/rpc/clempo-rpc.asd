@@ -42,4 +42,5 @@
                (:file "bal-tests")
                (:file "misc-tests")
                (:file "aa-request-tests")
-               (:file "pool-tests")))
+               (:file "pool-tests")
+               (:file "server-tests")))

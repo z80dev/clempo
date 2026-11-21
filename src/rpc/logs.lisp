@@ -224,7 +224,7 @@ or a list (possibly empty)."
              (coerce (append (mapcar (lambda (b) (q (or (cblock-base-fee b) 0))) blocks)
                              ;; reth asks the chain spec at the newest header's own timestamp
                              (list (q (clempo.chainspec:next-block-base-fee
-                                       (cblock-timestamp last) :mainnet (cblock-base-fee last)
+                                       (cblock-timestamp last) (chain:backend-chain chain:*backend*) (cblock-base-fee last)
                                        (clempo.headers:ethereum-header-gas-used (cblock-inner last))))))
                      'simple-vector)
              "gasUsedRatio" (map 'simple-vector
@@ -248,9 +248,22 @@ or a list (possibly empty)."
 
 ;;; Installed filters (eth_newFilter and friends), kept in the server process.
 
-(defstruct installed kind filter last-block)
+(defstruct installed kind filter last-block last-poll)
 
-(defvar *filters* (make-hash-table :test 'equal :synchronized t) "filter id -> installed")
+(defvar *filters* (make-hash-table :test 'equal) "filter id -> installed, under *FILTERS-LOCK*")
+(defvar *filters-lock* (sb-thread:make-mutex :name "installed filters"))
+
+(defparameter *stale-filter-seconds* 300
+  "reth DEFAULT_STALE_FILTER_TTL: a filter not polled for this long is removed.")
+
+(defun evict-stale-filters (now)
+  "Remove every filter whose last poll (or install) is *STALE-FILTER-SECONDS* old, as reth's
+clear_stale_filters does; called with *FILTERS-LOCK* held."
+  (let ((ttl (* 1000 *stale-filter-seconds*)))
+    (loop for id being the hash-keys of *filters* using (hash-value it)
+          when (>= (- now (installed-last-poll it)) ttl)
+            collect id into stale
+          finally (mapc (lambda (id) (remhash id *filters*)) stale))))
 
 (defparam filter-id (src) "reth FilterId: untagged Num(u64) or Str(String)"
   ;; an untagged enum buffers the value first (numbers converted), then tries each variant
@@ -260,28 +273,41 @@ or a list (possibly empty)."
           (t (serde:serde-fail "data did not match any variant of untagged enum FilterId")))))
 
 (defun install (kind &optional filter)
-  (let ((id (format nil "0x~(~32,'0x~)" (octets->integer (clempo.io:random-octets 16)))))
-    (setf (gethash id *filters*) (make-installed :kind kind :filter filter :last-block chain:*head*))
+  (let ((id (format nil "0x~(~32,'0x~)" (octets->integer (clempo.io:random-octets 16))))
+        (now (clempo.io:now-ms)))
+    (sb-thread:with-mutex (*filters-lock*)
+      (evict-stale-filters now)
+      (setf (gethash id *filters*)
+            (make-installed :kind kind :filter filter :last-block chain:*head* :last-poll now)))
     id))
 
-(defun installed-or-fail (id)
-  (or (gethash id *filters*) (rpc-fail -32000 "filter not found")))
+(defun poll-filter (id &optional advance-to)
+  "Filter ID as polled now: (values installed previous-last-block). ADVANCE-TO moves its last
+block, atomically, so concurrent polls never answer the same blocks twice."
+  (let ((now (clempo.io:now-ms)))
+    (sb-thread:with-mutex (*filters-lock*)
+      (evict-stale-filters now)
+      (let ((it (or (gethash id *filters*) (rpc-fail -32000 "filter not found"))))
+        (setf (installed-last-poll it) now)
+        (values it (prog1 (installed-last-block it)
+                     (when advance-to (setf (installed-last-block it) advance-to))))))))
 
 (defrpc "eth_newFilter" ((f filter)) "install a log filter" (install :logs f))
 (defrpc "eth_newBlockFilter" () "install a new-block filter" (install :blocks))
 (defrpc "eth_newPendingTransactionFilter" () "install a pending-transaction filter" (install :pending))
 (defrpc "eth_uninstallFilter" ((id filter-id)) "remove a filter"
-  (if (remhash id *filters*) :true :false))
+  (if (sb-thread:with-mutex (*filters-lock*) (remhash id *filters*)) :true :false))
 
 (defrpc "eth_getFilterChanges" ((id filter-id)) "what a filter saw since its last poll"
-  (let* ((it (installed-or-fail id)) (from (1+ (installed-last-block it))) (head chain:*head*))
-    (setf (installed-last-block it) head)
-    (ecase (installed-kind it)
-      (:blocks (coerce (loop for n from from to head collect (hex32 (cblock-hash (chain-block n)))) 'simple-vector))
-      (:pending #())
-      (:logs (if (> from head) #() (logs-in-range (installed-filter it) from head))))))
+  (let ((head chain:*head*))
+    (multiple-value-bind (it last) (poll-filter id head)
+      (let ((from (1+ last)))
+        (ecase (installed-kind it)
+          (:blocks (coerce (loop for n from from to head collect (hex32 (cblock-hash (chain-block n)))) 'simple-vector))
+          (:pending #())
+          (:logs (if (> from head) #() (logs-in-range (installed-filter it) from head))))))))
 
 (defrpc "eth_getFilterLogs" ((id filter-id)) "every log a log filter matches"
-  (let ((it (installed-or-fail id)))
+  (let ((it (poll-filter id)))
     (unless (eq (installed-kind it) :logs) (rpc-fail -32000 "filter not found"))
     (get-logs (installed-filter it))))

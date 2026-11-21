@@ -7,7 +7,9 @@ tempo_forkSchedule, rendered from the chain spec's genesis config with EIP-2124 
 
 (in-package #:clempo.rpc.config)
 
-(defparameter *chain* :mainnet)
+(defun served-chain ()
+  "The chain spec of the backend answering the current request."
+  (chain:backend-chain chain:*backend*))
 
 ;;; CRC-32 (IEEE 802.3), for EIP-2124 fork ids
 
@@ -28,7 +30,7 @@ tempo_forkSchedule, rendered from the chain spec's genesis config with EIP-2124 
 
 ;;; The schedule
 
-(defun genesis-config () (spec:chain-config *chain*))
+(defun genesis-config () (spec:chain-config (served-chain)))
 
 (defun fork-schedule ()
   "Tempo forks in the genesis config, oldest first: list of (name . activation-time)."
@@ -39,11 +41,11 @@ tempo_forkSchedule, rendered from the chain spec's genesis config with EIP-2124 
         (lambda (a b) (or (< (cdr a) (cdr b))
                           (and (= (cdr a) (cdr b)) (string< (car a) (car b)))))))
 
-(defun genesis-time () (spec:genesis-timestamp *chain*))
+(defun genesis-time () (spec:genesis-timestamp (served-chain)))
 
 (defun fork-id (time)
   "EIP-2124 fork hash with every activation after genesis up to TIME."
-  (let ((crc (crc32 (spec:genesis-block-hash *chain*))) (seen '()))
+  (let ((crc (crc32 (spec:genesis-block-hash (served-chain)))) (seen '()))
     (dolist (f (fork-schedule) (format nil "0x~(~8,'0x~)" crc))
       (let ((at (cdr f)))
         (when (and (> at (genesis-time)) (<= at time) (not (member at seen)))

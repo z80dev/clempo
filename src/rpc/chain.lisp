@@ -14,13 +14,14 @@ each block's receipts checked against its header's receipts root before they are
   (:export #:backend #:backend-head #:backend-block-raw #:backend-block-number
            #:no-transaction-pool #:backend-submit-raw-transaction #:backend-pool-transactions
            #:backend-clear-pool
-           #:backend-tx-location #:backend-receipts-raw #:backend-chain-id
+           #:backend-tx-location #:backend-receipts-raw #:backend-chain-id #:backend-chain
            #:with-backend-read #:with-backend-write #:call-outside-backend-read #:*backend* #:*head*
            #:archive-backend #:make-archive-backend #:archive-backend-head #:backend-state
            #:history-dir #:backend-history #:archive-backend-finalization-dir #:backend-record-receipts
            #:build-index #:index-dir #:index-covered-height
            #:block-hash-of-raw #:scan-block-hashes #:block-parts
-           #:receipts-store-get #:receipts-store-put #:missing-receipts))
+           #:receipts-store-get #:receipts-store-put #:missing-receipts
+           #:archive-backend-receipts #:archive-backend-upstream))
 
 (in-package #:clempo.rpc.chain)
 
@@ -31,7 +32,17 @@ each block's receipts checked against its header's receipts root before they are
   ((lock :initform (sb-thread:make-mutex :name "backend") :reader backend-lock)
    (readers :initform 0 :accessor backend-readers)
    (queue :initform (sb-thread:make-waitqueue) :reader backend-queue)
-   (chain-id :initarg :chain-id :initform 4217 :reader backend-chain-id)))
+   ;; The chain spec served: genesis, fork schedule, chain id (anything LOAD-CHAINSPEC takes).
+   (chain :initarg :chain :initform :mainnet)))
+
+(defmethod initialize-instance :after ((b backend) &key)
+  (setf (slot-value b 'chain) (clempo.chainspec:load-chainspec (slot-value b 'chain))))
+
+(defun backend-chain (backend)
+  "BACKEND's chain spec; requests execute under it (CLEMPO.EXECUTOR:*CHAIN*)."
+  (slot-value backend 'chain))
+
+(defun backend-chain-id (backend) (clempo.chainspec:chain-id (backend-chain backend)))
 
 (defgeneric backend-head (backend) (:documentation "The highest committed block number."))
 (defgeneric backend-block-raw (backend number) (:documentation "Block NUMBER's RLP octets, or NIL."))
@@ -73,7 +84,8 @@ SENDER is the recovered sender as an integer and PENDING-P is false for a queued
   (let ((lock (backend-lock backend)))
     (sb-thread:with-mutex (lock) (incf (backend-readers backend)))
     (unwind-protect
-         (let ((*backend* backend) (*head* (backend-head backend)))
+         (let ((*backend* backend) (*head* (backend-head backend))
+               (clempo.executor:*chain* (backend-chain backend)))
            (funcall thunk))
       (sb-thread:with-mutex (lock)
         (when (zerop (decf (backend-readers backend)))
@@ -348,7 +360,7 @@ Returns (values header-start header-end tx-bounds) where tx-bounds is a list of 
    (finalization-dir :initarg :finalization-dir :initform nil     ; NIL: the chain's certificate archive
                      :reader archive-backend-finalization-dir)
    (history-lock :initform (sb-thread:make-mutex :name "history") :reader history-lock)
-   (history-checked :initform 0 :accessor history-checked)))     ; last refresh, internal real time
+   (history-checked :initform 0 :accessor history-checked)))     ; last refresh, clempo.io:now-ms
 
 (defun make-archive-backend (&rest initargs &key (class 'archive-backend) (archive-dir (archive:archive-dir))
                                                  (index-dir (index-dir)) head (upstream nil)
@@ -397,10 +409,12 @@ ARCHIVE-BACKEND) is instantiated with the remaining INITARGS as well."
   (let ((h (backend-history b)))
     (when h
       (or (clempo.history:history-state h number)
-          (let ((now (get-internal-real-time)))
-            (when (> (- now (history-checked b)) (* *history-refresh-seconds* internal-time-units-per-second))
-              (setf (history-checked b) now)
-              (clempo.history:history-refresh h)
+          (let ((now (clempo.io:now-ms)))
+            (when (sb-thread:with-mutex ((history-lock b))
+                    (when (> (- now (history-checked b)) (* *history-refresh-seconds* 1000))
+                      (setf (history-checked b) now)
+                      (clempo.history:history-refresh h)
+                      t))
               (clempo.history:history-state h number)))))))
 
 (defun archive-chunk (b first)

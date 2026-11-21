@@ -180,9 +180,14 @@ Returns (values events transactions)."
   (lock (sb-thread:make-mutex :name "sender index file")))
 
 (defvar *indexes* (make-hash-table :test 'equal :synchronized t))
+(defvar *indexes-lock* (sb-thread:make-mutex :name "sender indexes"))
 
 (defun open-sender-index (path)
   "The open index at PATH, reopened when the file was rebuilt, or NIL when there is none."
+  (sb-thread:with-mutex (*indexes-lock*)
+    (open-sender-index-locked path)))
+
+(defun open-sender-index-locked (path)
   (let ((date (and (probe-file path) (file-write-date path)))
         (old (gethash path *indexes*)))
     (cond ((null date) nil)
@@ -193,7 +198,9 @@ Returns (values events transactions)."
                (read-sequence head in)
                (invariant (string= "CLSN" (octets->string head :start 0 :end 4)) "bad sender index ~A" path)
                (dotimes (i (1+ +buckets+)) (setf (aref offsets i) (get-u64 head (+ +header+ (* 8 i)))))
-               (when old (close (sindex-stream old)))
+               ;; Readers of the old index hold its lock while they read; one that takes
+               ;; it after this sees the stream closed and moves to the new index.
+               (when old (sb-thread:with-mutex ((sindex-lock old)) (close (sindex-stream old))))
                (setf (gethash path *indexes*)
                      (make-sindex :path path :stream in :offsets offsets :covered (get-u64 head 8) :date date)))))))
 
@@ -205,7 +212,17 @@ Returns (values events transactions)."
 
 (defun index-events (index key)
   "The (location . word) events stored under KEY, in chain order."
-  (sb-thread:with-mutex ((sindex-lock index))
+  (loop for events = (sb-thread:with-mutex ((sindex-lock index))
+                       (if (open-stream-p (sindex-stream index))
+                           (locked-index-events index key)
+                           :replaced))
+        while (eq events :replaced)
+        ;; a rebuilt file replaced INDEX after it was looked up
+        do (setf index (or (open-sender-index (sindex-path index)) (return '())))
+        finally (return events)))
+
+(defun locked-index-events (index key)
+  (block index-events
     (let* ((b (ash key -48))
            (lo (aref (sindex-offsets index) b)) (hi (aref (sindex-offsets index) (1+ b))))
       ;; first entry with key >= KEY

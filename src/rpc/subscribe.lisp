@@ -177,29 +177,29 @@ accepting (the id is answered and nothing follows)."
   (let* ((id (server:new-subscription-id))
          (sub (subscription-for id kind params)))
     (when sub
+      (server:reserve-subscription connection)
       (server:after-response
        (lambda ()
-         (push sub (server:connection-subscriptions connection))
+         (server:add-subscription connection sub)
          (when (eq kind :syncing)
            (server:send-notification connection "eth_subscription" id :false)))))
     id))
 
 (defun remove-subscription (connection id consensus-p)
-  (let ((sub (find-if (lambda (s)
-                       (and (eql consensus-p (eq (subscription-kind s) :finalization))
-                            (equal id (subscription-id s))))
-                     (server:connection-subscriptions connection))))
-    (when sub
-      (setf (server:connection-subscriptions connection)
-            (remove sub (server:connection-subscriptions connection)))
-      (when consensus-p (server:release-consensus-slot connection))
-      t)))
+  (when (server:remove-subscription-if
+         connection (lambda (s)
+                      (and (eql consensus-p (eq (subscription-kind s) :finalization))
+                           (equal id (subscription-id s)))))
+    (when consensus-p (server:release-consensus-slot connection))
+    t))
 
 (defun unsubscribe (connection id)
   (remove-subscription connection id nil))
 
 (defpubsub "eth_subscribe" (params)
   "start a newHeads, logs, newPendingTransactions, syncing or transactionReceipts subscription"
+  ;; jsonrpsee takes the connection's subscription permit before it reads the params
+  (server:check-subscription-room *connection*)
   (let* ((seq (params-sequence params))
          (kind (clempo.rpc::next-param seq 'subscription-kind nil nil))
          (more (clempo.rpc::next-param seq 'subscription-params t (lambda () :none))))
@@ -222,8 +222,10 @@ accepting (the id is answered and nothing follows)."
   (let* ((connection *connection*)
          (id (server:new-subscription-id))
          (sub (make-subscription id :finalization)))
+    (server:check-subscription-room connection)
     (server:claim-consensus-slot connection)
-    (server:after-response (lambda () (push sub (server:connection-subscriptions connection))))
+    (server:reserve-subscription connection)
+    (server:after-response (lambda () (server:add-subscription connection sub)))
     id))
 
 (defpubsub "consensus_unsubscribe" (params :websocket-only t)
