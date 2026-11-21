@@ -119,3 +119,59 @@
         (is-equalp raw (subseq compressed 1))
         (is-equalp (subseq public 0 32) raw))))
   (is (null (clempo.secp256k1:ecdh 0 (make-octets 64) :compressed t))))
+
+(deftest secp-native-generator-window-edge ()
+  (let* ((w (make-array 512 :element-type '(unsigned-byte 64) :initial-element 0))
+         (digits (make-array 520 :element-type '(signed-byte 8) :initial-element 0))
+         (g (clempo.secp256k1.native-group-tests::oracle-g))
+         (q (clempo.secp256k1.native-group-tests::oracle-mul g 127))
+         (expected (clempo.secp256k1.native-group-tests::oracle-add
+                    q (clempo.secp256k1.native-group-tests::oracle-neg
+                       (clempo.secp256k1.native-group-tests::oracle-phi q)))))
+    (clempo.secp256k1::sf-from-integer! w 0 (car g))
+    (clempo.secp256k1::sf-from-integer! w 4 (cdr g))
+    (setf (aref digits 0) 127 (aref digits 130) -127)
+    (clempo.secp256k1::sn-joint! w 40 0 digits 1 128)
+    (is (clempo.secp256k1::sn-to-affine! w 0 40 64))
+    (is= (car expected) (clempo.secp256k1::sf-to-integer w 0))
+    (is= (cdr expected) (clempo.secp256k1::sf-to-integer w 4))))
+
+(deftest secp-native-asynchronous-gc ()
+  ;; Boxed-register scratch must never expose unboxed field words to a moving
+  ;; collection. Choose an add intermediate that resembles an interior heap
+  ;; pointer, rather than relying on random words almost never doing so.
+  (let* ((anchor (make-array 128 :element-type '(unsigned-byte 64) :initial-element #xdeadbeef))
+         (address (make-array 1 :element-type '(unsigned-byte 64) :initial-element 0))
+         (go (sb-thread:make-semaphore)) (started (sb-thread:make-semaphore))
+         (done (sb-thread:make-semaphore)) (failure nil)
+         (worker
+           (sb-thread:make-thread
+            (lambda ()
+              (let ((w (make-array 24 :element-type '(unsigned-byte 64) :initial-element 0)))
+                (dotimes (cycle 12)
+                  (sb-thread:wait-on-semaphore go)
+                  (sb-thread:signal-semaphore started)
+                  (handler-case
+                      (unless failure
+                        (dotimes (i 10000)
+                          (setf (aref w 0) (ldb (byte 64 0) (- (aref address 0) #x1000003d1)))
+                          (clempo.secp256k1::sf-add! w 8 w 0 w 4)
+                          (assert (clempo.secp256k1::sf-equal-p w 0 w 8))
+                          (clempo.secp256k1::sf-square! w 12 w 0)
+                          (clempo.secp256k1::sf-mul! w 16 w 0 w 0)
+                          (assert (clempo.secp256k1::sf-equal-p w 12 w 16))
+                          (clempo.secp256k1::sf-sub! w 20 w 8 w 0)
+                          (assert (clempo.secp256k1::sf-zero-p w 20))))
+                    (error (condition) (setf failure condition)))
+                  (sb-thread:signal-semaphore done))))
+            :name "secp GC safety")))
+    (dotimes (cycle 12)
+      (setf (aref address 0) (+ 16 (sb-kernel:get-lisp-obj-address anchor)))
+      (sb-thread:signal-semaphore go)
+      (sb-thread:wait-on-semaphore started)
+      (sb-ext:gc :full t)
+      (sb-thread:wait-on-semaphore done))
+    (sb-thread:join-thread worker)
+    (is (null failure) "~A" failure)
+    (setf (aref anchor 0) 42)
+    (is= 42 (aref anchor 0))))

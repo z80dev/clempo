@@ -1,0 +1,156 @@
+;;; Targeted oracle/allocation/CPU check; not part of the ordinary test load.
+;;; CLEMPO_BUILD=release sbcl --dynamic-space-size 8192 --non-interactive \
+;;; --load scripts/build.lisp --eval '(asdf:load-system "clempo-crypto-ec")' \
+;;; --load tests/crypto/ec/secp256k1/field-speed.lisp
+;;; Four canonical ordinary UB64 limbs, including exact aliases and offsets.
+;;; ARM64 uses fused Comba/carry VOPs; other targets use the same arithmetic
+;;; expressed with three-argument SB-BIGNUM multiplies (never the buggy four).
+(defpackage #:clempo.secp256k1.field-speed
+  (:use #:cl)
+  (:local-nicknames (#:s #:clempo.secp256k1)))
+(in-package #:clempo.secp256k1.field-speed)
+
+(defun words (&optional (size 16))
+  (make-array size :element-type '(unsigned-byte 64) :initial-element 0))
+
+(defun oracle-power (base exponent)
+  (let ((result 1))
+    (loop while (plusp exponent) do
+      (when (oddp exponent) (setf result (mod (* result base) s:+secp256k1-p+)))
+      (setf exponent (ash exponent -1) base (mod (* base base) s:+secp256k1-p+)))
+    result))
+
+(defun operands ()
+  ;; Fixed seed makes regressions reproducible without ambient entropy.
+  (let ((state #x6a09e667f3bcc909) (result nil) (p s:+secp256k1-p+))
+    (labels ((next-word ()
+               (setf state (ldb (byte 64 0) (logxor state (ash state 13)))
+                     state (logxor state (ash state -7))
+                     state (ldb (byte 64 0) (logxor state (ash state 17))))))
+      (dotimes (i 256)
+        (let ((x 0))
+          (dotimes (j 4) (setf x (logior x (ash (next-word) (* 64 j)))))
+          (push (if (zerop (logand i 3)) (- p 1 (logand x #xffff)) (mod x p)) result))))
+    (coerce (nreverse result) 'vector)))
+
+(defun check-fields (randoms)
+  (let* ((p s:+secp256k1-p+)
+         (boundaries (list 0 1 2 #x1000003d0 #x1000003d1 #xffffffffffffffff
+                           (ash 1 64) (1- (ash 1 128)) (ash 1 128)
+                           (1- (ash 1 192)) (ash 1 192)
+                           (- p #x1000003d1) (- p 2) (1- p)))
+         (a (words)) (b (words)) (out (words)) (work (words 20))
+         (checks 0))
+    (labels ((result (array offset expected)
+               (assert (= (s::sf-to-integer array offset) expected))
+               (incf checks))
+             (pair (x y)
+               (dolist (entry (list (cons #'s::sf-mul! (mod (* x y) p))
+                                   (cons #'s::sf-add! (mod (+ x y) p))
+                                   (cons #'s::sf-sub! (mod (- x y) p))))
+                 (let ((fn (car entry)) (expected (cdr entry)))
+                   ;; Disjoint arrays, nonzero offsets, and each exact alias.
+                   (s::sf-from-integer! a 3 x) (s::sf-from-integer! b 5 y)
+                   (fill out #x9e3779b97f4a7c15)
+                   (funcall fn out 7 a 3 b 5) (result out 7 expected)
+                   (assert (and (= (aref out 6) #x9e3779b97f4a7c15)
+                                (= (aref out 11) #x9e3779b97f4a7c15)))
+                   (funcall fn a 3 a 3 b 5) (result a 3 expected)
+                   (s::sf-from-integer! a 3 x)
+                   (funcall fn b 5 a 3 b 5) (result b 5 expected)
+                   ;; Same backing array, three disjoint fields.
+                   (s::sf-from-integer! out 0 x) (s::sf-from-integer! out 4 y)
+                   (funcall fn out 8 out 0 out 4) (result out 8 expected)))
+               (s::sf-from-integer! a 3 x)
+               (s::sf-square! out 7 a 3) (result out 7 (mod (* x x) p))
+               (s::sf-square! a 3 a 3) (result a 3 (mod (* x x) p))
+               (s::sf-from-integer! a 3 x)
+               (s::sf-mul! a 3 a 3 a 3) (result a 3 (mod (* x x) p))
+               (s::sf-from-integer! a 3 x)
+               (s::sf-neg! a 3 a 3) (result a 3 (mod (- x) p))
+               (s::sf-from-integer! a 3 x)
+               (s::sf-sub! a 3 a 3 a 3) (result a 3 0)
+               (s::sf-from-integer! a 3 x)
+               (s::sf-add! a 3 a 3 a 3) (result a 3 (mod (+ x x) p))))
+      (dolist (x boundaries) (dolist (y boundaries) (pair x y)))
+      (dotimes (i 2048) (pair (aref randoms (logand i 255))
+                            (mod (+ (aref randoms (logand (+ (* i 73) 19) 255)) i) p)))
+      ;; Retain the fixed 16-word inverse/sqrt scratch and alias contracts.
+      (dotimes (i 32)
+        (let ((x (aref randoms i)))
+          (s::sf-from-integer! a 3 x)
+          (fill work #xa5a5a5a5a5a5a5a5)
+          (s::sf-inv! a 3 a 3 work 2)
+          (result a 3 (oracle-power x (- p 2)))
+          (s::sf-from-integer! a 3 x)
+          (s::sf-sqrt! a 3 a 3 work 2)
+          (result a 3 (oracle-power x (ash (1+ p) -2)))
+          (assert (and (= (aref work 1) #xa5a5a5a5a5a5a5a5)
+                       (= (aref work 18) #xa5a5a5a5a5a5a5a5))))))
+    (assert (= checks (+ (* 18 (+ (* 14 14) 2048)) 64)))
+    (format t "~&Fp integer oracle: ~D results; boundaries, randoms, aliases, inverse/sqrt passed.~%" checks)))
+
+(defmacro define-loop (name operation inline)
+  `(defun ,name (a corpus count)
+     (declare #.clempo.base:*hot* (type s::secp-words a corpus)
+              (type (integer 0 #.most-positive-fixnum) count)
+              (ignorable corpus)
+              (,(if inline 'inline 'notinline) ,operation))
+     (let ((calls 0))
+       (declare (type fixnum calls))
+       (dotimes (i count)
+         ,(if (eq operation 's::sf-square!)
+              `(,operation a 0 a 0)
+              `(,operation a 0 a 0 corpus (* 4 (logand i 255))))
+         (incf calls))
+       calls)))
+(define-loop multiply-loop s::sf-mul! t)
+(define-loop square-loop s::sf-square! t)
+(define-loop add-loop s::sf-add! t)
+(define-loop subtract-loop s::sf-sub! t)
+(define-loop multiply-call-loop s::sf-mul! nil)
+(define-loop square-call-loop s::sf-square! nil)
+
+(defun measure (name fn operation randoms corpus count)
+  (let ((a (words 4)) (seed (aref randoms 17)))
+    (s::sf-from-integer! a 0 seed)
+    (assert (= (funcall fn a corpus 10000) 10000))
+    (s::sf-from-integer! a 0 seed)
+    (sb-ext:gc :full t)
+    (let* ((bytes (sb-ext:get-bytes-consed))
+           (cpu (get-internal-run-time))
+           (calls (funcall fn a corpus count))
+           (elapsed (- (get-internal-run-time) cpu))
+           (allocated (- (sb-ext:get-bytes-consed) bytes)))
+      (assert (= calls count))
+      (assert (zerop allocated))
+      ;; An independent, untimed integer recurrence checks the entire measured
+      ;; dependent chain, not just a discarded output or a zero/one fixed point.
+      (let ((expected seed))
+        (dotimes (i count)
+          (setf expected
+                (mod (if (eq operation :square) (* expected expected)
+                         (funcall operation expected (aref randoms (logand i 255))))
+                     s:+secp256k1-p+)))
+        (assert (= expected (s::sf-to-integer a 0))))
+      (format t "~&~A: ~,3F ns CPU, ~D bytes, ~D checked dependent calls.~%"
+              name (/ (* 1d9 elapsed) count internal-time-units-per-second) allocated calls))))
+
+(let* ((randoms (operands)) (corpus (words 1024)) (count 20000000))
+  (check-fields randoms)
+  (dotimes (i 256) (s::sf-from-integer! corpus (* 4 i) (aref randoms i)))
+  (measure "Fp multiply inline" #'multiply-loop #'* randoms corpus count)
+  (measure "Fp square inline" #'square-loop :square randoms corpus count)
+  (measure "Fp add inline" #'add-loop #'+ randoms corpus count)
+  (measure "Fp subtract inline" #'subtract-loop #'- randoms corpus count)
+  (measure "Fp multiply call" #'multiply-call-loop #'* randoms corpus count)
+  (measure "Fp square call" #'square-call-loop :square randoms corpus count))
+
+;;; Also exercise the actual non-ARM64 source branch, not a retained alternate
+;;; production backend. This standalone check exits after the source reload.
+#+arm64
+(progn
+  (let ((*features* (remove :arm64 *features*)))
+    (load (merge-pathnames "src/crypto/ec/secp256k1-native-field.lisp" clempo-build:*root*)))
+  (format t "~&Portable SB-BIGNUM source branch:~%")
+  (check-fields (operands)))

@@ -34,13 +34,26 @@ caller-owned persistent storage rather than assuming such an optimization.
 
 The old per-operation boxed field/Jacobian/GLV production engine is removed.
 secp Fp uses four canonical ordinary little-endian 64-bit words. A macro emits
-unrolled product and special-form reductions using `2^256 = 2^32+977`.
+unrolled Comba products, symmetric squares and special-form reductions using
+`2^256 = 2^32+977`. ARM64 keeps carry chains inside generated SBCL VOPs;
+other targets use the real portable word implementation.
 P256 Fp and scalar fields use four-word Montgomery residues. Public scalar,
 address and coordinate representations remain plain integers.
 
+ARM64's unboxed register bank is small, so the VOPs borrow descriptor registers
+for arithmetic scratch. **No allocation/call inside a VOP is not sufficient GC
+protection**: signals can interrupt it. Each such VOP is pseudo-atomic and scrubs
+every borrowed descriptor back to NIL before checking for pending interrupts.
+The guard needs no heap-initialization memory barrier because it only computes
+register results. No foreign code is called. The concurrent-GC regression uses
+an intermediate deliberately shaped like an interior heap pointer, not just
+random words that almost never resemble one. See SBCL's
+[ARM64 guard macro](https://github.com/sbcl/sbcl/blob/master/src/compiler/arm64/macros.lisp)
+and [precise register roots](https://github.com/sbcl/sbcl/blob/master/src/runtime/gencgc.c).
+
 Recovery parses the digest directly into words, uses a native binary scalar
 inverse, Montgomery scalar products, exact signed GLV lattice identities and
-four signed wNAF streams. Immutable G/phi(G) tables use width 7; variable R/phi(R)
+four signed wNAF streams. Immutable G/phi(G) tables use width 8; variable R/phi(R)
 use width 5. The Strauss loop shares 128-bit doublings across all streams.
 Variable odd R points use prefix/suffix Z products to obtain a common denominator
 without inversions. Mixed additions run on an isomorphic a=0 curve; multiplying
@@ -69,8 +82,14 @@ SBCL 2.6.8, Darwin ARM64, 8 GiB heap. Initial arena cutover measurements:
 | Previous ecrecover, 10,000 calls | 94.147 us | 172.906 us | 288,148 |
 | Arena ecrecover, supplied output/scratch, 20,000 calls | 73.008 us | 90.324 us | 0 |
 | Arena ecrecover, fresh pubkey, 10,000 calls | 73.346 us | 98.483 us | about 80 |
+| Previous P256, 1,000 calls | 307.102 us | 379.740 us | 648,362 |
 | P256 verification, supplied scratch, 2,000 calls | 182.005 us | not recorded | 0 |
 | Dependent Fp multiplication, 1,000,000 calls | 20.914 ns | 20.883 ns | 0 |
+
+The P256 baseline loaded the historical field/curve sources from commit
+`f6a2b6a166` in an isolated SBCL process, including its old field packing helper,
+and used the same valid signature as the native benchmark. No working source
+was reverted or modified for that measurement.
 
 These initial CPU timings do not meet the 25-us recovery target. The standalone
 post-cutover CPU profile (1,656 samples) attributes 66.2% self to Fp multiplication,

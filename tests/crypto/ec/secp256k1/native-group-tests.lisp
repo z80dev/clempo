@@ -192,6 +192,35 @@
                     (if (logbitp 127 state) (- state) state)))))
           (joint-case scalars (oracle-mul g (+ i 2))))))))
 
+(deftest native-secp-generator-only-joint ()
+  (let ((r (oracle-mul (oracle-g) 19)) (top (1- (ash 1 128))))
+    (dolist (scalars (list '(63 -63 0 0) '(-63 63 0 0)
+                           (list top (- top) 0 0)
+                           (list 0 (- (ash 1 129)) 0 0)))
+      (joint-case scalars r)
+      (joint-case scalars r 1)))
+  (let* ((sentinel #xfedcba9876543210)
+         (a (native-arena 512 sentinel))
+         (digits (make-array 520 :element-type '(signed-byte 8) :initial-element 0)))
+    (store-affine a 1 (oracle-g))
+    ;; A positive scan length with no nonzero digits still produces infinity.
+    (sn-joint! a 27 1 digits 130 60)
+    (is (zerop (raw-read a 35)))
+    ;; Digits outside LENGTH must not select the general R-table path.
+    (setf (aref digits 0) 63 (aref digits 130) -31
+          (aref digits 389) 15 (aref digits 519) -15)
+    (sn-joint! a 27 1 digits 1 60)
+    (check-guards a (list '(1 . 8) '(27 . 38) '(60 . 407)) sentinel)
+    (is (equal (oracle-add (oracle-mul (oracle-g) 63)
+                          (oracle-mul (oracle-phi (oracle-g)) -31))
+               (read-point a 27)))
+    ;; Keep allocation coverage for the generator-only dispatch separate from
+    ;; the existing four-stream path, including signed phi(G) selections.
+    (sn-joint! a 27 1 digits 1 60)
+    (let ((before (sb-ext:get-bytes-consed)))
+      (dotimes (i 256) (sn-joint! a 27 1 digits 1 60))
+      (is= before (sb-ext:get-bytes-consed)))))
+
 (deftest native-secp-valid-point-unreduced-arithmetic ()
   ;; The oracle deliberately does not reduce these scalars modulo n. Jacobian
   ;; addition must agree with affine arithmetic near the group-order boundary.

@@ -113,6 +113,10 @@
 (defun sn-jadd-affine! (arena out p affine negate-p work)
   (declare #.clempo.base:*hot* (type sn-arena arena)
            (type fixnum out p affine work))
+  ;; Inline only the short chains in mixed addition. Expanding multiplication
+  ;; here, or the chains in double/full-add, increases ARM64 spill traffic
+  ;; and loses to the shared field calls in release point/joint measurements.
+  (declare (inline sf-sub! sf-neg!))
   ;; AFFINE is finite. A signed Y is staged even in the infinity case, so
   ;; OUT=P=AFFINE is an exact alias rather than an overlapping-copy hazard.
   (let ((z1 work) (u2 (+ work 4)) (s2 (+ work 8)) (h (+ work 12))
@@ -182,33 +186,60 @@
      a)
    t))
 
+(defconstant +sn-generator-window+ 8)
+(defconstant +sn-odd-g-count+ (ash 1 (- +sn-generator-window+ 2)))
+(defconstant +sn-odd-g-half-words+ (* 8 +sn-odd-g-count+))
+
 (defparameter *sn-odd-g*
   (load-time-value
-   (let ((a (make-array 592 :element-type '(unsigned-byte 64) :initial-element 0))
-         (table (make-array 512 :element-type '(unsigned-byte 64) :initial-element 0)))
-     (sf-from-integer! a 512 +sn-generator-x+)
-     (sf-from-integer! a 516 +sn-generator-y+)
-     (sf-one! a 520)
-     (sn-jdouble! a 524 512 536)
-     (dotimes (i 32)
+   (let* ((base (* 2 +sn-odd-g-half-words+))
+          (a (make-array (+ base 80) :element-type '(unsigned-byte 64) :initial-element 0))
+          (table (make-array base :element-type '(unsigned-byte 64) :initial-element 0)))
+     (sf-from-integer! a base +sn-generator-x+)
+     (sf-from-integer! a (+ base 4) +sn-generator-y+)
+     (sf-one! a (+ base 8))
+     (sn-jdouble! a (+ base 12) base (+ base 24))
+     (dotimes (i +sn-odd-g-count+)
        (let ((offset (* i 8)))
-         (sn-to-affine! a offset 512 536)
-         (sf-mul! a (+ offset 256) a offset *sn-beta-words* 0)
-         (sf-copy! a (+ offset 260) a (+ offset 4)))
-       (unless (= i 31) (sn-jadd! a 512 512 524 536)))
-     (replace table a :end2 512)
+         (sn-to-affine! a offset base (+ base 24))
+         (sf-mul! a (+ offset +sn-odd-g-half-words+) a offset *sn-beta-words* 0)
+         (sf-copy! a (+ offset +sn-odd-g-half-words+ 4) a (+ offset 4)))
+       (unless (= i (1- +sn-odd-g-count+))
+         (sn-jadd! a base base (+ base 12) (+ base 24))))
+     (replace table a :end2 base)
      table)
    t))
 
 (defun sn-joint! (arena out12 r8 digits length work)
   "Four signed wNAF streams: G, phi(G), R, phi(R), each 130 low-to-high digits.
-G streams have width 7; R streams width 5. LENGTH is in [0,130]. R is finite.
+G streams have width 8; R streams width 5. LENGTH is in [0,130]. R is finite.
 The 348-word scratch interval is disjoint from OUT12 and R8; OUT12 may equal R8.
 Return an original-curve Jacobian without inversion, including when all streams vanish."
   (declare #.clempo.base:*hot* (type sn-arena arena) (type sn-digits digits)
            (type fixnum out12 r8 work) (type (integer 0 130) length))
   (when (zerop length)
     (sn-jzero! arena out12)
+    (return-from sn-joint! (values)))
+  ;; Key generation/signing have only G streams. In that case no denominator
+  ;; isomorphism is needed: select directly from the immutable affine table,
+  ;; and do not read R or build its odd multiples.
+  (unless (loop for bit of-type fixnum below length
+                thereis (or (not (zerop (aref digits (+ 260 bit))))
+                            (not (zerop (aref digits (+ 390 bit))))))
+    (let ((selected work) (scratch (+ work 8)))
+      (declare (type fixnum selected scratch))
+      (sn-jzero! arena out12)
+      (loop for bit of-type fixnum downfrom (1- length) to 0 do
+        (sn-jdouble! arena out12 out12 scratch)
+        (dotimes (stream 2)
+          (let ((digit (aref digits (+ (* stream 130) bit))))
+            (declare (type (signed-byte 8) digit))
+            (unless (zerop digit)
+              (let ((source (+ (* stream +sn-odd-g-half-words+) (* (ash (1- (abs digit)) -1) 8))))
+                (declare (type fixnum source))
+                (sf-copy! arena selected *sn-odd-g* source)
+                (sf-copy! arena (+ selected 4) *sn-odd-g* (+ source 4))
+                (sn-jadd-affine! arena out12 out12 selected (minusp digit) scratch)))))))
     (return-from sn-joint! (values)))
   (let ((twice (+ work 96)) (prefix (+ work 108)) (suffix (+ work 140))
         (denominator (+ work 144)) (d2 (+ work 148)) (d3 (+ work 152))
@@ -258,7 +289,7 @@ Return an original-curve Jacobian without inversion, including when all streams 
               (declare (type fixnum index affine))
               (when (< stream 2)
                 ;; Only selected G points are scaled. phi commutes with scaling.
-                (let ((source (+ (* stream 256) (* index 8))))
+                (let ((source (+ (* stream +sn-odd-g-half-words+) (* index 8))))
                   (declare (type fixnum source))
                   (sf-mul! arena selected *sn-odd-g* source arena d2)
                   (sf-mul! arena (+ selected 4) *sn-odd-g* (+ source 4) arena d3))

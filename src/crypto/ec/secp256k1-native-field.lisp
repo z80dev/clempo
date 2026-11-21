@@ -2,6 +2,7 @@
 (defpackage #:clempo.secp256k1
   (:use #:cl)
   (:import-from #:clempo.base #:octets #:octets->integer #:integer->octets #:octets-concat)
+  #+arm64 (:local-nicknames (#:a64 #:sb-arm64-asm))
   (:export #:ecrecover #:ecrecover-address #:make-recovery-scratch #:recovery-scratch #:*recovery-scratch*
            #:pubkey->address #:sign #:private->public #:ecdh
            #:+secp256k1-n+ #:+secp256k1-p+))
@@ -9,7 +10,7 @@
 (defconstant +secp256k1-p+ #xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f)
 (defconstant +secp256k1-n+ #xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141)
 (deftype secp-words () '(simple-array (unsigned-byte 64) (*)))
-(declaim (sb-ext:maybe-inline sf-mul! sf-add! sf-sub! sf-neg!))
+(declaim (sb-ext:maybe-inline sf-mul! sf-square! sf-add! sf-sub! sf-neg!))
 
 (defmacro integer-limb (integer index)
   `(if (typep ,integer 'fixnum) ,(if (zerop index) integer 0)
@@ -48,26 +49,164 @@
        ,@(loop for r in rs for i from 0 collect `(setf (aref ,out (+ ,off ,i)) ,r))
        (values))))
 
-(defmacro define-sf-multiply ()
-  (let ((as (loop repeat 4 collect (gensym "A")))
-        (bs (loop repeat 4 collect (gensym "B")))
-        (rs (loop repeat 8 collect (gensym "R"))) (carry (gensym)))
-    `(defun sf-mul! (out o a ao b bo)
-       (declare #.clempo.base:*hot* (type secp-words out a b) (type fixnum o ao bo))
+;;; The portable Comba core keeps only a three-word column accumulator.
+;;; Squaring computes each off-diagonal product once, then adds it twice.
+#-arm64
+(defmacro define-sf-product (square)
+  (let* ((as (loop repeat 4 collect (gensym "A")))
+         (bs (if square as (loop repeat 4 collect (gensym "B"))))
+         (rs (loop repeat 8 collect (gensym "R"))))
+    `(defun ,(if square 'sf-square! 'sf-mul!) (out o a ao ,@(unless square '(b bo)))
+       (declare #.clempo.base:*hot*
+                (type secp-words out a ,@(unless square '(b)))
+                (type fixnum o ao ,@(unless square '(bo))))
        (let (,@(loop for x in as for i from 0 collect `(,x (aref a (+ ao ,i))))
-             ,@(loop for x in bs for i from 0 collect `(,x (aref b (+ bo ,i))))
-             ,@(loop for x in rs collect `(,x 0)) (,carry 0))
-         (declare (type (unsigned-byte 64) ,@as ,@bs ,@rs ,carry))
-         ,@(loop for x in as for i from 0 append
-             (append (list `(setf ,carry 0))
-                     (loop for y in bs for j from 0 collect
-                       `(setf (values ,carry ,(nth (+ i j) rs))
-                              (mul-add-word ,x ,y ,(nth (+ i j) rs) ,carry)))
-                     (list `(setf ,(nth (+ i 4) rs) ,carry))))
+             ,@(unless square
+                 (loop for x in bs for i from 0 collect `(,x (aref b (+ bo ,i)))))
+             ,@(loop for r in rs collect `(,r 0))
+             (c0 0) (c1 0) (c2 0) (hi 0) (lo 0) (carry 0))
+         (declare (type (unsigned-byte 64) ,@as ,@(unless square bs) ,@rs c0 c1 c2 hi lo)
+                  (type bit carry))
+         ,@(loop for column below 7 append
+             (append
+              (loop for i below 4 for j = (- column i)
+                    when (and (<= 0 j 3) (or (not square) (<= i j))) append
+                (cons `(setf (values hi lo)
+                             (sb-bignum::%multiply-and-add ,(nth i as) ,(nth j bs) 0))
+                      (loop repeat (if (and square (/= i j)) 2 1) collect
+                        `(setf (values c0 carry) (sb-bignum::%add-with-carry c0 lo 0)
+                               (values c1 carry) (sb-bignum::%add-with-carry c1 hi carry)
+                               c2 (ldb (byte 64 0) (+ c2 carry))))))
+              (list `(setf ,(nth column rs) c0 c0 c1 c1 c2 c2 0))))
+         (setf ,(eighth rs) c0)
          (sf-fold-store out o ,@rs)))))
-(define-sf-multiply)
-(declaim (inline sf-square! sf-copy! sf-zero! sf-one! sf-zero-p sf-equal-p))
-(defun sf-square! (out o a ao) (sf-mul! out o a ao a ao))
+#-arm64 (define-sf-product nil)
+#-arm64 (define-sf-product t)
+
+;;; Keep NZCV carry chains inside one VOP. Individual SB-BIGNUM intrinsics
+;;; materialize/reload carry between every word on ARM64. Inputs live until
+;;; :RESULT, so neither a low multiply nor an early result can alias an input
+;;; still needed by UMULH (including when A and B are the same field).
+#+arm64
+(defmacro define-sf-arm64-product (square)
+  (let* ((name (if square 'sf-square! 'sf-mul!))
+         (intrinsic (if square '%sf-square '%sf-multiply))
+         (as '(a0 a1 a2 a3)) (bs (if square as '(b0 b1 b2 b3)))
+         (rs '(r0 r1 r2 r3 r4 r5 r6 r7))
+         (code nil))
+    (labels ((emit (op &rest args)
+               (push `(sb-assem:inst ,(intern (symbol-name op) "SB-ARM64-ASM") ,@args) code))
+             (add-product (column lo hi)
+               (emit 'adds (nth column rs) (nth column rs) lo)
+               (emit 'adcs 'c1 'c1 hi)
+               (emit 'adc 'c2 'c2 'sb-vm::zr-tn)))
+      (emit 'mul (if square 'r1 'r0) 'a0 (if square 'a1 'b0))
+      (emit 'umulh 'c1 'a0 (if square 'a1 'b0))
+      (emit 'mov 'c2 0)
+      (loop for column from (if square 2 1) below (if square 6 7) do
+        (let ((first t))
+          (dotimes (i 4)
+            (let ((j (- column i)))
+              (when (and (<= 0 j 3) (or (not square) (< i j)))
+                (emit 'mul 'lo (nth i as) (nth j bs))
+                (emit 'umulh 'hi (nth i as) (nth j bs))
+                (if first
+                    (progn
+                      (emit 'adds (nth column rs) 'lo 'c1)
+                      (emit 'adcs 'c1 'hi 'c2)
+                      (emit 'cset 'c2 :cs)
+                      (setf first nil))
+                    (add-product column 'lo 'hi)))))))
+      (if square
+          (progn
+            ;; Accumulate six cross products only once, double the completed
+            ;; sum, then add the four diagonals in one eight-word carry chain.
+            ;; MUL/UMULH preserve NZCV between adjacent diagonal pairs.
+            (emit 'mov 'r6 'c1)
+            (loop for i from 1 to 6 do
+              (emit (if (= i 1) 'adds 'adcs) (nth i rs) (nth i rs) (nth i rs)))
+            (emit 'adc 'r7 'sb-vm::zr-tn 'sb-vm::zr-tn)
+            (emit 'mul 'r0 'a0 'a0)
+            (emit 'umulh 'hi 'a0 'a0)
+            (emit 'adds 'r1 'r1 'hi)
+            (loop for i from 1 to 3 do
+              (emit 'mul 'lo (nth i as) (nth i as))
+              (emit 'umulh 'hi (nth i as) (nth i as))
+              (emit 'adcs (nth (* 2 i) rs) (nth (* 2 i) rs) 'lo)
+              (emit 'adcs (nth (1+ (* 2 i)) rs) (nth (1+ (* 2 i)) rs) 'hi)))
+          (emit 'mov 'r7 'c1))
+      ;; Multiply all four upper words independently, then add their low and
+      ;; shifted high halves as two four-word chains. Unlike row reduction,
+      ;; no multiply waits for the preceding word's carry.
+      (emit 'mov 'c #x1000003d1)
+      (loop for upper in '(r4 r5 r6 r7) for high in '(c1 c2 lo hi) do
+        (emit 'umulh high upper 'c)
+        (emit 'mul upper upper 'c))
+      (dotimes (i 4)
+        (emit (if (zerop i) 'adds 'adcs) (nth i rs) (nth i rs) (nth (+ i 4) rs)))
+      (emit 'cset 'r4 :cs)
+      (emit 'adds 'r1 'r1 'c1)
+      (emit 'adcs 'r2 'r2 'c2)
+      (emit 'adcs 'r3 'r3 'lo)
+      (emit 'adc 'hi 'hi 'sb-vm::zr-tn)
+      (emit 'add 'c1 'hi 'r4)
+      (emit 'mul 'lo 'c1 'c)
+      (emit 'umulh 'hi 'c1 'c)
+      (emit 'adds 'r0 'r0 'lo)
+      (emit 'adcs 'r1 'r1 'hi)
+      (emit 'adcs 'r2 'r2 'sb-vm::zr-tn)
+      (emit 'adcs 'r3 'r3 'sb-vm::zr-tn)
+      (emit 'cset 'c2 :cs)
+      ;; One final C addition both folds a possible 257th bit and tests >=P.
+      ;; Those cases are disjoint: overflow above leaves a small low residue.
+      (emit 'adds 'r4 'r0 'c)
+      (emit 'adcs 'r5 'r1 'sb-vm::zr-tn)
+      (emit 'adcs 'r6 'r2 'sb-vm::zr-tn)
+      (emit 'adcs 'r7 'r3 'sb-vm::zr-tn)
+      (emit 'cset 'lo :cs)
+      (emit 'orr 'c2 'c2 'lo)
+      (emit 'cmp 'c2 0)
+      (dotimes (i 4) (emit 'csel (nth i rs) (nth (+ i 4) rs) (nth i rs) :ne))
+      `(progn
+         (eval-when (:compile-toplevel :load-toplevel :execute)
+           (sb-c:defknown ,intrinsic ,(loop repeat (if square 4 8) collect '(unsigned-byte 64))
+               (values ,@(loop repeat 4 collect '(unsigned-byte 64)))
+               (sb-c:movable sb-c:flushable) :overwrite-fndb-silently t)
+           (sb-c:define-vop (,intrinsic)
+             (:translate ,intrinsic)
+             (:policy :fast-safe)
+             (:args ,@(loop for x in (append as (unless square bs)) collect
+                        `(,x :scs (sb-vm::unsigned-reg) :to :result)))
+             (:arg-types ,@(loop repeat (if square 4 8) collect 'sb-vm::unsigned-num))
+             (:results ,@(loop for r in (subseq rs 0 4) collect
+                           `(,r :scs (sb-vm::unsigned-reg) :from :load)))
+             (:result-types ,@(loop repeat 4 collect 'sb-vm::unsigned-num))
+             ;; Boxed-bank scratch needs explicit protection against asynchronous
+             ;; GC, not merely the absence of allocation/calls inside this VOP.
+             ;; Scrub every borrowed descriptor before the interrupt check.
+             ;; Use the reserved assembler TMP for the interrupt flag: a named
+             ;; LR temporary would exhaust the raw bank when check builds need NFP.
+             (:temporary (:sc ,(if square 'sb-vm::unsigned-reg 'sb-vm::descriptor-reg))
+                         r4 r5 r6 r7)
+             (:temporary (:sc sb-vm::descriptor-reg) c c1 c2 lo hi)
+             (:generator 1
+               (sb-vm::pseudo-atomic (sb-vm::tmp-tn :sync nil)
+                 ,@(nreverse code)
+                 ,@(loop for temp in (append (unless square '(r4 r5 r6 r7)) '(c c1 c2 lo hi))
+                         collect `(sb-assem:inst a64::mov ,temp sb-vm::null-tn))))))
+         (defun ,name (out o a ao ,@(unless square '(b bo)))
+           (declare #.clempo.base:*hot*
+                    (type secp-words out a ,@(unless square '(b)))
+                    (type fixnum o ao ,@(unless square '(bo))))
+           (multiple-value-bind (r0 r1 r2 r3)
+               (,intrinsic ,@(loop for i below 4 collect `(aref a (+ ao ,i)))
+                           ,@(unless square (loop for i below 4 collect `(aref b (+ bo ,i)))))
+             (setf (aref out o) r0 (aref out (+ o 1)) r1
+                   (aref out (+ o 2)) r2 (aref out (+ o 3)) r3))
+           (values))))))
+#+arm64 (define-sf-arm64-product nil)
+#+arm64 (define-sf-arm64-product t)
+(declaim (inline sf-copy! sf-zero! sf-one! sf-zero-p sf-equal-p))
 (defun sf-copy! (out o a ao)
   (declare #.clempo.base:*hot* (type secp-words out a) (type fixnum o ao))
   (dotimes (i 4) (setf (aref out (+ o i)) (aref a (+ ao i)))) (values))
@@ -83,6 +222,63 @@
   (and (= (aref a ao) (aref b bo)) (= (aref a (+ ao 1)) (aref b (+ bo 1)))
        (= (aref a (+ ao 2)) (aref b (+ bo 2))) (= (aref a (+ ao 3)) (aref b (+ bo 3)))))
 
+#+arm64
+(defmacro define-sf-arm64-add-sub (subtract)
+  (let ((intrinsic (if subtract '%sf-subtract '%sf-add))
+        (name (if subtract 'sf-sub! 'sf-add!))
+        (rs '(r0 r1 r2 r3)) (ts '(t0 t1 t2 t3)) (code nil))
+    (labels ((emit (op &rest args)
+               (push `(sb-assem:inst ,(intern (symbol-name op) "SB-ARM64-ASM") ,@args) code)))
+      (emit 'mov 'c #x1000003d1)
+      (dotimes (i 4)
+        (emit (if subtract (if (zerop i) 'subs 'sbcs) (if (zerop i) 'adds 'adcs))
+              (nth i rs) (nth i '(a0 a1 a2 a3)) (nth i '(b0 b1 b2 b3))))
+      (if subtract
+          (progn
+            (emit 'csel 'c 'c 'sb-vm::zr-tn :cc)
+            (dotimes (i 4)
+              (emit (if (zerop i) 'subs 'sbcs) (nth i rs) (nth i rs)
+                    (if (zerop i) 'c 'sb-vm::zr-tn))))
+          (progn
+            (emit 'cset 'carry :cs)
+            (dotimes (i 4)
+              (emit (if (zerop i) 'adds 'adcs) (nth i ts) (nth i rs)
+                    (if (zerop i) 'c 'sb-vm::zr-tn)))
+            (emit 'cset 'c :cs)
+            (emit 'orr 'carry 'carry 'c)
+            (emit 'cmp 'carry 0)
+            (dotimes (i 4) (emit 'csel (nth i rs) (nth i ts) (nth i rs) :ne))))
+      `(progn
+         (eval-when (:compile-toplevel :load-toplevel :execute)
+           (sb-c:defknown ,intrinsic ,(loop repeat 8 collect '(unsigned-byte 64))
+               (values ,@(loop repeat 4 collect '(unsigned-byte 64)))
+               (sb-c:movable sb-c:flushable) :overwrite-fndb-silently t)
+           (sb-c:define-vop (,intrinsic)
+             (:translate ,intrinsic)
+             (:policy :fast-safe)
+             (:args ,@(loop for x in '(a0 a1 a2 a3 b0 b1 b2 b3) collect
+                        `(,x :scs (sb-vm::unsigned-reg) :to :result)))
+             (:arg-types ,@(loop repeat 8 collect 'sb-vm::unsigned-num))
+             (:results ,@(loop for r in rs collect `(,r :scs (sb-vm::unsigned-reg) :from :load)))
+             (:result-types ,@(loop repeat 4 collect 'sb-vm::unsigned-num))
+             (:temporary (:sc sb-vm::descriptor-reg) c ,@(unless subtract '(carry t0 t1 t2 t3)))
+             (:generator 1
+               (sb-vm::pseudo-atomic (sb-vm::tmp-tn :sync nil)
+                 ,@(nreverse code)
+                 ,@(loop for temp in (cons 'c (unless subtract '(carry t0 t1 t2 t3)))
+                         collect `(sb-assem:inst a64::mov ,temp sb-vm::null-tn))))))
+         (defun ,name (out o a ao b bo)
+           (declare #.clempo.base:*hot* (type secp-words out a b) (type fixnum o ao bo))
+           (multiple-value-bind (r0 r1 r2 r3)
+               (,intrinsic ,@(loop for i below 4 collect `(aref a (+ ao ,i)))
+                           ,@(loop for i below 4 collect `(aref b (+ bo ,i))))
+             (setf (aref out o) r0 (aref out (+ o 1)) r1
+                   (aref out (+ o 2)) r2 (aref out (+ o 3)) r3))
+           (values))))))
+#+arm64 (define-sf-arm64-add-sub nil)
+#+arm64 (define-sf-arm64-add-sub t)
+
+#-arm64
 (defmacro define-sf-add-sub ()
   `(progn
      ,@(loop for subtract in '(nil t) for name in '(sf-add! sf-sub!)
@@ -110,6 +306,7 @@
                         (setf r0 (ldb (byte 64 0) (+ r0 #x1000003d1)) r1 0 r2 0 r3 0))))
             (setf (aref out o) r0 (aref out (+ o 1)) r1
                   (aref out (+ o 2)) r2 (aref out (+ o 3)) r3) (values))))))
+#-arm64
 (define-sf-add-sub)
 (defun sf-neg! (out o a ao)
   (declare #.clempo.base:*hot* (type secp-words out a) (type fixnum o ao))
@@ -159,7 +356,17 @@
 
 (defun sf-square-times! (out o a ao count)
   (declare #.clempo.base:*hot* (type secp-words out a) (type fixnum o ao count))
-  (sf-copy! out o a ao) (dotimes (i count) (sf-square! out o out o)) (values))
+  #+arm64
+  (let ((w0 (aref a ao)) (w1 (aref a (+ ao 1)))
+        (w2 (aref a (+ ao 2))) (w3 (aref a (+ ao 3))))
+    (declare (type (unsigned-byte 64) w0 w1 w2 w3))
+    (dotimes (i count)
+      (multiple-value-setq (w0 w1 w2 w3) (%sf-square w0 w1 w2 w3)))
+    (setf (aref out o) w0 (aref out (+ o 1)) w1
+          (aref out (+ o 2)) w2 (aref out (+ o 3)) w3))
+  #-arm64
+  (progn (sf-copy! out o a ao) (dotimes (i count) (sf-square! out o out o)))
+  (values))
 (defun sf-power223! (out o a ao work wo)
   "Build a^(2^223-1); retain a,a^3,a^(2^22-1),a^7 in 16 work words."
   (declare #.clempo.base:*hot* (type secp-words out a work) (type fixnum o ao wo))
