@@ -4,9 +4,9 @@
   :depends-on ("clempo-base")
   :serial t
   :components ((:file "sha256-arm64") (:file "sha2") (:file "blake") (:file "ripemd160") (:file "aes")
-               (:file "chacha") (:file "field25519") (:file "curve25519")))
+               (:file "chacha") (:file "field25519") (:file "curve25519") (:file "scrypt")))
 
 (defsystem "clempo-crypto-hash/tests"
   :depends-on ("clempo-crypto-hash")
   :pathname "../../../tests/crypto/hash/"
-  :components ((:file "sha2") (:file "digests") (:file "aes") (:file "chacha") (:file "curve25519")))
+  :components ((:file "sha2") (:file "digests") (:file "aes") (:file "chacha") (:file "curve25519") (:file "scrypt")))
