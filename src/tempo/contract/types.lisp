@@ -279,28 +279,35 @@
 
 ;;; Structs (DEFSTORABLE; precompiles-macros/src/storable.rs).
 
+(defun direct-fields (layout)
+  "The fields the Storable derive loads and stores: every field but mappings, which it
+treats as indirect (precompiles-macros/src/storable.rs)."
+  (remove :mapping (struct-layout-fields layout) :key (lambda (f) (stype-kind (sfield-stype f)))))
+
 (defun load-struct (st address slot)
   (let* ((layout (stype-struct st))
-         (fields (struct-layout-fields layout))
+         (fields (direct-fields layout))
          (cached 0)
-         (values '()))
+         (loaded '()))
     (loop for idx from 0 below (length fields)
           for f = (aref fields idx)
           for fst = (sfield-stype f)
           for at = (slot+ slot (sfield-slot f))
-          do (push (cond ((not (stype-packable fst))
-                          (load-value fst address at nil))
-                         (t
-                          (unless (and (> idx 0) (= (sfield-slot f) (sfield-slot (aref fields (1- idx)))))
-                            (setf cached (%load address at)))
-                          (word->value (stype-word fst)
-                                       (extract-word cached (sfield-offset f) (stype-bytes fst)))))
-                   values))
-    (apply (struct-layout-constructor layout) (nreverse values))))
+          do (push (cons f (cond ((not (stype-packable fst))
+                                  (load-value fst address at nil))
+                                 (t
+                                  (unless (and (> idx 0) (= (sfield-slot f) (sfield-slot (aref fields (1- idx)))))
+                                    (setf cached (%load address at)))
+                                  (word->value (stype-word fst)
+                                               (extract-word cached (sfield-offset f) (stype-bytes fst))))))
+                   loaded))
+    ;; mapping fields have no value of their own (Default in Rust)
+    (apply (struct-layout-constructor layout)
+           (map 'list (lambda (f) (cdr (assoc f loaded))) (struct-layout-fields layout)))))
 
 (defun store-struct (st address slot value init)
   (let* ((layout (stype-struct st))
-         (fields (struct-layout-fields layout))
+         (fields (direct-fields layout))
          (n (length fields))
          (pending 0)
          (pending-offset nil))
@@ -337,7 +344,7 @@
 
 (defun delete-struct (st address slot)
   (let* ((layout (stype-struct st))
-         (fields (struct-layout-fields layout)))
+         (fields (direct-fields layout)))
     (loop for f across fields
           when (stype-dynamic (sfield-stype f))
             do (delete-value (sfield-stype f) address (slot+ slot (sfield-slot f)) nil))
@@ -537,14 +544,16 @@ and an SSTORE."
   "The place of field NAME of the struct at PLACE."
   (let* ((st (place-type place))
          (layout (or (stype-struct st) (error "~S is not a struct place" place)))
-         (fields (struct-layout-fields layout))
-         (idx (or (position name fields :key #'sfield-name :test #'string= )
-                  (error "~S has no field ~S" (struct-layout-name layout) name)))
-         (f (aref fields idx))
+         (all (struct-layout-fields layout))
+         (f (or (find name all :key #'sfield-name :test #'string=)
+                (error "~S has no field ~S" (struct-layout-name layout) name)))
          (fst (sfield-stype f))
-         (shares (or (and (> idx 0) (= (sfield-slot (aref fields (1- idx))) (sfield-slot f)))
-                     (and (< (1+ idx) (length fields))
-                          (= (sfield-slot (aref fields (1+ idx))) (sfield-slot f))))))
+         (fields (direct-fields layout))
+         (idx (position f fields))
+         (shares (and idx
+                      (or (and (> idx 0) (= (sfield-slot (aref fields (1- idx))) (sfield-slot f)))
+                          (and (< (1+ idx) (length fields))
+                               (= (sfield-slot (aref fields (1+ idx))) (sfield-slot f)))))))
     (make-place (place-address place) (slot+ (place-slot place) (sfield-slot f)) fst
                 (and shares (stype-packable fst) (sfield-offset f)))))
 

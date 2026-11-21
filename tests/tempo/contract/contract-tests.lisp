@@ -240,3 +240,21 @@
       (is= :success (call-toy trailing :spec :t10))
       (is= :revert (call-toy trailing :spec :t11))
       (is= :success (call-toy trailing :spec :t12)))))
+
+(defstorable book (base address) (quote address) (bids (mapping i16 u256)) (best i16))
+(defcontract book-holder (:prefix t) (books (mapping b256 book)))
+
+(deftest struct-mapping-fields-are-indirect ()
+  ;; the Storable derive skips mapping fields on load/store/delete
+  (with-spec (:t13)
+    (let ((b (make-hashmap-storage)))
+      (with-storage (b)
+        (let ((p (book-holder-books +token+ 1)))
+          (write (at (field p 'bids) -3) 77)
+          (write p (make-book :base 5 :quote 6 :best -3))
+          (let ((v (read p)))
+            (is= 5 (book-base v))
+            (is= -3 (book-best v)))
+          (delete p)
+          (is= 77 (read (at (field p 'bids) -3)))
+          (is= 0 (book-base (read p))))))))
