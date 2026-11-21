@@ -6,8 +6,8 @@ variables, so a simulator rebinds them instead of threading parameters.")
   (:export #:*clock* #:now-ms #:now-seconds #:real-clock #:make-manual-clock
            #:manual-clock-advance
            #:*entropy* #:random-octets #:random-below #:make-seeded-entropy #:real-entropy
-           #:read-file-octets #:write-file-octets #:write-file-atomically
-           #:read-file-string #:getenv #:run-capture))
+           #:read-file-octets #:write-file-octets #:write-file-atomically #:write-new-file
+           #:temp-directory #:read-file-string #:getenv #:run-capture))
 
 (in-package #:clempo.io)
 
@@ -76,28 +76,47 @@ variables, so a simulator rebinds them instead of threading parameters.")
     (write-sequence o out)
     path))
 
+(defun write-new-file (prefix o)
+  "Create a file named PREFIX followed by six random characters with mkstemp, which opens it
+O_CREAT|O_EXCL with mode 0600, so no existing path, symlink or other writer's file is ever
+reused; write the octets O through that descriptor and return the name."
+  (multiple-value-bind (fd name) (sb-posix:mkstemp (concatenate 'string prefix "XXXXXX"))
+    (let ((out (sb-sys:make-fd-stream fd :output t :element-type '(unsigned-byte 8)
+                                         :buffering :full :auto-close t))
+          (done nil))
+      (unwind-protect (progn (write-sequence o out) (finish-output out) (setf done t))
+        (close out)
+        (unless done (ignore-errors (sb-posix:unlink name)))))
+    name))
+
 (defun write-file-atomically (path o)
-  "Write to a sibling temp file, then rename over PATH."
-  (let ((tmp (format nil "~A.tmp" (namestring path))))
-    (write-file-octets tmp o)
+  "Write to a fresh sibling (WRITE-NEW-FILE, so concurrent writers never share it), then
+rename it over PATH."
+  (ensure-directories-exist path)
+  (let ((tmp (write-new-file (format nil "~A." (namestring path)) o)))
     (multiple-value-bind (ok errno) (sb-unix:unix-rename tmp (namestring path))
+      (unless ok (ignore-errors (sb-posix:unlink tmp)))
       (invariant ok "rename ~A failed: errno ~D" tmp errno))
     path))
 
 (defun getenv (name) (sb-ext:posix-getenv name))
 
+(defun temp-directory ()
+  "$TMPDIR, else /tmp, ending in a slash."
+  (let ((dir (or (getenv "TMPDIR") "")))
+    (cond ((zerop (length dir)) "/tmp/")
+          ((char= (char dir (1- (length dir))) #\/) dir)
+          (t (concatenate 'string dir "/")))))
+
 (defun run-capture (program args &key input)
   "Run PROGRAM with ARGS (and INPUT octets on stdin); return (values stdout-octets exit-code)."
-  (let ((tmp (when input
-               (format nil "/tmp/clempo-~D-~D.in" (sb-unix:unix-getpid)
-                       (sb-ext:atomic-incf (car (load-time-value (list 0))))))))
+  (let ((tmp (when input (write-new-file (concatenate 'string (temp-directory) "clempo-") input))))
     (unwind-protect
          (let ((sink (make-string-output-stream)))
-           (when tmp (write-file-octets tmp input))
            (let ((proc (sb-ext:run-program program args :search t :wait t
                                                         :input (or tmp nil) :output sink
                                                         :error nil :external-format :latin-1)))
              (values (map '(simple-array (unsigned-byte 8) (*)) #'char-code
                           (get-output-stream-string sink))
                      (sb-ext:process-exit-code proc))))
-      (when (and tmp (probe-file tmp)) (delete-file tmp)))))
+      (when tmp (ignore-errors (sb-posix:unlink tmp))))))
