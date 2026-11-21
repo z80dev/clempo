@@ -39,6 +39,37 @@ Do not interpret these as equal root-check workloads or isolated executor
 benchmarks. No Go timings from another host are substituted for missing
 samples.
 
+### Early after the per-block work (`3327105`, measured on `f5f79c5`)
+
+Three alternating pairs in an exclusive slot (host load average ~10, the
+reference node running), goempo `92e996c` first in each pair with
+BenchParityAgent's command (`goempo-dev replay -dir go-chunks -to 1000000
+-datadir FRESH -checkpoint 100000 -heal 0 -diagnose off`), then
+`CLEMPO_BUILD=release bin/clempo-dev bench -range early -datadir FRESH`
+(warm fasls, disk-backed store, `(:every-ms 1000)` log sync). Both checked
+every block's roots and reached 1,000,000.
+
+| Pair | goempo replay s / CPU s | Clempo replay s / CPU s | Clempo GC s / peak RSS GB |
+|---|---:|---:|---:|
+| 1 | 3.286 / 9.67 | 2.658 / 6.69 | 0.061 / 2.32 |
+| 2 | 3.287 / 9.90 | 2.796 / 6.73 | 0.056 / 2.31 |
+| 3 | 3.383 / 9.67 | 2.766 / 6.45 | 0.036 / 2.31 |
+
+Median **2.766 s vs 3.287 s: Clempo 1.19× goempo's wall throughput** with
+0.68× its CPU; against the Rust import above (58.71 s), 21.2× (goempo 17.9×).
+What changed for early mainnet, whose blocks carry one system transaction
+(main-thread profile before: 7.9 µs/block, ~21 KB consed/block):
+the replay thread no longer wakes the block producer (Darwin wakeups cost the
+waker tens of µs) and takes the prefetched queue whole; the producer decodes,
+hashes and recovers batches of light blocks on the worker pool; one
+`clempo.state` world is reused per replay; the subblocks-metadata RLP is
+checked in place; system calls to absent non-precompile targets skip the
+frame; block hashes, fork times, receipts roots of identical receipts and
+the EVM spec are memoized; blooms and `octets=` work a word at a time;
+keccak contexts live on the stack. Busy in the same build: 36.2 / 36.8 s
+against 37.3 / 36.9 s with `3327105` reverted (paired), so the Early work
+costs Busy nothing; Busy's rise from ~23 s is the store change's (reported).
+
 Raw local results: `logs/r7-parity/{clempo,rust}-{early,busy,recent}.{json,log}`
 and `logs/r7-parity/go-{early,busy}.{json,log}`. For Clempo use the commands below
 with `/usr/bin/time -l` before `bin/clempo-dev`; for Rust use the documented
