@@ -1,0 +1,30 @@
+;;; RFC6979 A.2.6 SHA-384 "sample"; no hashing, parsing or cached answers timed.
+;;; CLEMPO_BUILD=release sbcl --dynamic-space-size 2048 --non-interactive \
+;;; --load scripts/build.lisp --eval '(asdf:load-system "clempo-crypto-ec")' \
+;;; --load tests/crypto/ec/p384/speed.lisp
+(let* ((hash (clempo.base:hex->octets "9a9083505bc92276aec4be312696ef7bf3bf603f4bbd381196a029f340585312313bca4a9b5b890efee42c77b1ee25fe"))
+       (r #x94edbb92a5ecb8aad4736e56c691916b3f88140666ce9fa73d64c4ea95ad133c81a648152e44acf96e36dd1e80fabe46)
+       (s #x99ef4aeb15f178cea1fe40db2603138f130e740a19624526203b6351d0a3a94fa329c145786e679e7b82c71a38628ac8)
+       (x #xec3a4e415b4e19a4568618029f427fa5da9a8bc4ae92e02e06aae5286b300c64def8f0ea9055866064a254515480bc13)
+       (y #x8015d9b72d7d57244ea8ef9ac0c621896708a59367f9dfb9f54ca84b3f1c9db1288b231c3ae0d4fe7344fd2533264720)
+       (maker (find-symbol "MAKE-P384-SCRATCH" "CLEMPO.P384"))
+       (scratch (and maker (fboundp maker) (funcall maker)))
+       (verify (symbol-function 'clempo.p384:p384-verify))
+       (count 1000))
+  (flet ((run (n)
+           (dotimes (i n)
+             (assert (if scratch (funcall verify hash r s x y scratch)
+                         (funcall verify hash r s x y))))))
+    (run 20)
+    (sb-ext:gc :full t)
+    (let ((bytes (sb-ext:get-bytes-consed))
+          (cpu (get-internal-run-time))
+          (wall (get-internal-real-time)))
+      (run count)
+      (let ((cpu (- (get-internal-run-time) cpu))
+            (wall (- (get-internal-real-time) wall))
+            (bytes (- (sb-ext:get-bytes-consed) bytes)))
+        (format t "~&P384 uncached: ~,3F us CPU, ~,3F us wall, ~,1F bytes/call (~D calls; persistent scratch ~A).~%"
+                (/ (* cpu 1d6) count internal-time-units-per-second)
+                (/ (* wall 1d6) count internal-time-units-per-second)
+                (/ bytes (float count 1d0)) count (not (null scratch)))))))

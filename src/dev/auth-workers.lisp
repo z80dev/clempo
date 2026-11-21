@@ -39,7 +39,8 @@ is derived here too and memoized on TX, off the replay thread."
 (defun call-with-recovery-scratch (function)
   "Call FUNCTION with this thread's own signature arenas; they are never shared."
   (let ((clempo.secp256k1:*recovery-scratch* (clempo.secp256k1:make-recovery-scratch))
-        (clempo.p256:*p256-scratch* (clempo.p256:make-p256-scratch)))
+        (clempo.p256:*p256-scratch* (clempo.p256:make-p256-scratch))
+        (clempo.p384:*p384-scratch* (clempo.p384:make-p384-scratch :memoize t)))
     (funcall function)))
 
 (defstruct (prefetched (:constructor make-prefetched (number block senders failure)))
