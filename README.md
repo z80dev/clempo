@@ -13,7 +13,7 @@ clempo is an independent implementation of the Tempo reference node, alongside o
 | R3 Replay | executing mainnet from genesis: gas, receipts root, bloom, state root of every block | **50,049,999** (end of the local archive), no healed blocks | 49,399,999 |
 | R3e EVM | execution-spec-tests v5.4.0 state tests, Istanbul..Osaka | 61,903/61,903 | 61,903/61,903 |
 | R3p Precompiles | reference-oracle corpus of Tempo precompile calls, T0..T14 | 4,986/4,992 | 4,986/4,992 |
-| R4 Follow | live tip: executed, certified, RPC probed independently | 74,779 blocks executed and certified; latest recorded hour failed the RPC gap limit (20.0195 s vs 20 s) | yes |
+| R4 Follow | live tip: executed, certified, RPC probed independently | yes: 88,831 blocks executed and certified; peak sampled lag 1 block for the Linux hour run | yes |
 | R5 RPC | recorded reference answers, separated by comparison mode | see the [RPC evidence](FRONTIER.md#evidence) for verdicts and coverage | see [goempo's frontier](https://github.com/gakonst/goempo/blob/main/FRONTIER.md) |
 | R6 Validator | Simplex and DKG; independent signers with Rust validators | seeded sims (4/5/7 validators, faults, reshares); devnet where clempo signers are required for quorum | seeded simulations and mixed-validator devnet |
 | R7 Speed | same-Mac whole-command wall seconds: Early / Busy / Recent, two runs each | 2.66–2.83 / 21.08–21.31 / 12.17–15.29 | 2.97–2.98 / 24.33–24.74 / 10.63–10.90 |
@@ -121,7 +121,7 @@ On Linux x86-64, the [full disk-backed replay](FRONTIER.md#evidence) verified ma
 - **Execution and validator scope.** Replay and live-hour evidence are for the recorded mainnet ranges; mixed-validator evidence is for devnets, not mainnet signing. See [the T14/T15 coverage notes](docs/DEVIATIONS.md) and [docs/DEVNET.md](docs/DEVNET.md).
 - **Constant time.** Secret-key operations (signing, ECDH) are not hardened against timing or cache side channels.
 - **Not for production use.** Treat clempo as an independent implementation for testing and research. It has not run as a mainnet validator.
-- **Platform coverage differs.** The live follow and same-host speed comparisons in the status table were run on Apple Silicon; the full mainnet replay was run on Apple Silicon and Linux x86-64. Linux arm64 uses the portable Lisp crypto code; the ARM64 VOP paths have not been exercised on Linux arm64.
+- **Platform coverage differs.** The same-host speed comparisons in the status table were run on Apple Silicon; full mainnet replay and live following have been exercised on Apple Silicon and Linux x86-64. Linux arm64 uses the portable Lisp crypto code; the ARM64 VOP paths have not been exercised on Linux arm64.
 
 ## How it was built
 
