@@ -42,13 +42,17 @@
       (setf (aref out i) (logxor (aref a i) (aref b i))))))
 
 (defun connect-tcp (host port &key (timeout 10))
-  "Open a buffered binary TCP stream; the caller owns it."
-  (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
+  "Open an owned buffered binary stream; accept a hostname or a numeric v4/v6 address."
+  (let* ((v6 (find #\: host))
+         (socket (make-instance (if v6 'sb-bsd-sockets:inet6-socket 'sb-bsd-sockets:inet-socket)
+                                :type :stream :protocol :tcp))
         (stream nil))
     (unwind-protect
-         (let ((address (sb-bsd-sockets:host-ent-address (sb-bsd-sockets:get-host-by-name host))))
+         (progn
            (sb-ext:with-timeout timeout
-             (sb-bsd-sockets:socket-connect socket address port))
+             (let ((address (if v6 (sb-bsd-sockets:make-inet6-address host)
+                                (sb-bsd-sockets:host-ent-address (sb-bsd-sockets:get-host-by-name host)))))
+               (sb-bsd-sockets:socket-connect socket address port)))
            (setf (sb-bsd-sockets:sockopt-tcp-nodelay socket) t
                  stream (sb-bsd-sockets:socket-make-stream socket :input t :output t
                                                            :element-type 'octet :buffering :full

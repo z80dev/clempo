@@ -281,11 +281,15 @@ keyword and query and returns its list of matching wire items; NIL serves no dat
         (setf (eth-peer-status peer) fields)))
     peer))
 
-(defun eth-dial (host port public-key &rest options)
-  "Open an owned TCP/RLPx/ETH connection (ETH-HANDSHAKE keyword arguments)."
-  (let ((stream (connect-tcp host port)) (peer nil))
+(defun eth-dial (host port public-key &rest options &key (timeout 10) key &allow-other-keys)
+  "Open an owned TCP/RLPx/ETH connection. TIMEOUT bounds TCP socket waits; KEY
+is the optional local secp256k1 private key. Other options go to ETH-HANDSHAKE."
+  (let ((stream (connect-tcp host port :timeout timeout)) (peer nil))
     (unwind-protect
-         (setf peer (apply #'eth-handshake (rlpx:rlpx-dial stream public-key) options))
+         (let ((link (if key (rlpx:rlpx-dial stream public-key :key key) (rlpx:rlpx-dial stream public-key))))
+           (setf peer (apply #'eth-handshake link
+                             (loop for (name value) on options by #'cddr
+                                   unless (member name '(:timeout :key)) append (list name value)))))
       (unless peer (close stream :abort t)))))
 
 (defun eth-close (peer)

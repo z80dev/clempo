@@ -33,3 +33,88 @@
                        (clempo.eth:eth-version peer) count from to seconds (/ count (max seconds 1d-6)))
                0))
         (clempo.eth:eth-close peer)))))
+
+(defun public-follow-rpc-head (url)
+  (let ((head (clempo.jsonrpc:rpc-call "eth_getBlockByNumber" '("finalized" :false) :url url)))
+    (unless (clempo.json:jobject-p head) (error "RPC has no finalized head"))
+    (hex->integer (clempo.json:jget head "number"))))
+
+(defcommand "p2p-discover" (args)
+  "discover public Tempo peers: [-chain mainnet|moderato] [-protocol auto|v4|v5] [-seconds 20]"
+  (let* ((chain (cond ((string-equal (arg args :chain "mainnet") "mainnet") :mainnet)
+                      ((string-equal (arg args :chain) "moderato") :moderato)
+                      (t (error "Use -chain mainnet or moderato"))))
+         (protocols (or (cdr (assoc (arg args :protocol "auto")
+                                    '(("auto" :v4 :v5) ("v4" :v4) ("v5" :v5))
+                                    :test #'string-equal))
+                        (error "Use -protocol auto, v4 or v5")))
+         (peers (clempo.discovery:discover-peers (clempo.eth-source:tempo-bootnodes chain)
+                                                 :timeout (arg-int args :seconds 20) :protocols protocols)))
+    (write-line
+     (clempo.json:to-json-string
+      (clempo.json:jobject
+       "chain" (string-downcase chain) "verifiedEndpoints" (length peers)
+       "peers" (map 'vector
+                    (lambda (p)
+                      (clempo.json:jobject
+                       "host" (clempo.discovery:peer-host p)
+                       "udpPort" (clempo.discovery:peer-udp-port p)
+                       "tcpPort" (clempo.discovery:peer-tcp-port p)
+                       "publicKey" (octets->hex (clempo.discovery:peer-public-key p))))
+                    peers))))
+    (if peers 0 1)))
+
+(defcommand "p2p-follow-proof" (args)
+  "follow public devp2p and compare every finalized raw block: [-upstream URL] [-seconds 1800] [-batch 32] [-peers ENODES_FILE]"
+  (let* ((url (arg args :upstream (clempo.jsonrpc:local-rpc-url)))
+         (seconds (arg-int args :seconds 1800))
+         (batch (arg-int args :batch 32))
+         (peers (arg args :peers))
+         (bootnodes (if peers (clempo.eth-source:read-enodes peers) (clempo.eth-source:tempo-bootnodes)))
+         (units internal-time-units-per-second)
+         (next (1+ (public-follow-rpc-head url)))
+         (from next)
+         (elapsed 0) (reported 0) (connections 0))
+    (check-type seconds (integer 1 *))
+    (check-type batch (integer 1 128))
+    (let ((start (get-internal-real-time))
+          (progress (get-internal-real-time)))
+      (clempo.eth-source:call-with-public-block-source
+       (lambda (fetch)
+         (loop
+           for tip = (public-follow-rpc-head url)
+           for count = (min batch (max 0 (- (1+ tip) next)))
+           do (when (plusp count)
+                (let ((raw (handler-case (funcall fetch next count)
+                             (clempo.p2p-wire:p2p-error (c)
+                               (log-line "p2p-follow-proof: ~A" c)
+                               nil))))
+                  (when raw
+                    (let ((expected (clempo.archive:fetch-blocks next count :url url)))
+                      (dotimes (i count)
+                        (unless (octets= (svref raw i) (svref expected i))
+                          (error "Public peer block ~D differs from RPC data" (+ next i)))))
+                    (incf next count)
+                    (setf progress (get-internal-real-time)))))
+              (setf elapsed (floor (- (get-internal-real-time) start) units))
+              (when (>= elapsed (+ reported 30))
+                (log-line "p2p-follow-proof: ~Ds, ~:D blocks matched, own ~:D RPC ~:D"
+                          elapsed (- next from) (1- next) tip)
+                (setf reported elapsed))
+              (when (> (- (get-internal-real-time) progress) (* 120 units))
+                (error "Public devp2p did not advance for 120 seconds"))
+              (when (and (>= elapsed seconds) (> next tip))
+                (return))
+              (when (or (zerop count) (<= next tip)) (sleep 0.5))))
+       :bootnodes bootnodes
+       :on-peer (lambda (peer version)
+                  (incf connections)
+                  (log-line "p2p-follow-proof: eth/~D ~A:~D (~A)"
+                            version (clempo.discovery:peer-host peer) (clempo.discovery:peer-tcp-port peer)
+                            (if (clempo.discovery:peer-verified-p peer) "UDP discovery" "configured enode")))))
+    (unless (> next from) (error "Public devp2p did not download any blocks"))
+    (write-line (clempo.json:to-json-string
+                 (clempo.json:jobject "source" "public-devp2p" "seconds" elapsed
+                                      "from" from "to" (1- next) "matched" (- next from)
+                                      "connections" connections "rpc" url)))
+    0))

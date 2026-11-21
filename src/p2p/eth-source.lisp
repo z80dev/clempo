@@ -1,0 +1,121 @@
+(defpackage #:clempo.eth-source
+  (:use #:cl #:clempo.base)
+  (:local-nicknames (#:eth #:clempo.eth) (#:discovery #:clempo.discovery)
+                    (#:wire #:clempo.p2p-wire) (#:rlp #:clempo.rlp))
+  (:export #:tempo-bootnodes #:read-enodes #:call-with-public-block-source))
+
+(in-package #:clempo.eth-source)
+
+;; Public bootstrap records from tempo/crates/chainspec/src/bootnodes.rs.
+(defun tempo-bootnodes (&optional (chain :mainnet))
+  "Return the official TCP/UDP bootstrap enodes for a public Tempo CHAIN."
+  (ecase chain
+    ((:mainnet :presto)
+     (list "enode://f314fd4d28a25e3fe8c8f42e794a95fbdeb47afff5bf1f50ba82f6e647f566b1266f8feb15549b2a50092ddd7a8b423a574bea67dec6d400343480e16d90215a@40.160.24.34:30002"
+           "enode://a3cc3ec05f75b5d71d838a6b4a822044efef67b145ba14fcac3a7798de92806e59b12def3087c9453968e41a8d46439b35510a19014592afdd8962ab27060d67@40.160.24.210:30004"
+           "enode://34b106ae5eddcaf9943987a9d38bb45dc2a64bbac996f34ddecd863217af567273102b4b7010e7cf516151c3903927a18abb1fafe32bb999d752fca064158e05@40.160.64.50:30006"
+           "enode://b8c911b351614b71d027fcec98957be800cdc5e290b616d7f034a89c07d2be480fb9f11700cf7fc77073119b7d3d0855f697ebd4118fb34a35bd53ac58503122@148.113.220.159:30008"
+           "enode://135666c3e82f051e803ae39d401c62329d0bd1b7c868bf9a9154b0aaca0fa9fe3a474b357ef09ff5238d7c6d56be8c3c7533feff277bd839b506e98433418fa5@40.160.22.6:30011"
+           "enode://055ddd029a90d38ddb07fc248179e717ec25206cdc095ca6bb6dd187c54cb644664197fac75514e385f24e26a50d94190cbe78324a5e8d8d8c564cde8e7a503a@40.160.22.228:30012"
+           "enode://fcde6d46394dabea840ab0fdc6f16be8352946c4eb91e32bc18a359e51f14e9b66810233ca00106dd8cdb01f44a7e2e080ea055fa0dc5a5797925356e831252a@148.113.213.6:30013"
+           "enode://048954f10e776c4c31269b97dfbbe52be9dbce48278a02f67cd7a6eec805c1114c25c27e3e9bfabfb8117d134d89190888bb952b73a29f7c8430552a5192ec04@15.204.106.73:30015"
+           "enode://944d8afe14b222ccf26e328bedc10d1db94d756d836b956d1daa5e681f8b29ae48973528af1362110ce61e4d338d758a7e5bba19a66d289a7d536fba795403a1@15.204.106.68:30017"))
+    (:moderato
+     (list "enode://daff60c56f91f13f7a01304badbf65a4b0fe71004293a1fa26e31bf9b2083cb7c176b8318219ac2a651dc26c61e094eff70ece6f440b849b8a1881c7766373bb@148.113.217.72:30014"
+           "enode://1dc8f9d6f7406cd9ea546f7dd8abc84f69fce8a88dc7315372859010e3db9235d74a93347e91732283e7b4dd22f7d3a60c81dee31a8dc6665dc7ed9aff977c20@148.113.193.121:30016"
+           "enode://c2b3cd1404534510487b96b099541d88072260d5410bcc38195d7f606decf0c0043964f6f9252869534675a80ca9f12af81d5b9c078966e9dfae4487a773cb0b@148.113.225.199:30018"
+           "enode://53fc9564e37a20aa3f53dc5b3dce124f55df6b8eab45f5b40b13d19f4753255f4b1e240c4b5004bab8f5f8698a7f8c6607d28dc9afa0018fb69526b88411d8ab@148.113.193.123:30020"
+           "enode://a52bd09170b63d1bc2c394a81a02c8f4e00eb8516e46f858af70b41452a521b12355eabb1ae97fca012af663241d953dd4d1d2b62a97c4a2f6ac1f00a4145981@148.113.215.68:30052"
+           "enode://8dd0354c46d6b57dc3bda3661d2a9b01592b429b014ddbf557523cbdb4ae9f4e954030d6a54f405d753a7d9a59972fe47308a34100fe8e586849c3398c27ec21@40.160.32.193:30053"
+           "enode://b497b28c16b9b9f534c95211807b7439687ba9b19f557bc8b7d7c72eacee44599681a6fbcc38737b9622d231906c8dc08aa08cc7d4ea49af282e235395138647@148.113.225.199:30054"))))
+
+(defun read-enodes (path)
+  "Read a local file of enodes, one per line; ignore comments and blanks."
+  (with-open-file (in path)
+    (loop for row = (read-line in nil) while row
+          for line = (string-trim '(#\Space #\Tab #\Return) row)
+          unless (or (zerop (length line)) (char= (char line 0) #\#)) collect line)))
+
+(defun assemble-block (header body)
+  "Copy the header and the original body items into a single raw block."
+  (let* ((h (eth:rlp-view-data header)) (a (eth:rlp-view-start header)) (b (eth:rlp-view-end header))
+         (data (eth:rlp-view-data body)))
+    (multiple-value-bind (start end list-p)
+        (rlp:rlp-item-bounds data (eth:rlp-view-start body) (eth:rlp-view-end body))
+      (unless (and list-p (= end (eth:rlp-view-end body)))
+        (wire:protocol-error "invalid block body envelope"))
+      (let* ((size (+ (- b a) (- end start)))
+             (out (make-octets (+ size (rlp:header-length size)))))
+        (let ((p (rlp:write-header out 0 size #xc0)))
+          (replace out h :start1 p :start2 a :end2 b)
+          (replace out data :start1 (+ p (- b a)) :start2 start :end2 end))
+        out))))
+
+(defun download-batch (link from count)
+  (let ((raw (make-array count)))
+    (eth:download-blocks
+     link from (+ from count -1)
+     (lambda (n header body)
+       (let* ((bytes (assemble-block header body))
+              (block (clempo.blocks:decode-block bytes))
+              (mismatches (clempo.blocks:block-body-mismatches block)))
+         (when mismatches
+           (wire:protocol-error "wrong body for block ~D (~{~A~^, ~})" n (mapcar #'first mismatches)))
+         (setf (svref raw (- n from)) bytes))))
+    raw))
+
+(defun call-with-public-block-source (fn &key (chain :mainnet) (bootnodes (tempo-bootnodes chain))
+                                             (discovery-timeout 8) (dial-timeout 2) on-peer)
+  "Call FN with a synchronous (FROM COUNT) -> vector of consecutive raw blocks.
+A source authenticates public peers, owns one live connection, and rotates on
+transport, availability, or validation failure. The caller must compare the
+resulting chain against a trusted canonical hash (ETH does not prove finality).
+BOOTNODES are enodes or discovered peer records. DISCOVERY-TIMEOUT 0 dials them
+without UDP discovery. ON-PEER, if supplied, receives a peer and the ETH version."
+  (check-type discovery-timeout (real 0 *))
+  (check-type dial-timeout (real (0) *))
+  (unless (and (listp bootnodes) (<= 1 (length bootnodes) 64))
+    (error "Provide between one and 64 bootstrap peers"))
+  (let* ((chain-profile (eth:tempo-eth-chain (if (eq chain :presto) :mainnet chain)))
+         (seeds (mapcar (lambda (e) (etypecase e (string (discovery:parse-enode e)) (discovery:peer e))) bootnodes))
+         (key (1+ (clempo.io:random-below (1- clempo.secp256k1:+secp256k1-n+))))
+         (peers nil)
+         (link nil)
+         (closed nil))
+    (labels ((close-link ()
+               (when link (ignore-errors (eth:eth-close (shiftf link nil)))))
+             (find-peers ()
+               (delete-duplicates
+                (append (when (plusp discovery-timeout)
+                          (discovery:discover-peers seeds :timeout discovery-timeout :key key))
+                        (copy-list seeds))
+                :key #'discovery:peer-public-key :test #'octets= :from-end t))
+             (fetch (from count)
+               (check-type from u64)
+               (check-type count (integer 1 4096))
+               (unless (typep (+ from count -1) 'u64) (error "Block range exceeds u64"))
+               (when closed (error "Public block source is closed"))
+               (let ((last-error nil))
+                 (flet ((attempt (peer)
+                          (handler-case
+                              (progn
+                                (unless link
+                                  (setf link (eth:eth-dial (discovery:peer-host peer) (discovery:peer-tcp-port peer)
+                                                          (discovery:peer-public-key peer)
+                                                          :key key :timeout dial-timeout :chain chain-profile
+                                                          :timestamp (clempo.io:now-seconds)))
+                                  (when on-peer (funcall on-peer peer (eth:eth-version link))))
+                                (return-from fetch (download-batch link from count)))
+                            ((or wire:p2p-error rlp:rlp-error clempo.base:invariant-violation
+                                 stream-error sb-bsd-sockets:socket-error sb-ext:timeout) (c)
+                              (setf last-error c)
+                              (close-link)))))
+                   (when link (attempt nil))
+                   (loop repeat 2 do
+                     (unless peers (setf peers (find-peers)))
+                     (loop while peers do (attempt (pop peers))))
+                   (wire:protocol-error "no public Tempo peer served ~D..~D~@[: ~A~]"
+                                        from (+ from count -1) last-error)))))
+      (unwind-protect (funcall fn #'fetch)
+        (setf closed t)
+        (close-link)))))

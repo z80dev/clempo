@@ -114,6 +114,16 @@
     (is= 5 (eth:tempo-header-number header-view))
     (is= 512 (eth:tempo-header-timestamp header-view))
     (is (eth:block-matches-p block header-view body-view))
+    (is-equalp block (clempo.eth-source::assemble-block header-view body-view))
     (let ((bad (copy-seq block)))
       (setf (aref bad (1- (length bad))) 0)
       (is (not (eth:block-matches-p bad header-view body-view))))))
+
+(deftest eth-public-block-source-no-peer ()
+  (signals p2p-error
+    (clempo.eth-source:call-with-public-block-source
+     (lambda (fetch) (declare (ignore fetch)) (error "accepted a loopback seed"))
+     :bootnodes (list (format nil "enode://~A@127.0.0.1:30303"
+                             (octets->hex (clempo.secp256k1:private->public 1) :prefix nil)))))
+  (let ((closed (clempo.eth-source:call-with-public-block-source #'identity :discovery-timeout 0)))
+    (signals error (funcall closed 50 1))))
