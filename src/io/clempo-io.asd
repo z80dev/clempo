@@ -1,0 +1,11 @@
+(defsystem "clempo-io"
+  :description "Clock, entropy, files, processes and http behind special variables"
+  :depends-on ("clempo-base" (:require "sb-bsd-sockets"))
+  :serial t
+  :components ((:file "io")
+               (:file "http")))
+
+(defsystem "clempo-io/tests"
+  :depends-on ("clempo-io")
+  :pathname "../../tests/io/"
+  :components ((:file "io-tests")))

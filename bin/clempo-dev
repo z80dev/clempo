@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+# Run a clempo-dev command from source (fasls are cached under build/fasl/).
+# CLEMPO_HEAP sets the heap in MiB (default 16384).
+root="$(cd "$(dirname "$0")/.." && pwd)"
+exec sbcl --dynamic-space-size "${CLEMPO_HEAP:-16384}" --noinform --non-interactive \
+  --no-userinit --no-sysinit \
+  --load "$root/scripts/build.lisp" \
+  --eval '(let ((*compile-verbose* nil)) (asdf:load-system "clempo-dev"))' \
+  --eval '(clempo.dev:main (rest (member "--" sb-ext:*posix-argv* :test (function string=))))' \
+  -- "$@"
