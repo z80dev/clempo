@@ -231,6 +231,9 @@ is shared: do not modify it."
             id)))))
 
 (defun recover-ecdsa (hash v r s)
+  "alloy's secp256k1::recover_signer: EIP-2 rejects s above n/2 before recovery, for every
+Ethereum envelope and Tempo's fee payer signature."
+  (invariant (<= s clempo.secp256k1:+secp256k1-half-n+) "Transaction signature has high s")
   (let ((pub (clempo.secp256k1:ecrecover hash r s v)))
     (invariant pub "Invalid transaction signature")
     (clempo.secp256k1:pubkey->address pub)))

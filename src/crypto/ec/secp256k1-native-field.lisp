@@ -5,10 +5,12 @@
   #+arm64 (:local-nicknames (#:a64 #:sb-arm64-asm))
   (:export #:ecrecover #:ecrecover-address #:make-recovery-scratch #:recovery-scratch #:*recovery-scratch*
            #:pubkey->address #:sign #:private->public #:ecdh
-           #:+secp256k1-n+ #:+secp256k1-p+))
+           #:+secp256k1-n+ #:+secp256k1-p+ #:+secp256k1-half-n+))
 (in-package #:clempo.secp256k1)
 (defconstant +secp256k1-p+ #xfffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f)
 (defconstant +secp256k1-n+ #xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141)
+(defconstant +secp256k1-half-n+ (ash +secp256k1-n+ -1)
+  "EIP-2's bound: a transaction signature's s must not exceed it (alloy's SECP256K1N_HALF).")
 (deftype secp-words () '(simple-array (unsigned-byte 64) (*)))
 (declaim (sb-ext:maybe-inline sf-mul! sf-square! sf-add! sf-sub! sf-neg!))
 

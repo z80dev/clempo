@@ -118,3 +118,110 @@
                                                 (integer->octets sender 20)))))
                  (is-equalp expected (transaction-unique-identifier tx sender))
                  (is (not (octets= expected (transaction-unique-identifier tx (logxor 1 sender)))))))))
+
+(defun list-depth (item)
+  (if (listp item) (1+ (reduce #'max item :key #'list-depth :initial-value 0)) 0))
+
+(deftest tempo-structures-nest-far-below-the-rlp-limit ()
+  ;; The deepest recorded envelope is a keychain-v2 transaction carrying a key authorization
+  ;; with call scopes: 8 lists, a quarter of clempo.rlp's depth limit.
+  (let ((deepest 0))
+    (dolist (fixture *rpc-transactions*)
+      (let ((raw (hex->octets (second fixture))))
+        (setf deepest (max deepest (list-depth (clempo.rlp:rlp-decode
+                                                raw :start (if (>= (aref raw 0) #xc0) 0 1)))))))
+    (with-open-file (in (asdf:system-relative-pathname "clempo-types"
+                                                       "../../tests/types/data/blocks.jsonl"))
+      (loop for line = (read-line in nil) while line
+            do (let ((body (clempo.rlp:rlp-decode
+                            (hex->octets (clempo.json:jget (clempo.json:parse-json line) "raw")))))
+                 (setf deepest (max deepest (list-depth body)))
+                 (dolist (tx (second body))
+                   (when (typep tx 'octets)
+                     (setf deepest (max deepest (list-depth (clempo.rlp:rlp-decode tx :start 1)))))))))
+    (is= 8 deepest)
+    (is (< deepest clempo.rlp:*rlp-max-depth*))))
+
+;;; EIP-2: alloy's secp256k1::recover_signer rejects s > n/2 for every Ethereum envelope and
+;;; for the 0x76 fee payer signature. Each test signature's malleated twin (n - s, other
+;;; parity) still recovers the same key under plain ecrecover, so accepting it would let
+;;; anyone mint a second valid encoding (and hash) of someone else's transaction.
+
+(defun flip-parity (type v)
+  (cond ((plusp type) (logxor v 1))
+        ((< v 35) (- 55 v))
+        ((evenp (- v 35)) (1+ v))
+        (t (1- v))))
+
+(defun high-s-twin (raw)
+  "RAW's envelope with its trailing ECDSA signature replaced by the malleated twin."
+  (let* ((tx (decode-transaction raw)) (type (transaction-type tx))
+         (fields (copy-list (transaction-fields tx))) (n (length fields))
+         (v (clempo.rlp:rlp-decode-integer (nth (- n 3) fields)))
+         (s (clempo.rlp:rlp-decode-integer (nth (- n 1) fields))))
+    (setf (nth (- n 3) fields) (flip-parity type v)
+          (nth (- n 1) fields) (- clempo.secp256k1:+secp256k1-n+ s))
+    (decode-transaction (if (zerop type)
+                            (clempo.rlp:rlp-encode fields)
+                            (octets-concat (octets-of type) (clempo.rlp:rlp-encode fields))))))
+
+(defun twin-recovers (twin)
+  "The address plain ecrecover (no EIP-2) gives TWIN's signature."
+  (let* ((fields (transaction-fields twin)) (n (length fields)) (type (transaction-type twin))
+         (v (clempo.rlp:rlp-decode-integer (nth (- n 3) fields))))
+    (clempo.secp256k1:ecrecover-address
+     (transaction-signing-hash twin)
+     (clempo.rlp:rlp-decode-integer (nth (- n 2) fields))
+     (clempo.rlp:rlp-decode-integer (nth (- n 1) fields))
+     (cond ((plusp type) v) ((< v 35) (- v 27)) (t (mod (- v 35) 2))))))
+
+(deftest mainnet-high-s-ethereum-envelopes-rejected ()
+  ;; 24 legacy/EIP-155/EIP-1559 mainnet transactions (tests/crypto/ec/data/README.md).
+  (with-open-file (in (asdf:system-relative-pathname
+                       "clempo-types" "../../tests/crypto/ec/data/secp256k1/tempo_mainnet_senders.txt"))
+    (loop for line = (read-line in nil) while line
+          do (let* ((cols (uiop:split-string line :separator '(#\Space)))
+                    (raw (hex->octets (first cols))) (sender (hex->integer (second cols)))
+                    (twin (high-s-twin raw)))
+               (is= sender (transaction-sender (decode-transaction raw)))
+               (is= sender (twin-recovers twin))
+               (is (not (octets= (transaction-hash twin)
+                                 (transaction-hash (decode-transaction raw)))))
+               (signals invariant-violation (transaction-sender twin))
+               (signals invariant-violation (transaction-fee-payer twin))))))
+
+(deftest eip155-example-high-s-rejected ()
+  (let* ((raw (hex->octets "f86c098504a817c800825208943535353535353535353535353535353535353535880de0b6b3a76400008025a028ef61340bd939bc2195fe537567866003e1a15d3c71ff63e1590620aa636276a067cbe9d8997f761aecb703304b3800ccf555c9f3dc64214b297fb1966a3b6d83"))
+         (twin (high-s-twin raw)))
+    (is= #x9d8a62f656a8d1615c1294fd71e9cfb3e4855a4f (twin-recovers twin))
+    (signals invariant-violation (transaction-sender twin))))
+
+(deftest sponsored-high-s-fee-payer-rejected ()
+  ;; Tempo's recover_fee_payer is alloy's recover_signer too. The sender signature does not
+  ;; cover the fee payer signature, so the twin keeps its sender and loses its fee payer.
+  (dolist (label '("tempo/secp256k1/sponsored" "tempo/webAuthn/sponsored"
+                   "tempo/secp256k1/keychain-v2/sponsored"))
+    (destructuring-bind (envelope hash sender payer key-id)
+        (rest (find label *rpc-transactions* :key #'first :test #'string=))
+      (declare (ignore hash key-id))
+      (let* ((tx (decode-transaction (hex->octets envelope)))
+             (fields (copy-list (transaction-fields tx)))
+             (sponsor (nth 11 fields))
+             (s (clempo.rlp:rlp-decode-integer (third sponsor)))
+             (twin-sponsor (list (logxor 1 (clempo.rlp:rlp-decode-integer (first sponsor)))
+                                 (second sponsor) (- clempo.secp256k1:+secp256k1-n+ s))))
+        (is= (hex->integer payer) (transaction-fee-payer tx) "~A" label)
+        (setf (nth 11 fields) twin-sponsor)
+        (let* ((twin (decode-transaction
+                      (octets-concat (octets-of #x76) (clempo.rlp:rlp-encode fields))))
+               (unsigned (butlast (transaction-fields twin))))
+          (setf (nth 11 unsigned) (integer->octets (hex->integer sender) 20))
+          (is= (hex->integer payer)
+               (clempo.secp256k1:ecrecover-address
+                (clempo.keccak:keccak256 (octets-concat (octets-of #x78)
+                                                        (clempo.rlp:rlp-encode unsigned)))
+                (clempo.rlp:rlp-decode-integer (second twin-sponsor)) (third twin-sponsor)
+                (first twin-sponsor))
+               "~A" label)
+          (is= (hex->integer sender) (transaction-sender twin) "~A" label)
+          (signals invariant-violation (transaction-fee-payer twin)))))))

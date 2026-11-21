@@ -140,6 +140,27 @@
       (with-storage (b)
         (signals precompile-halt (write (balances +token+ 1) 1))))))
 
+(deftest recover-signer-rejects-high-s ()
+  ;; alloy's secp256k1::recover_signer (TIP-20 permit, storage/mod.rs): the malleated twin
+  ;; (n - s, flipped parity) of a valid signature recovers the same key, and EIP-2 rejects it
+  ;; after charging the 3,000 gas.
+  (let* ((key #x4646464646464646464646464646464646464646464646464646464646464646)
+         (digest (clempo.keccak:keccak256-integer (string->octets "permit digest")))
+         (owner (clempo.secp256k1:pubkey->address (clempo.secp256k1:private->public key))))
+    (multiple-value-bind (r s recid) (clempo.secp256k1:sign (integer->octets digest 32) key)
+      (let ((high-s (- clempo.secp256k1:+secp256k1-n+ s)) (high-v (+ 27 (logxor recid 1))))
+        (is (> high-s clempo.secp256k1:+secp256k1-half-n+))
+        (is= owner (clempo.secp256k1:pubkey->address
+                    (clempo.secp256k1:ecrecover (integer->octets digest 32) r high-s
+                                                (- high-v 27))))
+        (multiple-value-bind (b) (fresh-metered)
+          (with-spec (:t13)
+            (with-storage (b)
+              (is= owner (recover-signer digest (+ 27 recid) r s))
+              (is= 3000 (gas-used))
+              (is (null (recover-signer digest high-v r high-s)))
+              (is= 6000 (gas-used)))))))))
+
 (deftest checkpoint-rolls-back ()
   (let* ((host (make-memory-host))
          (b (make-metered-storage host)))

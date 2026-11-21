@@ -214,9 +214,10 @@ Returns an ACCOUNT-INFO or NIL when the account does not exist."))
   (octets->integer (keccak-octets data)))
 
 (defun recover-signer (digest v r s)
-  "ecrecover with its 3,000 gas: the signer's address, or NIL. DIGEST, R, S are integers."
+  "ecrecover with its 3,000 gas: the signer's address, or NIL. DIGEST, R, S are integers.
+alloy's secp256k1::recover_signer, so s above n/2 (EIP-2) recovers nothing."
   (deduct-gas +ecrecover-gas+)
-  (when (member v '(27 28))
+  (when (and (member v '(27 28)) (<= s clempo.secp256k1:+secp256k1-half-n+))
     (let ((pub (ignore-errors
                 (clempo.secp256k1:ecrecover (integer->octets digest 32) r s (- v 27)))))
       (when pub
