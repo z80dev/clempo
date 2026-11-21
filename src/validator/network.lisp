@@ -47,7 +47,7 @@
   slot link)
 
 (defstruct (validator-network (:constructor %make-network))
-  seed listener remotes
+  seed key listener remotes
   (lock (thr:make-mutex :name "validator peers") :read-only t)
   (inbox (make-mailbox (make-array 512 :initial-element nil) +network-inbox-limit+)
          :read-only t)
@@ -60,6 +60,13 @@
 (defun remote-for-key (network key)
   (find key (validator-network-remotes network) :test #'octets=
                                                :key (lambda (remote) (slot-public-key (remote-slot remote)))))
+
+(defun dial-preferred-p (network remote)
+  ;; For two Lisp peers only one direction may open. Otherwise simultaneous
+  ;; handshakes can each keep the connection the other side just closed.
+  (loop for local across (validator-network-key network)
+        for peer across (slot-public-key (remote-slot remote))
+        when (/= local peer) return (< local peer)))
 
 (defun install-link (network remote session stream)
   (thr:with-mutex ((validator-network-lock network))
@@ -132,19 +139,20 @@ how many queues accepted the message. Each link has both entry and byte limits."
       (unless installed (ignore-errors (close stream :abort t))))))
 
 (defun run-peer (network remote)
-  (let ((slot (remote-slot remote)))
+  (let ((slot (remote-slot remote)) (dial-p (dial-preferred-p network remote)))
     (unwind-protect
          (loop until (network-stopping-p network) do
-           (let ((link (or (current-link network remote) (ignore-errors (dial-link network remote)))))
+           (let ((link (or (current-link network remote)
+                           (and dial-p (ignore-errors (dial-link network remote))))))
              (if link
                  (unwind-protect
                       (handler-case (run-link network link)
                         (error (condition)
                           (unless (network-stopping-p network) (note-link-failure slot condition))))
                    (close-link network remote link))
-                 ;; Concurrent reservations are rejected by Rust too. Independent jitter
-                 ;; lets one direction win instead of repeating the same collision.
-                 (sleep (/ (+ 100 (io:random-below 350)) 1000.0)))))
+                 ;; Rust attempts both directions; stagger retries around its
+                 ;; authenticated lookup reservation window.
+                 (sleep (if dial-p (/ (+ 100 (io:random-below 350)) 1000.0) 0.05)))))
       (let ((link (current-link network remote)))
         (when link (close-link network remote link))))))
 
@@ -160,7 +168,8 @@ how many queues accepted the message. Each link has both entry and byte limits."
                               (cw:accept stream (validator-network-seed network)
                                          (lambda (identity)
                                            (setf remote (remote-for-key network identity))
-                                           (and remote (not (current-link network remote))))
+                                           (and remote (not (dial-preferred-p network remote))
+                                                (not (current-link network remote))))
                                          :max-message-size +network-message-limit+ :ping-interval-ms 5000))))
                (setf installed (install-link network remote session stream)))))
       (unless installed
@@ -178,7 +187,7 @@ how many queues accepted the message. Each link has both entry and byte limits."
 call FUNCTION with the network, and join every worker before returning."
   (let* ((seed (read-slot-seed slot))
          (listener (make-instance 'sock:inet-socket :type :stream :protocol :tcp))
-         (network (%make-network :seed seed :listener listener
+         (network (%make-network :seed seed :key (slot-public-key slot) :listener listener
                                  :remotes (loop for other across (manifest-slots manifest)
                                                 unless (eq slot other) collect (make-remote other)))))
     (unwind-protect
