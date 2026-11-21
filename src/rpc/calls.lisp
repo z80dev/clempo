@@ -554,10 +554,11 @@ EthApiError::Other around a jsonrpsee ErrorObject) is that object's Debug."
 
 (defun request-gas (request price env what)
   "reth prepare_call_env's gas limit: the request's (capped by the RPC gas cap), else the RPC
-gas cap bounded by the transaction cap."
+gas cap (prepare_call_env lifts the EIP-7825 transaction cap without EIP-8037)."
+  (declare (ignore env))
   (let ((g (req-gas request)))
     (cond (g (min g *rpc-gas-cap*))
-          ((zerop price) (min *rpc-gas-cap* (or (tx-gas-cap env) *rpc-gas-cap*)))
+          ((zerop price) *rpc-gas-cap*)
           (t (internal-error (format nil "~A: capping the gas of a priced request by the caller's fee token allowance is not implemented yet" what))))))
 
 (defun fail-invalid (e on-invalid)
@@ -579,25 +580,47 @@ and optional plist changes and executing REQUEST on a fresh overlay of STATE (ov
                 (executor:call-request ctx (append changes (request-plist request world gas price)))))
             price env)))
 
-(defun run-request (b state request what &key state-overrides block-overrides on-invalid ctx tracer)
+(defun make-budget () (list *rpc-gas-cap*))
+
+(defun budget-exceeded ()
+  (rpc-fail -32000 (format nil "the request's calls exceed the RPC gas cap of ~D" *rpc-gas-cap*)))
+
+(defun check-call-count (n)
+  "reth CallManyBudget::new: at most DEFAULT_MAX_CALL_MANY_CALLS (1024) calls per request."
+  (when (> n 1024) (rpc-fail +invalid-params+ (format nil "call count ~D exceeds limit 1024" n))))
+
+(defun run-request (b state request what &key state-overrides block-overrides on-invalid ctx tracer
+                                             budget)
   "Execute REQUEST on STATE in block B's environment, or in CTX after its earlier requests,
 under TRACER when given. Returns (values tx-outcome gas ctx); an invalid request calls
-ON-INVALID with (code message), or fails with reth's error."
+ON-INVALID with (code message), or fails with reth's error. BUDGET (MAKE-BUDGET) is the gas
+the calls of one eth_callMany, debug_traceCallMany or trace_callMany share (reth
+CallManyBudget): a call gets at most what is left, and runs out of it with an error."
   (when (aa-request-p request)
     (internal-error (format nil "~A: Tempo AA call requests are not converted to executor requests yet" what)))
   (let* ((price (normalize-request request (or (getf block-overrides :base-fee) (header-base-fee b))))
          (env (call-env b block-overrides price))
          (ctx (or ctx (executor:begin-call-block state env :block-hash-fn (block-hash-fn))))
          (world (executor:call-block-world ctx))
-         (gas (request-gas request price env what)))
+         (gas (request-gas request price env what))
+         (capped (and budget (> gas (car budget)))))
+    (when capped (setf gas (car budget)))
     (apply-state-overrides world state-overrides)
     (flet ((execute () (executor:call-request ctx (request-plist request world gas price))))
-      (values (handler-case (if tracer
-                                (clempo.tracing:with-tracer (tracer world) (execute))
-                                (execute))
-                (executor:invalid-transaction (e) (fail-invalid e on-invalid)))
-              gas
-              ctx))))
+      (let ((outcome (handler-case (if tracer
+                                       (clempo.tracing:with-tracer (tracer world) (execute))
+                                       (execute))
+                       (executor:invalid-transaction (e)
+                         (when (and capped (string= (executor:execution-failure-reason e)
+                                                    "intrinsic gas too low"))
+                           (budget-exceeded))
+                         (fail-invalid e on-invalid)))))
+        (when budget
+          (let ((halt (executor:tx-outcome-halt outcome)))
+            (when (and capped halt (search "OUT-OF-GAS" (symbol-name halt)))
+              (budget-exceeded)))
+          (decf (car budget) (executor:tx-outcome-gas-used outcome)))
+        (values outcome gas ctx)))))
 
 ;;; Methods
 
@@ -678,7 +701,9 @@ transactions). Each request renders as RENDER (tracer request outcome gas) under
   (let* ((target (or (getf context :block-number) :latest))
          (n (block-id-number target)))
     (unless (and n (<= n chain:*head*)) (header-not-found target))
+    (check-call-count (loop for bundle in bundles sum (max 1 (length (getf bundle :transactions)))))
     (let* ((b (chain-block n))
+           (budget (make-budget))
            (index (getf context :transaction-index :all))
            (all (or (eq index :all) (>= index (length (cblock-txs b)))))
            (state (when all (state-at (list :hash (cblock-hash b)))))
@@ -693,7 +718,7 @@ transactions). Each request renders as RENDER (tracer request outcome gas) under
                             collect (let ((tr (and tracer (funcall tracer))))
                                       (multiple-value-bind (outcome gas c)
                                           (run-request b state request what
-                                                       :ctx ctx :tracer tr
+                                                       :ctx ctx :tracer tr :budget budget
                                                        :state-overrides overrides
                                                        :block-overrides (getf bundle :block-override)
                                                        :on-invalid (lambda (code message)
@@ -821,15 +846,14 @@ transactions). Each request renders as RENDER (tracer request outcome gas) under
                                 i (cblock-number b) (executor:execution-failure-reason e)))))))
 
 (defun trace-block-txs (b make-tracer result &key (start 0) (end (length (cblock-txs b))))
-  "Replay block B's transactions below END, tracing those from START: MAKE-TRACER takes the
-block-wide index of the transaction's first log, RESULT (tracer index outcome) renders one.
-Returns the rendered results in order."
-  (let ((ctx (block-context b)) (logs 0) (out '()))
+  "Replay block B's transactions below END, tracing those from START under a fresh
+(funcall MAKE-TRACER) each; RESULT (tracer index outcome) renders one. Returns the rendered
+results in order."
+  (let ((ctx (block-context b)) (out '()))
     (loop for i from 0 below end
-          do (let* ((tracer (and (>= i start) (funcall make-tracer logs)))
+          do (let* ((tracer (and (>= i start) (funcall make-tracer)))
                     (outcome (replay-tx ctx b i tracer)))
-               (when tracer (push (funcall result tracer i outcome) out))
-               (incf logs (length (executor:tx-outcome-logs outcome)))))
+               (when tracer (push (funcall result tracer i outcome) out))))
     (nreverse out)))
 
 (defun tx-hash-int (b i) (octets->integer (svref (cblock-tx-hashes b) i)))
@@ -974,8 +998,8 @@ Returns the rendered results in order."
                (push (if (member kw '(:tracer :tracer-config :timeout :limit)) v (json:jbool v)) kvs))
     (apply #'json:jobject (nreverse kvs))))
 
-(defun geth-tracer (options &optional (log-index 0))
-  (handler-case (clempo.tracing:make-geth-tracer (options-json options) :log-index log-index)
+(defun geth-tracer (options)
+  (handler-case (clempo.tracing:make-geth-tracer (options-json options))
     (clempo.tracing:tracer-error (e) (rpc-fail +invalid-params+ (clempo.tracing:tracer-error-message e)))))
 
 (defun tx-block (hash)
@@ -995,7 +1019,7 @@ Returns the rendered results in order."
   (when (zerop (cblock-number b)) (rpc-fail -32000 "genesis is not traceable"))
   (check-tracer options)
   (let ((render (geth-tx-result b)))
-    (coerce (trace-block-txs b (lambda (logs) (geth-tracer options logs))
+    (coerce (trace-block-txs b (lambda () (geth-tracer options))
                              (lambda (tracer i outcome)
                                (json:jobject "txHash" (hex32 (svref (cblock-tx-hashes b) i))
                                              "result" (funcall render tracer i outcome))))
@@ -1006,7 +1030,7 @@ Returns the rendered results in order."
   (multiple-value-bind (b i) (tx-block hash)
     (unless b (rpc-fail -32000 "transaction not found"))
     (check-tracer options)
-    (first (trace-block-txs b (lambda (logs) (geth-tracer options logs)) (geth-tx-result b)
+    (first (trace-block-txs b (lambda () (geth-tracer options)) (geth-tx-result b)
                             :start i :end (1+ i)))))
 
 (defrpc "debug_traceBlockByNumber" ((id block-number-or-tag) (options tracing-options :optional t))
@@ -1077,14 +1101,17 @@ Returns the rendered results in order."
 
 (defrpc "trace_callMany" ((calls traced-calls) (block block-id :optional t))
   "parity traces of calls executed one after another"
+  (check-call-count (length calls))
   (let* ((b (call-block block))
          (state (state-at (list :hash (cblock-hash b))))
+         (budget (make-budget))
          (ctx nil))
     (coerce
      (loop for (request . types) in calls
            collect (let ((tracer (clempo.tracing:make-parity-tracer types)))
                      (multiple-value-bind (outcome gas c)
-                         (run-request b state request "trace_callMany" :ctx ctx :tracer tracer)
+                         (run-request b state request "trace_callMany" :ctx ctx :tracer tracer
+                                                                       :budget budget)
                        (declare (ignore gas))
                        (setf ctx c)
                        (clempo.tracing:parity-result tracer :output (executor:tx-outcome-output outcome)))))
@@ -1096,7 +1123,7 @@ Returns the rendered results in order."
     (when b
       (first (trace-block-txs b make-tracer (funcall render b) :start i :end (1+ i))))))
 
-(defun parity-maker (types) (lambda (logs) (declare (ignore logs)) (clempo.tracing:make-parity-tracer types)))
+(defun parity-maker (types) (lambda () (clempo.tracing:make-parity-tracer types)))
 
 (defrpc "trace_transaction" ((hash hash))
   "parity traces of a transaction"
@@ -1108,11 +1135,11 @@ Returns the rendered results in order."
         ((stringp v) (parse-integer v :junk-allowed t))))
 
 (defrpc "trace_get" ((hash hash) (indices any))
-  "one parity trace of a transaction by its index"
-  (let ((traces (tx-trace hash (parity-maker '(:trace)) #'parity-localized)))
-    (if (and traces (vectorp indices) (= (length indices) 1))
-        (let ((k (index-value (aref indices 0))))
-          (if (and k (< k (length traces))) (aref traces k) :null))
+  "the parity trace of a transaction at a traceAddress path (reth: find by trace_address)"
+  (let ((traces (tx-trace hash (parity-maker '(:trace)) #'parity-localized))
+        (path (and (vectorp indices) (not (stringp indices)) (map 'list #'index-value indices))))
+    (or (and traces (vectorp indices) (not (stringp indices))
+             (find-if (lambda (tr) (equal (coerce (json:jget tr "traceAddress") 'list) path)) traces))
         :null)))
 
 (defrpc "trace_replayTransaction" ((hash hash) (types trace-types))
@@ -1122,16 +1149,15 @@ Returns the rendered results in order."
 
 (defrpc "trace_transactionOpcodeGas" ((hash hash))
   "opcode counts and gas of a transaction"
-  (or (tx-trace hash (lambda (logs) (declare (ignore logs)) (clempo.tracing:make-opcode-gas-tracer))
+  (or (tx-trace hash #'clempo.tracing:make-opcode-gas-tracer
                 #'opcode-gas)
       :null))
 
 (defmacro defblock-trace (name (&rest params) doc &body body)
-  "A trace_* method over block B (null for an unknown block); BODY renders it."
+  "A trace_* method over block B (reth: HeaderNotFound for an unknown block); BODY renders it."
   `(defrpc ,name ((id block-id) ,@params) ,doc
-     (let* ((n (block-id-number id))
-            (b (and n (<= n chain:*head*) (chain-block n))))
-       (if (null b) :null (progn ,@body)))))
+     (let ((b (known-block id)))
+       ,@body)))
 
 (defun block-traces (b make-tracer render)
   (if (zerop (cblock-number b)) '() (trace-block-txs b make-tracer (funcall render b))))
@@ -1144,7 +1170,6 @@ Returns the rendered results in order."
 
 (defblock-trace "trace_blockOpcodeGas" () "opcode counts and gas of every transaction of a block"
   (json:jobject "blockHash" (hex32 (cblock-hash b)) "blockNumber" (cblock-number b)
-                "transactions" (coerce (block-traces b (lambda (logs) (declare (ignore logs))
-                                                         (clempo.tracing:make-opcode-gas-tracer))
+                "transactions" (coerce (block-traces b #'clempo.tracing:make-opcode-gas-tracer
                                                      #'opcode-gas)
                                        'simple-vector)))

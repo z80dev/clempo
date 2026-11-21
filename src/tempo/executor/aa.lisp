@@ -283,7 +283,7 @@ runs unmetered. Returns the gas it used, or :OUT-OF-GAS (its writes rolled back)
 
 ;;; The batch
 
-(defun execute-batch (v caller access-key create-nonce price gas)
+(defun run-batch (v caller access-key create-nonce price gas)
   "handler.rs execute_batch: all calls or none. Returns (values success-p gas-left status
 output): the failing call's status and output, else the last call's."
   (let* ((world evm:*world*)
@@ -299,12 +299,12 @@ output): the failing call's status and output, else the last call's."
               (setf remaining (- remaining (contract:metered-storage-spent storage))))
           (contract:precompile-revert (c)
             (state:rollback world cp)
-            (return-from execute-batch (values nil (- remaining (contract:metered-storage-spent storage))
+            (return-from run-batch (values nil (- remaining (contract:metered-storage-spent storage))
                                                :revert (contract:precompile-revert-data c))))
           (contract:precompile-halt (c)
             (state:rollback world cp)
             (let ((reason (contract:precompile-halt-reason c)))
-              (return-from execute-batch
+              (return-from run-batch
                 (values nil 0 (if (keywordp reason) reason :precompile-error) (make-octets 0))))))))
     (let ((evm:*tx-env* (evm:make-tx-env :origin caller :gas-price price))
           (last-status :stop) (last-output (make-octets 0)))
@@ -322,9 +322,24 @@ output): the failing call's status and output, else the last call's."
                    (state:rollback world cp)
                    (when (and (zerop (txv-nonce-key v)) (null (first (first (txv-calls v)))))
                      (state:increment-nonce world (state:get-account world caller)))
-                   (return-from execute-batch (values nil gas-left status output)))
+                   (return-from run-batch (values nil gas-left status output)))
                  (setf remaining gas-left last-status status last-output output)))
       (values t remaining last-status last-output))))
+
+(defun execute-batch (v caller access-key create-nonce price gas)
+  "RUN-BATCH. A tracer sees the calls under a wrapper frame without a status (caller and
+address zero, no gas, no input), as evm2 runs them one level below an implicit parent and
+its tracing inspector records that parent as an empty root. Untraced execution is RUN-BATCH
+alone."
+  (let ((tracer evm:*tracer*))
+    (if (null tracer)
+        (run-batch v caller access-key create-nonce price gas)
+        (let ((wrapper (evm::%make-frame :kind :call :caller 0 :address 0 :code-address 0
+                                         :value 0 :input state:+empty-code+
+                                         :code state:+empty-code+ :gas 0 :depth 0)))
+          (evm:trace-call-start tracer wrapper)
+          (multiple-value-prog1 (run-batch v caller access-key create-nonce price gas)
+            (evm:trace-call-end tracer wrapper nil 0 state:+empty-code+))))))
 
 
 (defun execute-aa-transaction (ctx v)

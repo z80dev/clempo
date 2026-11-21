@@ -103,6 +103,16 @@
               (loop for r in results count (fourth r))
               (length results)))))
 
+(defun rpcdiff-suites (results)
+  "Per suite, in corpus order: a JSON object of \"suite\": \"identical/total\"."
+  (let ((rows '()))
+    (dolist (r results)
+      (let* ((s (clempo.json:jget (first r) "suite"))
+             (cell (or (assoc s rows :test #'string=) (car (push (list s 0 0) rows)))))
+        (incf (second cell))
+        (when (fourth r) (incf (third cell)))))
+    (cons :object (loop for (s n ok) in (reverse rows) collect (cons s (format nil "~D/~D" ok n))))))
+
 (defun json-difference (want got &optional (path "$"))
   "The first place WANT and GOT differ, as \"path: want X got Y\", or NIL."
   (cond ((and (clempo.json:jobject-p want) (clempo.json:jobject-p got))
@@ -153,7 +163,8 @@
              "methods" methods-ok "methodsTotal" (length rows)
              "cases" cases-ok "casesTotal" total
              "referenceMethodsServed" (length served)
-             "referenceMethods" (+ (length served) (length missing)))))))))
+             "referenceMethods" (+ (length served) (length missing))
+             "suites" (rpcdiff-suites results))))))))
 
 (defcommand "rpcdiff" (args)
   "R5: replay the RPC corpus against clempo: rpcdiff [-v] [-suite S] [-method M] [-url U] [-limit N]"

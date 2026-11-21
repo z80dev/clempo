@@ -170,7 +170,10 @@ evm2's journaled semantics (crates/precompiles/src/storage/evm.rs sload_journal 
     was-empty))
 
 (defmethod contract:host-log ((h world-host) address topics data)
-  (state:add-log evm:*world* (state:make-log-entry address topics data)))
+  (let ((entry (state:make-log-entry address topics data)))
+    (state:add-log evm:*world* entry)
+    ;; a precompile's logs reach the tracer like LOGn's (the frame is the precompile's own)
+    (when evm:*tracer* (evm:trace-log evm:*tracer* nil entry))))
 
 (defmethod contract:host-logs ((h world-host))
   (mapcar (lambda (e) (list (state:log-entry-address e) (state:log-entry-topics e) (state:log-entry-data e)))

@@ -28,8 +28,8 @@ Call sequence:
 The handler must call TRACE-TX-START before buying gas and TRACE-TX-END after
 FINALIZE-TX (ETHEREUM-HANDLER does); the transaction's gas limit, sender, gas used and
 output come from them unless GETH-RESULT is given :GAS-LIMIT :CALLER :GAS-USED :OUTPUT.
-Tracing a block: one tracer per transaction, :LOG-INDEX of MAKE-GETH-TRACER being the
-number of logs the block's earlier transactions emitted. Bad options signal TRACER-ERROR.")
+Tracing a block: one tracer per transaction; call logs are indexed from 0 within the
+transaction, as the reference's are. Bad options signal TRACER-ERROR.")
   (:export
    #:make-geth-tracer #:make-parity-tracer #:make-opcode-gas-tracer
    #:attach-tracer #:detach-tracer #:with-tracer
@@ -107,10 +107,13 @@ number of logs the block's earlier transactions emitted. Bad options signal TRAC
 
 ;;; Halt statuses. Clempo's status keywords map onto evm2's InstrStop; each stop has its
 ;;; Debug name (struct logs print "Some(Name)"), geth and parity messages and a class.
+;;; NIL is a frame without a status (evm2's placeholder root around a Tempo AA batch): not
+;;; successful, yet no error.
 
 (defparameter *stops*
   ;; stop debug-name geth parity class
-  '((:stop "Stop" nil nil :success)
+  '((nil "None" nil nil :none)
+    (:stop "Stop" nil nil :success)
     (:return "Return" nil nil :success)
     (:selfdestruct "SelfDestruct" nil nil :success)
     (:revert "Revert" "execution reverted" "Reverted" :revert)
@@ -305,7 +308,7 @@ number of logs the block's earlier transactions emitted. Bad options signal TRAC
    (nodes :initform (adjustable) :reader tracer-nodes)
    (active :initform '())                         ; ((node . frame) ...), innermost first
    (pending :initform '())
-   (log-count :initform 0 :initarg :log-index)
+   (log-count :initform 0)
    (world :initform nil)
    (previous-observer :initform nil)
    (precompiles :initform nil)
@@ -445,7 +448,10 @@ Bind *TRACER* to it around the transaction (WITH-TRACER does both)."
                (parent (and parent-entry (car parent-entry)))
                (node (make-node :idx (fill-pointer nodes)
                                 :parent (and parent (node-idx parent))
-                                :depth (frame-depth frame) :kind kind
+                                ;; one below its parent: a Tempo AA batch's calls run at
+                                ;; depth 0 under a wrapper frame that is not an EVM message
+                                :depth (if parent (1+ (node-depth parent)) (frame-depth frame))
+                                :kind kind
                                 :caller from :address to
                                 :storage-address (frame-address frame)
                                 :value (frame-value frame) :input input
@@ -476,7 +482,7 @@ Bind *TRACER* to it around the transaction (WITH-TRACER does both)."
             (node-stop node) stop
             (node-success node) (stop-success-p stop)
             (node-output node) (or output +empty-code+))
-      (unless (node-success node) (setf log-count (node-log-mark node)))
+      (when (node-error-p node) (setf log-count (node-log-mark node)))
       ;; trace_transactionOpcodeGas leaves the child's gas out of its CALL or CREATE.
       (when (and opcode-gas-p (plusp (frame-depth frame)))
         (let ((p (first pending))
@@ -596,6 +602,8 @@ gas once a CALL or CREATE charged everything (NIL otherwise). STATIC-P: the fram
 
 (defmethod trace-log ((tracer tracer) frame log)
   (declare (ignore frame))
+  ;; A log outside any frame (a Tempo key authorization before the first call) takes an
+  ;; index but has no trace to attach to, as in evm2's tracing inspector.
   (with-slots (log-count) tracer
     (let ((node (current-node tracer)))
       (when node
@@ -617,14 +625,14 @@ gas once a CALL or CREATE charged everything (NIL otherwise). STATIC-P: the fram
 
 (defun nodes-list (tracer) (coerce (tracer-nodes tracer) 'list))
 (defun node-at (tracer i) (aref (tracer-nodes tracer) i))
-(defun node-error-p (node) (not (stop-success-p (node-stop node))))
+(defun node-error-p (node) (not (member (stop-class (node-stop node)) '(:success :none))))
 (defun node-revert-p (node) (eq (node-stop node) :revert))
 (defun node-selfdestruct-p (node) (and (node-sd-target node) t))
 
 (defun effective-p (tracer node)
-  "NODE and all its callers succeeded, so its effects stand."
+  "NODE and all its callers ended without an error, so its effects stand."
   (loop for n = node then (node-at tracer (node-parent n))
-        always (node-success n)
+        never (node-error-p n)
         while (node-parent n)))
 
 (defun root-overrides (tracer &key gas-limit caller)
@@ -1205,16 +1213,15 @@ and flatCallTracer (LOCALIZED t) list them, selfdestructs included."
         do (setf (getf a k) (or (getf a k) v)))
   a)
 
-(defun make-geth-tracer (options &key (log-index 0))
+(defun make-geth-tracer (options)
   "A tracer for debug_trace* with OPTIONS, the GethDebugTracingOptions JSON object
-\(tracer, tracerConfig and the struct logger's flags). LOG-INDEX is the block-wide index
-the transaction's first log gets."
+\(tracer, tracerConfig and the struct logger's flags)."
   (let* ((options (if (jobject-p options) options (jobject)))
          (name (jget options "tracer"))
          (name (if (and (stringp name) (plusp (length name))) name nil))
          (config (jget options "tracerConfig")))
     (if (null name)
-        (apply #'make-instance 'geth-tracer :kind :default :config options :log-index log-index
+        (apply #'make-instance 'geth-tracer :kind :default :config options
                (tracer-flags :default options))
         (let ((kind (cdr (assoc name *builtin-tracers* :test #'string=))))
           (case kind
@@ -1234,9 +1241,9 @@ the transaction's first log gets."
                           (push (list child-name child-kind c) children)
                           (setf flags (merge-flags flags (tracer-flags child-kind c)))))
                (apply #'make-instance 'geth-tracer :kind :mux :config config
-                      :children (nreverse children) :log-index log-index flags)))
+                      :children (nreverse children) flags)))
             (t (let ((c (config-object config name)))
-                 (apply #'make-instance 'geth-tracer :kind kind :config c :log-index log-index
+                 (apply #'make-instance 'geth-tracer :kind kind :config c
                         (tracer-flags kind c)))))))))
 
 (defun make-parity-tracer (types)
