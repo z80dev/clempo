@@ -40,23 +40,53 @@ point the EVM calls (TempoPrecompiles::execute in crates/precompiles/src/lib.rs)
   (:shadow #:symbol)
   (:documentation "TIP20Token (tip20*.lisp): every 0x20C0... token: ERC-20 core, roles,
 rewards, permits, memos, transfer policies, virtual addresses.")
-  (:export #:tip20-token #:transfer #:transfer-from #:system-transfer-from #:mint #:burn
-           #:burn-blocked #:balance-of #:total-supply #:quote-token #:currency
-           #:transfer-policy-id #:legacy-transfer-policy-id #:set-next-quote-token
-           #:release-blocked-funds #:write-logo-uri #:initialize-token
-           #:transfer-fee-pre-tx #:transfer-fee-post-tx #:has-role #:grant-role))
+  (:export #:tip20-token
+           ;; views
+           #:name #:symbol #:currency #:total-supply #:quote-token #:next-quote-token
+           #:supply-cap #:paused-p #:balance-of #:allowance #:transfer-policy-id
+           #:legacy-transfer-policy-id #:delete-legacy-transfer-policy-id #:logo-uri
+           #:balance-slot #:permit-nonce #:domain-separator
+           ;; ERC-20 core and extensions
+           #:transfer #:transfer-from #:transfer-with-memo #:transfer-from-with-memo
+           #:system-transfer-from #:approve #:mint #:mint-with-memo #:burn #:burn-with-memo
+           #:burn-blocked #:burn-at #:permit #:increment-balance #:decrement-balance
+           #:set-next-quote-token #:complete-quote-token-update #:change-transfer-policy-id
+           #:set-supply-cap #:write-logo-uri #:validate-logo-uri #:pause #:unpause
+           #:initialize-token #:transfer-fee-pre-tx #:transfer-fee-post-tx
+           #:release-blocked-funds #:channel-reserve-transfer
+           ;; checks
+           #:from-address #:validate-usd-currency #:check-not-paused #:check-role
+           #:transfer-authorized-p #:ensure-transfer-authorized #:ensure-authorized-as
+           #:ensure-receive-policy-authorized #:check-and-update-spending-limit
+           ;; recipients (TIP-1022)
+           #:recipient #:recipient-target #:recipient-virtual-addr #:recipient-direct
+           #:recipient-resolve
+           ;; roles
+           #:has-role #:grant-role #:grant-role-internal #:revoke-role #:get-role-admin
+           #:+default-admin-role+ #:+ungrantable-role+ #:+pause-role+ #:+unpause-role+
+           #:+issuer-role+ #:+burn-blocked-role+ #:+burn-at-role+
+           ;; rewards
+           #:update-rewards #:opted-in-supply #:global-reward-per-token
+           ;; errors
+           #:insufficient-balance #:insufficient-allowance #:supply-cap-exceeded
+           #:invalid-supply-cap #:policy-forbids #:invalid-recipient #:contract-paused
+           #:invalid-currency #:invalid-quote-token #:invalid-amount #:unauthorized
+           #:protected-address #:invalid-token #:uninitialized #:invalid-transfer-policy-id))
 
 (defpackage #:clempo.tip20-factory
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
   (:shadowing-import-from #:clempo.contract #:read #:write #:delete)
   (:documentation "TIP20Factory (tip20-factory.lisp): token creation and the TIP-20 check.")
-  (:export #:tip20-factory #:create-token #:tip20-p))
+  (:export #:tip20-factory #:create-token #:create-token-with-logo
+           #:create-token-reserved-address #:token-address #:tip20-p))
 
 (defpackage #:clempo.address-registry
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
   (:shadowing-import-from #:clempo.contract #:read #:write #:delete)
   (:documentation "AddressRegistry (address-registry.lisp): TIP-1022 virtual addresses.")
-  (:export #:address-registry #:resolve-recipient #:resolve-virtual-address))
+  (:export #:address-registry #:resolve-recipient #:resolve-virtual-address #:get-master
+           #:register-virtual-master #:virtual-address-p #:valid-master-p
+           #:implicitly-approved-p))
 
 (defpackage #:clempo.tip403
   (:use #:cl #:clempo.base #:clempo.forks #:clempo.contract #:clempo.precompiles)
