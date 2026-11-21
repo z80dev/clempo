@@ -499,6 +499,24 @@ SEGMENT-FLOOR bounded to START..END."
                      (if (> (car (svref vec mid)) n) (setf hi mid) (setf lo (1+ mid)))))
           (when (plusp lo) (svref vec (1- lo))))))))
 
+;;; The probe cache: what segment probes found, so a key read again (a hot contract's slot, a
+;;; system account every call touches) costs one comparison instead of a page scan in each
+;;; segment back to the full one. An entry says KEY's newest segment version at or before HI
+;;; is the one written at block LO (VALUE), or (not FOUND-P) that KEY has no version from the
+;;; full segment's block LO through HI. The versions of covered blocks never change (a merge
+;;; or a refresh only regroups them, and a segment added later covers blocks no view could
+;;; read before), so the entry answers any segment bound in LO..HI. Entries are immutable
+;;; and replaced whole in a direct-mapped table, so readers take no lock.
+
+(defconstant +cache-size+ (ash 1 18))
+
+(defstruct (hit (:constructor make-hit (key lo hi found-p value)))
+  (key 0 :type integer :read-only t)
+  (lo 0 :type fixnum :read-only t)
+  (hi 0 :type fixnum :read-only t)
+  (found-p nil :read-only t)
+  (value nil :read-only t))
+
 ;;; Codes: append-only files of (hash:32 length:u32 bytes)*, indexed at open and read on use.
 
 ;;; The history
@@ -510,6 +528,7 @@ SEGMENT-FLOOR bounded to START..END."
   (codes (make-hash-table :synchronized t) :type hash-table) ; hash integer -> (path . offset) or octets
   (code-files (make-hash-table :test 'equal :synchronized t) :type hash-table) ; path -> bytes scanned
   (lock (sb-thread:make-mutex :name "history"))
+  (cache (make-array +cache-size+ :initial-element nil) :type simple-vector) ; HITs by key hash
   (tail nil)                             ; writer only
   (job nil)
   (last-accounts nil)                    ; writer: address -> AVER, the latest version
@@ -666,30 +685,52 @@ executor layer, which may see this one)."
                (setf reach (1- (segment-from s)))))
     nil))
 
-(defun probe (view key fn-tail fn-seg)
-  "The newest version of KEY visible from VIEW: (FN-TAIL entry) for a tail entry or
-(FN-SEG segment start end first count bound) for a segment record; NIL when none."
+(defun probe-segments (probes key decode)
+  "(values block value) of KEY's newest version in the segments of PROBES ((segment . bound)
+...), newest first, read by DECODE (sap start end first bound); NIL when none."
+  (let* ((target (make-octets 53))
+         (tlen (key-into key target)))
+    (declare (dynamic-extent target))
+    (loop for (seg . bound) in probes
+          do (multiple-value-bind (start end first) (segment-floor seg key target tlen bound)
+               (when start (return-from probe-segments (funcall decode (segment-sap seg) start end first bound)))))
+    nil))
+
+(defun probe (view key decode)
+  "(values block value) of KEY's newest version visible from VIEW, NIL when none: a tail
+entry, else a segment record read by DECODE (sap start end first bound) through the probe
+cache."
+  (declare (type function decode))
   (let ((n (history-state-number view))
-        (tail (history-state-tail view)))
+        (tail (history-state-tail view))
+        (probes (history-state-probes view)))
     (when tail
       (let ((e (tail-floor tail key n)))
-        (when e (return-from probe (funcall fn-tail e)))))
-    (let* ((target (make-octets 53))
-           (tlen (key-into key target)))
-      (declare (dynamic-extent target))
-      (loop for (seg . bound) in (history-state-probes view)
-            do (multiple-value-bind (start end first count) (segment-floor seg key target tlen bound)
-                 (when start (return-from probe (funcall fn-seg seg start end first count bound))))))
-    nil))
+        (when e (return-from probe (values (car e) (cdr e))))))
+    (when probes
+      (let* ((bound (cdr (first probes)))  ; the newest segment block the probes cover
+             (cache (history-cache (history-state-history view)))
+             (i (logand (sxhash key) (1- +cache-size+)))
+             (old (svref cache i)))
+        (declare (type fixnum bound))
+        (when (and old (<= (hit-lo old) bound (hit-hi old)) (= key (hit-key old)))
+          (return-from probe (if (hit-found-p old) (values (hit-lo old) (hit-value old)) nil)))
+        (multiple-value-bind (block value) (probe-segments probes key decode)
+          ;; none: valid from the full segment's block up (the key may have existed before it)
+          (let* ((lo (or block (segment-from (car (car (last probes))))))
+                 (hi (if (and old (= lo (hit-lo old)) (eq (and block t) (hit-found-p old))
+                              (= key (hit-key old)))
+                         (max bound (hit-hi old))
+                         bound))
+                 (new (make-hit key lo hi (and block t) value)))
+            (sb-thread:barrier (:write))
+            (setf (svref cache i) new))
+          (values block value))))))
 
 (defun account-version (view address)
   "(values aver block) of ADDRESS's latest version visible from VIEW, or NIL."
-  (probe view address
-         (lambda (e) (values (cdr e) (car e)))
-         (lambda (seg start end first count bound)
-           (declare (ignore count))
-           (multiple-value-bind (block v) (last-account-version (segment-sap seg) start end first bound)
-             (values v block)))))
+  (multiple-value-bind (block v) (probe view address #'last-account-version)
+    (when block (values v block))))
 
 (defun history-account (view address)
   "(values found-p nonce balance code-hash commitment) of ADDRESS in VIEW."
@@ -711,12 +752,7 @@ executor layer, which may see this one)."
 
 (defun history-storage (view address slot)
   "The value of SLOT of ADDRESS in VIEW (0 when never written or wiped since)."
-  (multiple-value-bind (block value)
-      (probe view (slot-key address slot)
-             (lambda (e) (values (car e) (cdr e)))
-             (lambda (seg start end first count bound)
-               (declare (ignore count))
-               (last-slot-version (segment-sap seg) start end first bound)))
+  (multiple-value-bind (block value) (probe view (slot-key address slot) #'last-slot-version)
     (if (null block)
         0
         (let* ((history (history-state-history view))
