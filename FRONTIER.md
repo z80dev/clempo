@@ -15,7 +15,19 @@
 
 ## Evidence
 
-Keccak-256 (macro-unrolled Keccak-f over 25 typed lane variables): 250 MB/s on 64 MiB with no allocation, 0.57 µs per 64-byte hash, SBCL 2.6.8 release build on the dev host (Apple Silicon, 16 cores).
+Keccak-256 (SBCL 2.6.8 release, Apple Silicon): the ARM SHA3 permutation and
+copy-free 32/64-byte paths reduced 64-byte hashes from **626 ns to 178 ns**
+(1 million calls, about 3.5× faster) and 480 to 272 bytes consed per hash.
+On 64 MiB, throughput rose from **256 to 799 MB/s** (262 to 84 ms), with no
+measurable consing. The typed scalar permutation remains the fallback.
+
+```sh
+CLEMPO_BUILD=release sbcl --noinform --non-interactive --load scripts/build.lisp \
+  --eval '(asdf:load-system "clempo-crypto-keccak")' \
+  --eval '(let ((small (clempo.base:make-octets 64)) (big (clempo.base:make-octets (* 64 1024 1024))))
+            (time (dotimes (i 1000000) (clempo.keccak:keccak256 small)))
+            (time (clempo.keccak:keccak256 big)))'
+```
 
 R3e = 61,903/61,903 (b0b729d): `bin/clempo-dev score -rung R3e -json` (or
 `bin/clempo-dev statetest ~/cache/clempo/fixtures/fixtures/state_tests/`) runs every

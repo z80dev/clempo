@@ -69,9 +69,17 @@ within a round: theta, rho, pi and chi become straight-line register code."
          (setf ,@(loop for i below 25 nconc `((aref ,state ,i) ,(nth i a))))
          ,state))))
 
-(defun keccak-f (state)
+(defun keccak-f-portable (state)
   (declare (type keccak-state state) #.*hot*)
   (keccak-rounds state))
+
+#+(and arm64 darwin)
+(clempo.keccak-arm64:define-arm64-keccak *rotations*)
+
+(defun keccak-f (state)
+  (declare (type keccak-state state) #.*hot*)
+  #+(and arm64 darwin) (progn (clempo.keccak-arm64:permute state +round-constants+) state)
+  #-(and arm64 darwin) (keccak-f-portable state))
 
 (defstruct (keccak (:constructor %make-keccak))
   (state (make-array 25 :element-type '(unsigned-byte 64) :initial-element 0) :type keccak-state)
@@ -80,16 +88,17 @@ within a round: theta, rho, pi and chi become straight-line register code."
 
 (defun make-keccak () (%make-keccak))
 
+(defmacro load-lane (data start)
+  (let ((offset (gensym)))
+    `(let ((,offset ,start))
+       (declare (type fixnum ,offset))
+       (logior ,@(loop for i below 8 collect `(ash (aref ,data (+ ,offset ,i)) ,(* i 8)))))))
+
 (declaim (inline absorb-block))
 (defun absorb-block (state data start)
   (declare (type keccak-state state) (type octets data) (type fixnum start) #.*hot*)
   (dotimes (lane 17)
-    (let ((word 0)
-          (base (+ start (* lane 8))))
-      (declare (type lane word) (type fixnum base))
-      (loop for k from 7 downto 0
-            do (setf word (logior (ldb (byte 64 0) (ash word 8)) (aref data (+ base k)))))
-      (setf (aref state lane) (logxor (aref state lane) word))))
+    (setf (aref state lane) (logxor (aref state lane) (load-lane data (+ start (* lane 8))))))
   (keccak-f state))
 
 (defun keccak-update (k data &key (start 0) (end (length data)))
@@ -116,28 +125,45 @@ within a round: theta, rho, pi and chi become straight-line register code."
     (setf (keccak-fill k) used)
     k))
 
-(defun keccak-final (k)
-  "Pad, squeeze 32 bytes. K must not be used afterwards."
-  (declare (type keccak k) #.*hot*)
-  (let ((buf (keccak-buffer k))
-        (used (keccak-fill k))
-        (state (keccak-state k))
-        (out (make-octets 32)))
-    (fill buf 0 :start used)
-    (setf (aref buf used) (logxor (aref buf used) #x01))
-    (setf (aref buf 135) (logxor (aref buf 135) #x80))
-    (absorb-block state buf 0)
+(defun squeeze (state)
+  (declare (type keccak-state state) #.*hot*)
+  (let ((out (make-octets 32)))
     (dotimes (lane 4 out)
       (let ((w (aref state lane)))
         (dotimes (j 8)
           (setf (aref out (+ (* lane 8) j)) (ldb (byte 8 (* 8 j)) w)))))))
 
+(defun keccak-final (k)
+  "Pad, squeeze 32 bytes. K must not be used afterwards."
+  (declare (type keccak k) #.*hot*)
+  (let ((buf (keccak-buffer k))
+        (used (keccak-fill k))
+        (state (keccak-state k)))
+    (fill buf 0 :start used)
+    (setf (aref buf used) (logxor (aref buf used) #x01))
+    (setf (aref buf 135) (logxor (aref buf 135) #x80))
+    (absorb-block state buf 0)
+    (squeeze state)))
+
+(defun keccak256-fixed (data start lanes)
+  (declare (type octets data) (type fixnum start) (type (member 4 8) lanes) #.*hot*)
+  (let ((state (make-array 25 :element-type '(unsigned-byte 64) :initial-element 0)))
+    (dotimes (i lanes)
+      (setf (aref state i) (load-lane data (+ start (* 8 i)))))
+    (setf (aref state lanes) 1 (aref state 16) #x8000000000000000)
+    (squeeze (keccak-f state))))
+
 (defun keccak256 (data &key (start 0) (end (length data)))
   "Keccak-256 of DATA[START,END) as 32 octets."
   (declare (type octets data))
-  (let ((k (%make-keccak)))
-    (keccak-update k data :start start :end end)
-    (keccak-final k)))
+  (assert (and (typep start 'fixnum) (typep end 'fixnum) (<= 0 start end (length data))))
+  (case (- end start)
+    (32 (keccak256-fixed data start 4))
+    (64 (keccak256-fixed data start 8))
+    (otherwise
+     (let ((k (%make-keccak)))
+       (keccak-update k data :start start :end end)
+       (keccak-final k)))))
 
 (defun keccak256-concat (&rest parts)
   (let ((k (%make-keccak)))
