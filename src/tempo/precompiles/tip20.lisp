@@ -103,6 +103,9 @@
 (defun name (token) (read (token-name token)))
 (defun symbol (token) (read (token-symbol token)))
 (defun currency (token) (read (token-currency token)))
+(defun currency-length (token)
+  "The byte length of TOKEN's currency (one SLOAD, BytesLikeHandler::len)."
+  (string-length (token-currency token)))
 (defun logo-uri (token) (read (token-logo-uri token)))
 (defun total-supply (token) (read (token-total-supply token)))
 (defun quote-token (token) (read (token-quote-token token)))
@@ -219,7 +222,7 @@
             do (revert 'policy-forbids))))
 
 (defun check-and-update-spending-limit (token from amount)
-  (funcall 'clempo.keychain:authorize-transfer from token amount))
+  (clempo.keychain:authorize-transfer from token amount))
 
 ;;; The core transfer.
 
@@ -438,7 +441,7 @@ custody when CHECK-PROTECTED is false)."
   (values))
 
 (defun approve (token sender spender amount)
-  (funcall 'clempo.keychain:authorize-approve sender token (allowance token sender spender) amount)
+  (clempo.keychain:authorize-approve sender token (allowance token sender spender) amount)
   (write (token-allowances token sender spender) amount)
   (emit token 'approval sender spender amount)
   t)
@@ -586,7 +589,7 @@ custody when CHECK-PROTECTED is false)."
 (defun transfer-fee-post-tx (token to refund actual-spending)
   (emit token 'transfer to +fee-manager-address+ actual-spending)
   (unless (zerop refund)
-    (fork-if (:since :t1c) (funcall 'clempo.keychain:refund-spending-limit to token refund))
+    (fork-if (:since :t1c) (clempo.keychain:refund-spending-limit to token refund))
     (unless (zerop (update-rewards token to))
       (adjust-opted-in-supply token refund))
     (decrement-balance token +fee-manager-address+ refund)

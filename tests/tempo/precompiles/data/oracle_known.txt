@@ -691,9 +691,6 @@ tip403/receivePolicy-unset/T11
 tip403/receivePolicy-unset/T12
 tip403/receivePolicy-unset/T13
 tip403/receivePolicy-unset/T14
-# Reference changed after the corpus: from tempo c8b89f9 (TIP-1111), authorize_key_internal
-# checks `!is_delegate_grant && is_retired_root(key_id)` for every non-ConfigurableAccount T14
-# grant, an account load of the key ID (+2,600 gas cold). clempo follows HEAD.
 keychain/authorize-unlimited/T14
 keychain/authorize-duplicate-targets/T14
 keychain/authorize-type0/T14

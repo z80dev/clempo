@@ -42,7 +42,8 @@ point the EVM calls (TempoPrecompiles::execute in crates/precompiles/src/lib.rs)
 rewards, permits, memos, transfer policies, virtual addresses.")
   (:export #:tip20-token
            ;; views
-           #:name #:symbol #:currency #:total-supply #:quote-token #:next-quote-token
+           #:name #:symbol #:currency #:currency-length #:total-supply #:quote-token
+           #:next-quote-token
            #:supply-cap #:paused-p #:balance-of #:allowance #:transfer-policy-id
            #:legacy-transfer-policy-id #:delete-legacy-transfer-policy-id #:logo-uri
            #:balance-slot #:permit-nonce #:domain-separator
