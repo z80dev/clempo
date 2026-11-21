@@ -60,37 +60,75 @@ blooms are compared in every block), then the tail."
 
 (defun hex->octets (s)
   "Decode hex (with or without 0x). Odd lengths get a leading zero nibble."
-  (let* ((h (strip-0x s))
-         (h (if (oddp (length h)) (concatenate 'string "0" h) h))
-         (o (make-octets (/ (length h) 2))))
-    (dotimes (i (length o) o)
-      (setf (aref o i) (+ (* 16 (hex-digit-value (char h (* 2 i))))
-                          (hex-digit-value (char h (1+ (* 2 i)))))))))
+  (let* ((s (if (simple-string-p s) s (coerce s 'simple-string)))
+         (start (if (and (>= (length s) 2) (char= (schar s 0) #\0) (char-equal (schar s 1) #\x)) 2 0))
+         (digits (- (length s) start))
+         (o (make-octets (ceiling digits 2))))
+    (declare (type simple-string s) (type fixnum start digits))
+    (flet ((nibble (i) (hex-digit-value (schar s i))))
+      (declare (inline nibble))
+      ;; an odd count: the first digit is the low nibble of the first octet
+      (let ((j start) (k 0))
+        (declare (type fixnum j k))
+        (when (oddp digits)
+          (setf (aref o 0) (nibble j)) (incf j) (incf k))
+        (loop while (< j (length s))
+              do (setf (aref o k) (+ (* 16 (nibble j)) (nibble (1+ j))))
+                 (incf j 2) (incf k))))
+    o))
 
 (defun octets->hex (o &key (prefix t) (start 0) (end (length o)))
-  (declare (type octets o))
+  (declare (type octets o) (type fixnum start end))
+  (invariant (<= 0 start end (length o)) "octets->hex: bad bounds ~D..~D" start end)
   (let ((s (make-string (+ (if prefix 2 0) (* 2 (- end start)))))
         (digits "0123456789abcdef"))
-    (when prefix (setf (char s 0) #\0 (char s 1) #\x))
-    (loop for i from start below end
-          for j from (if prefix 2 0) by 2
-          do (setf (char s j) (char digits (ash (aref o i) -4))
-                   (char s (1+ j)) (char digits (logand (aref o i) 15))))
+    (declare (type simple-string digits))
+    (when prefix (setf (schar s 0) #\0 (schar s 1) #\x))
+    (locally (declare #.*hot*)
+      (loop for i of-type fixnum from start below end
+            for j of-type fixnum from (if prefix 2 0) by 2
+            do (let ((b (aref o i)))
+                 (setf (schar s j) (schar digits (ash b -4))
+                       (schar s (1+ j)) (schar digits (logand b 15))))))
     s))
 
 (defun hex->integer (s)
   (let ((h (strip-0x s)))
     (if (zerop (length h)) 0 (parse-integer h :radix 16))))
 
+(defun hex-into (s n end)
+  "Write the non-negative integer N's hex digits into S ending at END-1, leftward to index 2
+\(after \"0x\"); positions N does not reach keep their contents."
+  (declare #.*hot* (type (simple-array character (*)) s) (type unsigned-byte n) (type fixnum end))
+  (let ((digits "0123456789abcdef") (j end))
+    (declare (type fixnum j) (type simple-string digits))
+    (flet ((word (w count)
+             (declare (type (unsigned-byte 64) w) (type fixnum count))
+             (dotimes (k count)
+               (decf j)
+               (setf (schar s j) (schar digits (logand w 15))
+                     w (ash w -4)))))
+      (if (typep n 'fixnum)
+          (word n (- end 2))
+          (dotimes (i (sb-bignum:%bignum-length n))
+            (when (<= j 2) (return))
+            (word (sb-bignum:%bignum-ref n i) (min 16 (- j 2))))))
+    s))
+
 (defun integer->hex (n &key (bytes nil))
   "0x-prefixed lowercase hex. With BYTES, left-padded to that many bytes."
-  (if bytes
-      (format nil "0x~(~v,'0x~)" (* 2 bytes) n)
-      (format nil "0x~(~x~)" n)))
+  (if (and (integerp n) (>= n 0))
+      (let* ((width (max (if bytes (* 2 bytes) 1) (ceiling (integer-length n) 4)))
+             (s (make-string (+ 2 width) :initial-element #\0)))
+        (setf (schar s 1) #\x)
+        (hex-into s n (+ 2 width)))
+      (if bytes
+          (format nil "0x~(~v,'0x~)" (* 2 bytes) n)
+          (format nil "0x~(~x~)" n))))
 
 (defun quantity->hex (n)
   "JSON-RPC quantity encoding: minimal hex, 0 is 0x0."
-  (format nil "0x~(~x~)" n))
+  (integer->hex n))
 
 ;;; Integers <-> big-endian octets
 

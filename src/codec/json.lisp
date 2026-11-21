@@ -3,9 +3,12 @@
   (:documentation "JSON with an order-preserving representation:
   object -> (:object (\"key\" . value) ...)   array -> simple-vector
   string -> string   number -> integer or double-float
-  true/false/null -> :true :false :null")
+  true/false/null -> :true :false :null
+A JSON-RAW holds a value already written as JSON text (a rendered block kept for reuse);
+the writer copies its text.")
   (:export #:parse-json #:write-json #:to-json-string #:to-json-octets
            #:jget #:jget* #:jobject #:jobject-p #:json-error #:json-equal
+           #:json-raw #:json-raw-p #:json-raw-text #:raw-json
            #:jbool #:*json-max-depth* #:+json-max-integer-digits+))
 
 (in-package #:clempo.json)
@@ -23,6 +26,15 @@
 (defun jobject-p (x) (and (consp x) (eq (car x) :object)))
 
 (defun jbool (x) (if x :true :false))
+
+(defstruct (json-raw (:constructor json-raw (text)))
+  "A value already written as JSON TEXT."
+  (text "" :type simple-string :read-only t))
+
+(declaim (ftype function to-json-string))
+(defun raw-json (v)
+  "V written once, as a JSON-RAW."
+  (json-raw (to-json-string v)))
 
 (defun jget (obj key &optional default)
   (if (jobject-p obj)
@@ -270,32 +282,62 @@ nest at most MAX-DEPTH deep (NIL: unbounded). Signals JSON-ERROR on any malforme
 
 ;;; Writing
 
+(defun write-json-escape (c out)
+  (case c
+    (#\" (write-string "\\\"" out))
+    (#\\ (write-string "\\\\" out))
+    (#\Newline (write-string "\\n" out))
+    (#\Return (write-string "\\r" out))
+    (#\Tab (write-string "\\t" out))
+    (#\Backspace (write-string "\\b" out))
+    (#\Page (write-string "\\f" out))
+    (t (format out "\\u~(~4,'0x~)" (char-code c)))))
+
 (defun write-json-string (str out)
+  "STR as a JSON string: runs of plain characters are written whole, the rest escaped."
+  (declare (type string str))
   (write-char #\" out)
-  (loop for c across str
-        do (case c
-             (#\" (write-string "\\\"" out))
-             (#\\ (write-string "\\\\" out))
-             (#\Newline (write-string "\\n" out))
-             (#\Return (write-string "\\r" out))
-             (#\Tab (write-string "\\t" out))
-             (#\Backspace (write-string "\\b" out))
-             (#\Page (write-string "\\f" out))
-             (t (if (< (char-code c) 32)
-                    (format out "\\u~(~4,'0x~)" (char-code c))
-                    (write-char c out)))))
+  (let ((start 0))
+    (declare (type fixnum start))
+    (macrolet ((runs (type)
+                 `(let ((str str))
+                    (declare (type ,type str))
+                    (loop for i of-type fixnum from 0 below (length str)
+                          do (let ((c (char str i)))
+                               (when (or (char= c #\") (char= c #\\) (< (char-code c) 32))
+                                 (write-string str out :start start :end i)
+                                 (write-json-escape c out)
+                                 (setf start (1+ i))))))))
+      (typecase str
+        ((simple-array character (*)) (runs (simple-array character (*))))
+        (simple-base-string (runs simple-base-string))
+        (t (runs string))))
+    (write-string str out :start start))
   (write-char #\" out))
+
+(defun write-json-integer (n out)
+  (if (typep n 'fixnum)
+      (let ((digits (make-string 21)) (i 21) (m (abs n)))
+        (declare (dynamic-extent digits) (type fixnum i) (type (integer 0) m))
+        (loop do (multiple-value-bind (q r) (floor m 10)
+                   (decf i)
+                   (setf (schar digits i) (code-char (+ 48 r)) m q))
+              until (zerop m))
+        (when (minusp n) (decf i) (setf (schar digits i) #\-))
+        (write-string digits out :start i))
+      (format out "~D" n)))
 
 (defun write-json (v out)
   (cond ((eq v :true) (write-string "true" out))
         ((eq v :false) (write-string "false" out))
         ((or (eq v :null) (null v)) (write-string "null" out))
-        ((integerp v) (format out "~D" v))
+        ((integerp v) (write-json-integer v out))
         ;; JSON has no infinity or NaN; serde_json's serializer writes null for both.
         ((floatp v) (if (or (sb-ext:float-infinity-p v) (sb-ext:float-nan-p v))
                         (write-string "null" out)
                         (let ((*read-default-float-format* 'double-float)) (format out "~F" v))))
         ((stringp v) (write-json-string v out))
+        ((json-raw-p v) (write-string (json-raw-text v) out))
         ((jobject-p v)
          (write-char #\{ out)
          (loop for (pair . rest) on (cdr v)
