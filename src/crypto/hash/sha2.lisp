@@ -19,6 +19,8 @@
 
 (defmacro define-sha (make update final hash compress context width rounds length-size
                       big0 big1 small0 small1)
+  "The portable compression is COMPRESS-PORTABLE on every host (tests run it directly);
+for SHA-256 on an arm64 core with FEAT_SHA256, COMPRESS runs clempo.sha256-arm64 instead."
   (let* ((word `(unsigned-byte ,width)) (bytes (/ width 8)) (block (* 16 bytes))
          (init (mapcar (lambda (n) (ash n (- width 64))) (root-constants 8 2)))
          (ks (mapcar (lambda (n) (ash n (- width 64))) (root-constants rounds 3)))
@@ -28,6 +30,7 @@
          (done (intern (format nil "~A-DONE" context)))
          (constructor (intern (format nil "%~A" make)))
          (final-size (intern (format nil "%~A" final)))
+         (portable (intern (format nil "~A-PORTABLE" compress)))
          (regs (loop repeat 8 collect (gensym)))
          (ws (loop repeat 16 collect (gensym))))
     (labels ((add (&rest args) `(ldb (byte ,width 0) (+ ,@args)))
@@ -44,13 +47,8 @@
            (total 0 :type (integer 0))
            (done nil :type boolean))
          (defun ,make () (,constructor))
-         ,(if (and (= width 32) #+(and arm64 darwin) t #-(and arm64 darwin) nil)
-              `(defun ,compress (state data offset)
-                 (declare #.clempo.base:*hot*)
-                 (clempo.sha256-arm64:compress
-                  state data offset
-                  (load-time-value (make-array 64 :element-type '(unsigned-byte 32) :initial-contents ',ks) t)))
-              `(defun ,compress (state data offset)
+         (declaim (inline ,portable))
+         (defun ,portable (state data offset)
            (declare #.clempo.base:*hot* (type octets data) (type fixnum offset)
                     (type (simple-array ,word (8)) state))
            (let (,@(loop for r in regs for i from 0 collect `(,r (aref state ,i)))
@@ -75,7 +73,21 @@
                                  (,v ,(add (sigma a big0 nil) `(logxor (logand ,a ,b) (logand ,c (logxor ,a ,b))))))
                              (setf ,d ,(add d u) ,h ,(add u v)))))))
              ,@(loop for r in regs for i from 0 collect `(setf (aref state ,i) ,(add `(aref state ,i) r))))
-           (values)))
+           (values))
+         (defun ,compress (state data offset)
+           (declare #.clempo.base:*hot* (type octets data) (type fixnum offset)
+                    (type (simple-array ,word (8)) state))
+           ,(if (= width 32)
+                #+arm64
+                `(if clempo.sha256-arm64:**native**
+                     (clempo.sha256-arm64:compress
+                      state data offset
+                      (load-time-value
+                       (make-array 64 :element-type '(unsigned-byte 32) :initial-contents ',ks) t))
+                     (,portable state data offset))
+                #-arm64
+                `(,portable state data offset)
+                `(,portable state data offset)))
          (defun ,update (ctx data &key (start 0) (end (length data)))
            (declare (type octets data))
            (check-type ctx ,context)

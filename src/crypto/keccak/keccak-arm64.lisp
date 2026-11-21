@@ -1,13 +1,26 @@
 (defpackage #:clempo.keccak-arm64
   (:use #:cl #:clempo.base)
-  #+(and arm64 darwin) (:local-nicknames (#:a64 #:sb-arm64-asm))
-  (:export #:define-arm64-keccak #:permute #:hash32-into #:hash64-into))
+  #+arm64 (:local-nicknames (#:a64 #:sb-arm64-asm))
+  (:export #:define-arm64-keccak #:permute #:hash32-into #:hash64-into #:**native**))
 (in-package #:clempo.keccak-arm64)
 
-;;; All Apple Silicon implementations support the Arm FEAT_SHA3 instructions.
+;;; Keccak-f[1600] on the Arm FEAT_SHA3 instructions (EOR3, RAX1, XAR, BCAX). Every Apple
+;;; Silicon core has them; an arm64 Linux core may not, so callers branch on **NATIVE**,
+;;; which asks the OS at load and again whenever a saved image starts.
 ;;; Each SIMD register holds one lane in its low half. The high halves never
 ;;; affect the low halves. Pi only renames the register map; nothing moves.
-#+(and arm64 darwin)
+#+arm64
+(progn
+  (sb-ext:defglobal **native** nil)
+  (defun detect-native () (setf **native** (clempo.io:cpu-feature-p :arm64-sha3)))
+  (detect-native)
+  (pushnew 'detect-native sb-ext:*init-hooks*))
+
+;;; GC soundness: the words entries hold raw interior pointers (vector + offset) in
+;;; non-descriptor registers for all 24 rounds. The body runs pseudo-atomic, so no
+;;; stop-the-world GC can move a vector under those pointers, and every descriptor input
+;;; stays live in its register to the end (:to :result), as in secp256k1-native-field.lisp.
+#+arm64
 (defmacro define-permutation-entry (name intrinsic rotations &optional words)
   (let ((lanes (loop repeat 25 collect (gensym "A")))
         (parities (loop repeat 5 collect (gensym "C")))
@@ -24,17 +37,21 @@
            (:translate ,intrinsic)
            (:policy :fast-safe)
            ,@(if words
-                 '((:args (data :scs (sb-vm::descriptor-reg)) (start :scs (sb-vm::unsigned-reg))
-                          (out :scs (sb-vm::descriptor-reg)) (out-start :scs (sb-vm::unsigned-reg))
-                          (constants :scs (sb-vm::descriptor-reg)))
+                 '((:args (data :scs (sb-vm::descriptor-reg) :to :result)
+                          (start :scs (sb-vm::unsigned-reg) :to :result)
+                          (out :scs (sb-vm::descriptor-reg) :to :result)
+                          (out-start :scs (sb-vm::unsigned-reg) :to :result)
+                          (constants :scs (sb-vm::descriptor-reg) :to :result))
                    (:arg-types * sb-vm::unsigned-num * sb-vm::unsigned-num *)
                    (:temporary (:sc sb-vm::non-descriptor-reg :from :argument :to :result) src)
                    (:temporary (:sc sb-vm::non-descriptor-reg :from :argument :to :result) dst))
-                 '((:args (state :scs (sb-vm::descriptor-reg)) (constants :scs (sb-vm::descriptor-reg)))
+                 '((:args (state :scs (sb-vm::descriptor-reg) :to :result)
+                          (constants :scs (sb-vm::descriptor-reg) :to :result))
                    (:arg-types * *)))
            ,@(loop for r in (append lanes parities '(delta)) collect
                    `(:temporary (:sc sb-vm::complex-double-reg) ,r))
            (:generator 1
+            (sb-vm::pseudo-atomic (sb-vm::tmp-tn :sync nil)
              (let* ((header (- (* sb-vm:vector-data-offset sb-vm:n-word-bytes)
                                sb-vm:other-pointer-lowtag))
                     (layout (vector ,@lanes))
@@ -95,7 +112,7 @@
                       '(dotimes (i 4)
                          (sb-assem:inst a64::str (aref layout i) (a64::@ dst (+ header (* 8 i))) :d))
                       '(dotimes (i 25)
-                         (sb-assem:inst a64::str (aref layout i) (a64::@ state (+ header (* 8 i))) :d))))))))
+                         (sb-assem:inst a64::str (aref layout i) (a64::@ state (+ header (* 8 i))) :d)))))))))
        ,(if words
             `(defun ,name (data start out out-start constants)
                (declare #.*hot* (type octets data out)
@@ -107,7 +124,7 @@
                         (type (simple-array (unsigned-byte 64) (24)) constants))
                (,intrinsic state constants))))))
 
-#+(and arm64 darwin)
+#+arm64
 (defmacro define-arm64-keccak (rotations)
   `(progn
      (define-permutation-entry permute %permute ,rotations)

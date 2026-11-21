@@ -39,3 +39,36 @@
     (is-equalp (hex->octets "077709362c2e32df0ddc3f0dc47bba6390b6c73bb50f9c3122ec844ad7c2b3e5") prk)
     (is-equalp (hex->octets "3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865")
                (hkdf-sha256-expand prk info 42))))
+
+(defmacro with-portable-sha256 (&body body)
+  "Run BODY with the arm64 SHA-256 instructions switched off."
+  #+arm64 `(let ((saved clempo.sha256-arm64:**native**))
+             (unwind-protect (progn (setf clempo.sha256-arm64:**native** nil) ,@body)
+               (setf clempo.sha256-arm64:**native** saved)))
+  #-arm64 `(progn ,@body))
+
+(deftest sha256-portable-code-matches-vectors ()
+  ;; Every host compiles and runs the portable compression, Arm instructions or not.
+  (with-portable-sha256
+    (is-equalp (hex->octets "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+               (sha256 (string->octets "abc")))
+    (is-equalp (hex->octets "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1")
+               (sha256 (string->octets "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")))
+    (is-equalp (hex->octets "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0")
+               (sha256 (fill (make-octets 1000000) 97)))))
+
+(deftest sha256-native-matches-portable ()
+  (let ((random (sb-ext:seed-random-state 5)))
+    (dotimes (i 300)
+      (let* ((data (make-octets (+ 64 9)))
+             (a (make-array 8 :element-type '(unsigned-byte 32)))
+             (b (make-array 8 :element-type '(unsigned-byte 32))))
+        (dotimes (j (length data)) (setf (aref data j) (random 256 random)))
+        (dotimes (j 8) (setf (aref a j) (random (ash 1 32) random) (aref b j) (aref a j)))
+        (clempo.sha2::compress256-portable a data 9)
+        (clempo.sha2::compress256 b data 9)
+        (is-equalp a b)))
+    (dotimes (i 200)
+      (let* ((n (random 300 random)) (data (make-octets n)))
+        (dotimes (j n) (setf (aref data j) (random 256 random)))
+        (is-equalp (with-portable-sha256 (sha256 data)) (sha256 data) "length ~D" n)))))

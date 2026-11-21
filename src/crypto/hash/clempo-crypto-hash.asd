@@ -1,7 +1,7 @@
 ;;; Owner: the hash agent. Hashes, MACs, KDFs, ciphers and the 25519 curves.
 (defsystem "clempo-crypto-hash"
   :description "sha2, ripemd160, blake2f, blake3, hmac, hkdf, aes, chacha20-poly1305, x25519, ed25519"
-  :depends-on ("clempo-base")
+  :depends-on ("clempo-base" "clempo-io")       ; clempo.io:cpu-feature-p picks the instructions
   :serial t
   :components ((:file "sha256-arm64") (:file "sha2") (:file "blake") (:file "ripemd160") (:file "aes")
                (:file "chacha") (:file "field25519") (:file "curve25519") (:file "scrypt")))

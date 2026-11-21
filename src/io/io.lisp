@@ -7,7 +7,7 @@ variables, so a simulator rebinds them instead of threading parameters.")
            #:manual-clock-advance
            #:*entropy* #:random-octets #:random-below #:make-seeded-entropy #:real-entropy
            #:read-file-octets #:write-file-octets #:write-file-atomically #:write-new-file
-           #:temp-directory #:read-file-string #:getenv #:run-capture))
+           #:temp-directory #:read-file-string #:getenv #:run-capture #:cpu-feature-p))
 
 (in-package #:clempo.io)
 
@@ -120,3 +120,36 @@ rename it over PATH."
                           (get-output-stream-string sink))
                      (sb-ext:process-exit-code proc))))
       (when tmp (ignore-errors (sb-posix:unlink tmp))))))
+
+;;; CPU features. Hashes pick their Arm instructions at run time: an arm64 Linux core may
+;;; lack them, and a saved image may start on another machine than the one that built it.
+
+#+(and arm64 darwin)
+(defun sysctl-flag (name)
+  (sb-alien:with-alien ((value sb-alien:int 0) (size sb-alien:unsigned-long 4))
+    (and (zerop (sb-alien:alien-funcall
+                 (sb-alien:extern-alien "sysctlbyname"
+                                        (function sb-alien:int sb-alien:c-string (* sb-alien:int)
+                                                  (* sb-alien:unsigned-long)
+                                                  sb-alien:system-area-pointer sb-alien:unsigned-long))
+                 name (sb-alien:addr value) (sb-alien:addr size) (sb-sys:int-sap 0) 0))
+         (= value 1))))
+
+#+(and arm64 linux)
+(defun hwcap ()
+  "getauxval(AT_HWCAP)."
+  (sb-alien:alien-funcall
+   (sb-alien:extern-alien "getauxval" (function sb-alien:unsigned-long sb-alien:unsigned-long))
+   16))
+
+(defun cpu-feature-p (feature)
+  "Whether this CPU implements FEATURE: :ARM64-SHA256 (FEAT_SHA256: SHA256H, SHA256H2,
+SHA256SU0, SHA256SU1) or :ARM64-SHA3 (FEAT_SHA3: EOR3, RAX1, XAR, BCAX), as the OS reports
+it (Linux's AT_HWCAP bits 6 and 17, Darwin's hw.optional.arm.FEAT_* sysctls). NIL on other
+hosts."
+  (check-type feature (member :arm64-sha256 :arm64-sha3))
+  #+(and arm64 linux) (logbitp (if (eq feature :arm64-sha256) 6 17) (hwcap))
+  #+(and arm64 darwin) (sysctl-flag (if (eq feature :arm64-sha256)
+                                        "hw.optional.arm.FEAT_SHA256"
+                                        "hw.optional.arm.FEAT_SHA3"))
+  #-(and arm64 (or linux darwin)) nil)

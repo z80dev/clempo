@@ -80,17 +80,22 @@ within a round: theta, rho, pi and chi become straight-line register code."
                `((setf ,@(loop for reg in a for i from 0 nconc `((aref ,state ,i) ,reg)))
                  ,state))))))
 
+;;; The portable permutation and fixed-size hashes are compiled on every host, so every
+;;; host's tests run them against the vectors; arm64 cores with FEAT_SHA3 use the
+;;; instructions instead (clempo.keccak-arm64:**native**).
 (defun keccak-f-portable (state)
   (declare (type keccak-state state) #.*hot*)
   (keccak-rounds state))
 
-#+(and arm64 darwin)
+#+arm64
 (clempo.keccak-arm64:define-arm64-keccak *rotations*)
 
 (defun keccak-f (state)
   (declare (type keccak-state state) #.*hot*)
-  #+(and arm64 darwin) (progn (clempo.keccak-arm64:permute state +round-constants+) state)
-  #-(and arm64 darwin) (keccak-f-portable state))
+  #+arm64 (if clempo.keccak-arm64:**native**
+              (progn (clempo.keccak-arm64:permute state +round-constants+) state)
+              (keccak-f-portable state))
+  #-arm64 (keccak-f-portable state))
 
 (defstruct (keccak (:constructor %make-keccak))
   (state (make-array 25 :element-type '(unsigned-byte 64) :initial-element 0) :type keccak-state)
@@ -165,14 +170,23 @@ within a round: theta, rho, pi and chi become straight-line register code."
   "Pad, squeeze 32 bytes. Reset K before reusing it."
   (finalize-into k (make-octets 32) 0))
 
-(defun fixed-into (data start size out out-start)
+(declaim (inline fixed-into-portable))
+(defun fixed-into-portable (data start size out out-start)
   (declare (type octets data out) (type fixnum start out-start) (type (member 32 64) size) #.*hot*)
   (if (= size 32)
-      #+(and arm64 darwin) (clempo.keccak-arm64:hash32-into data start out out-start +round-constants+)
-      #-(and arm64 darwin) (keccak-rounds nil 4 data start out out-start)
-      #+(and arm64 darwin) (clempo.keccak-arm64:hash64-into data start out out-start +round-constants+)
-      #-(and arm64 darwin) (keccak-rounds nil 8 data start out out-start))
+      (keccak-rounds nil 4 data start out out-start)
+      (keccak-rounds nil 8 data start out out-start))
   out)
+
+(defun fixed-into (data start size out out-start)
+  (declare (type octets data out) (type fixnum start out-start) (type (member 32 64) size) #.*hot*)
+  #+arm64 (if clempo.keccak-arm64:**native**
+              (progn (if (= size 32)
+                         (clempo.keccak-arm64:hash32-into data start out out-start +round-constants+)
+                         (clempo.keccak-arm64:hash64-into data start out out-start +round-constants+))
+                     out)
+              (fixed-into-portable data start size out out-start))
+  #-arm64 (fixed-into-portable data start size out out-start))
 
 (defun keccak256-into (data start end out out-start &optional k)
   "Hash DATA[START,END) into OUT at OUT-START and return OUT.
