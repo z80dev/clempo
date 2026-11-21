@@ -137,3 +137,47 @@
                           0 2))
       (handle-effects net 0 effects)
       (is (run-network net (all-finalized-p net '(0 1 2 3) (+ 2 before)))))))
+
+;;; Resolver interop: certificates the Rust harness served on channel 2 (rust_golden.json).
+
+(defun rust-resolver-responses (epoch)
+  "(kind . (certificate . certificate-octets)) of the golden channel-2 responses for EPOCH,
+read from the frame: varint epoch, u64 BE id, tag 1, varint length, certificate."
+  (let ((g (clempo.json:parse-json (clempo.io:read-file-string
+                                    (test-path "data/rust_golden.json")))))
+    (loop for v across (clempo.json:jget g "vectors")
+          when (and (eql (clempo.json:jget v "channel") 2)
+                    (equal (clempo.json:jget v "kind") "response")
+                    (eql (clempo.json:jget v "epoch") epoch))
+            collect (let ((r (make-cw-reader (hex->octets (clempo.json:jget v "bytes")))))
+                      (is= epoch (read-varint r))
+                      (read-uint r 8)
+                      (is= 1 (read-u8 r))
+                      (let ((octets (read-raw r (read-length r))))
+                        (cons (clempo.json:jget v "cert")
+                              (cons (cw-decode 'certificate octets) octets)))))))
+
+(deftest rust-resolver-responses-delivered-and-served ()
+  (let* ((clempo.io:*entropy* (clempo.io:make-seeded-entropy 7))
+         (clempo.io:*clock* (clempo.io:make-manual-clock 1000000))
+         (responses (rust-resolver-responses 3))
+         (voter (multiple-value-bind (schemes participants) (golden-schemes)
+                  (make-voter :scheme (first schemes) :participants participants :me 0 :epoch 3
+                              :application (make-instance 'accept-app)))))
+    (flet ((cert (kind) (car (cdr (assoc kind responses :test #'string=))))
+           (deliver (view c) (nth-value 1 (voter-deliver voter view c))))
+      (voter-start voter)
+      ;; commonware's validate: a nullification answers exactly its view; a notarization or
+      ;; finalization answers its view and any below
+      (is= :invalid (deliver 16 (cert "nullification")))
+      (is= :invalid (deliver 18 (cert "notarization")))
+      (is= :valid (deliver 17 (cert "nullification")))
+      (is= :valid (deliver 16 (cert "finalization")))
+      (is= :ignored (deliver 17 (cert "finalization")))
+      (is= 18 (voter-view voter))
+      (is= 17 (voter-last-finalized voter))
+      ;; served back byte for byte, for the view and every view below it
+      (let ((served (cdr (cdr (assoc "finalization" responses :test #'string=)))))
+        (is-equalp served (cw-encode 'certificate (voter-certificate voter 17)))
+        (is-equalp served (cw-encode 'certificate (voter-certificate voter 3))))
+      (is= nil (voter-certificate voter 18)))))
