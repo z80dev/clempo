@@ -446,8 +446,20 @@ SEGMENT-FLOOR bounded to START..END."
                  (setf pos (skip-aver sap pos end)))))
     (values vblock (decode-aver sap vpos end))))
 
-;;; The tail: versions not yet in a segment. key -> adjustable vector of (block . value),
-;;; value an integer (slot) or an AVER (account).
+;;; The tail: versions not yet in a segment. key -> VERSIONS, the key's (block . value) in
+;;; block order, value an integer (slot) or an AVER (account).
+;;;
+;;; One writer appends while views read without a lock. A reader sees a prefix: the writer
+;;; stores an entry (in a new, larger vector when full, published first) before it raises
+;;; the count, and a reader reads the count before the vector. The one entry a writer
+;;; changes in place belongs to the block being appended, which no view can see yet (a view
+;;; is made only up to the tail's last complete block).
+
+(defstruct (versions (:constructor make-versions ()))
+  (vec (make-array 2) :type simple-vector)
+  (count 0 :type fixnum))
+
+(defun versions-entry (v i) (svref (versions-vec v) i))
 
 (defstruct (tail (:constructor make-tail (from)))
   (from 0) (to -1)
@@ -456,23 +468,36 @@ SEGMENT-FLOOR bounded to START..END."
   (wipes '()))
 
 (defun tail-add (tail key block value)
-  (let ((v (or (gethash key (tail-keys tail))
-               (setf (gethash key (tail-keys tail)) (make-array 2 :adjustable t :fill-pointer 0)))))
-    (let ((n (fill-pointer v)))
-      (if (and (plusp n) (= (car (aref v (1- n))) block))
-          (setf (cdr (aref v (1- n))) value)  ; written twice in one block: keep the last
-          (progn (vector-push-extend (cons block value) v)
-                 (incf (tail-versions tail)))))))
+  (let* ((keys (tail-keys tail))
+         (v (or (gethash key keys) (make-versions)))
+         (n (versions-count v))
+         (vec (versions-vec v)))
+    (if (and (plusp n) (= (car (svref vec (1- n))) block))
+        (setf (svref vec (1- n)) (cons block value)) ; written twice in one block: keep the last
+        (progn
+          (when (= n (length vec))
+            (let ((bigger (make-array (* 2 n))))
+              (replace bigger vec)
+              (setf vec bigger)
+              (sb-thread:barrier (:write))
+              (setf (versions-vec v) bigger)))
+          (setf (svref vec n) (cons block value))
+          (sb-thread:barrier (:write))
+          (setf (versions-count v) (1+ n))
+          (incf (tail-versions tail))))
+    (when (zerop n) (setf (gethash key keys) v))))
 
 (defun tail-floor (tail key n)
   "The last (block . value) of KEY at or before N in the tail, or NIL."
   (let ((v (gethash key (tail-keys tail))))
     (when v
-      (let ((lo 0) (hi (fill-pointer v)))
-        (loop while (< lo hi)
-              do (let ((mid (ash (+ lo hi) -1)))
-                   (if (> (car (aref v mid)) n) (setf hi mid) (setf lo (1+ mid)))))
-        (when (plusp lo) (aref v (1- lo)))))))
+      (let ((hi (versions-count v)))
+        (sb-thread:barrier (:read))
+        (let ((vec (versions-vec v)) (lo 0))
+          (loop while (< lo hi)
+                do (let ((mid (ash (+ lo hi) -1)))
+                     (if (> (car (svref vec mid)) n) (setf hi mid) (setf lo (1+ mid)))))
+          (when (plusp lo) (svref vec (1- lo))))))))
 
 ;;; Codes: append-only files of (hash:32 length:u32 bytes)*, indexed at open and read on use.
 
@@ -796,7 +821,9 @@ a storage wipe in the range."
     (let ((tail (history-tail history)))
       (when tail
         (maphash (lambda (key versions)
-                   (when (find-if (lambda (e) (and (> (car e) from) (<= (car e) to))) versions)
+                   (when (loop for i below (versions-count versions)
+                               for e = (versions-entry versions i)
+                               thereis (and (> (car e) from) (<= (car e) to)))
                      (if (< key +slot-tag+)
                          (funcall fn key nil)
                          (funcall fn (ldb (byte 160 256) key) (ldb (byte 256 0) key)))))

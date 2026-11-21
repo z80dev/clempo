@@ -11,8 +11,14 @@
   (buffer (make-octets 0) :type octets)
   (pos 0 :type fixnum))
 
-(defun make-sink (&optional stream)
-  (%make-sink stream (make-octets (if stream +buffer-size+ 4096))))
+(defun make-sink (&optional stream (size 256))
+  "A sink draining to STREAM, or growing in memory from SIZE bytes."
+  (%make-sink stream (make-octets (if stream +buffer-size+ size))))
+
+(defun sink-reset (sink)
+  "Empty an in-memory sink for reuse."
+  (setf (sink-pos sink) 0)
+  sink)
 
 (defun sink-flush (sink)
   (when (sink-stream sink)
@@ -139,3 +145,81 @@
       n)))
 
 (defun get-bytes (source) (get-raw source (get-u32 source)))
+
+(defun put-raw-range (sink octets start end)
+  (declare (type octets octets) (type fixnum start end))
+  (sink-room sink (- end start))
+  (replace (sink-buffer sink) octets :start1 (sink-pos sink) :start2 start :end2 end)
+  (incf (sink-pos sink) (- end start)))
+
+(defun put-varint (sink n)
+  "N (below 2^63) in 7-bit groups, low first."
+  (declare (type (unsigned-byte 63) n))
+  (loop (if (< n 128)
+            (return (put-u8 sink n))
+            (progn (put-u8 sink (logior 128 (ldb (byte 7 0) n)))
+                   (setf n (ash n -7))))))
+
+(defun get-varint (source)
+  (let ((n 0) (shift 0))
+    (loop (let ((byte (get-u8 source)))
+            (when (> shift 56) (format-error "overlong varint"))
+            (setf n (logior n (ash (logand byte 127) shift)))
+            (when (< byte 128) (return n))
+            (incf shift 7)))))
+
+;;; CRC-32C (Castagnoli), the checksum of log records and segment blocks.
+
+(declaim (type (simple-array (unsigned-byte 32) (256)) +crc32c-table+))
+(sb-ext:defglobal +crc32c-table+
+    (let ((table (make-array 256 :element-type '(unsigned-byte 32))))
+      (dotimes (i 256 table)
+        (let ((c i))
+          (dotimes (k 8) (setf c (if (logbitp 0 c) (logxor #x82F63B78 (ash c -1)) (ash c -1))))
+          (setf (aref table i) c)))))
+
+(defun crc32c (octets &optional (start 0) (end (length octets)) (crc 0))
+  "CRC-32C of OCTETS[START, END), continuing from CRC."
+  (declare #.*hot* (type octets octets) (type fixnum start end) (type (unsigned-byte 32) crc))
+  (invariant (<= 0 start end (length octets)))
+  (let ((c (logxor crc #xFFFFFFFF))
+        (table +crc32c-table+))
+    (declare (type (unsigned-byte 32) c))
+    (loop for i of-type fixnum from start below end
+          do (setf c (logxor (aref table (logand (logxor c (aref octets i)) #xFF)) (ash c -8))))
+    (logxor c #xFFFFFFFF)))
+
+;;; Files
+
+(defun dir-file (dir fmt &rest args)
+  (merge-pathnames (apply #'format nil fmt args) dir))
+
+;;; Durable writes. On macOS fsync(2) leaves data in the drive's cache; F_FULLFSYNC flushes it
+;;; to stable storage, which is what a durability promise needs. Elsewhere fsync does that.
+
+(defun sync-fd (fd)
+  #+darwin (handler-case (sb-posix:fcntl fd 51) ; F_FULLFSYNC
+             ;; a file system without it (some network mounts): plain fsync
+             (sb-posix:syscall-error () (sb-posix:fsync fd)))
+  #-darwin (sb-posix:fsync fd)
+  fd)
+
+(defun sync-stream (stream)
+  (finish-output stream)
+  (sync-fd (sb-sys:fd-stream-fd stream)))
+
+(defun sync-directory (dir)
+  (let ((fd (sb-posix:open (namestring dir) sb-posix:o-rdonly)))
+    (unwind-protect (sync-fd fd) (sb-posix:close fd))))
+
+(defun write-durably (path writer)
+  "Call WRITER with an octet output stream on PATH.tmp, sync it, rename it over PATH and
+sync the directory."
+  (let ((tmp (make-pathname :type (format nil "~A-tmp" (pathname-type path)) :defaults path)))
+    (with-open-file (out tmp :element-type '(unsigned-byte 8) :direction :output
+                             :if-exists :supersede :if-does-not-exist :create)
+      (funcall writer out)
+      (sync-stream out))
+    (sb-posix:rename (namestring tmp) (namestring path))
+    (sync-directory (make-pathname :name nil :type nil :defaults path))
+    path))

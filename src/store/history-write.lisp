@@ -87,9 +87,9 @@ the encoded versions."
 (defun encode-versions (body versions start end accountp)
   "Encode VERSIONS[START, END) (conses (block . value)) into BODY (reset first)."
   (setf (obuf-pos body) 0)
-  (loop with prev = (car (aref versions start))
+  (loop with prev = (car (versions-entry versions start))
         for i from start below end
-        for (block . value) = (aref versions i)
+        for (block . value) = (versions-entry versions i)
         do (put-varint body (- block prev))
            (setf prev block)
            (if accountp (encode-aver body value) (put-word body value))))
@@ -105,12 +105,12 @@ the encoded versions."
        (let ((w (make-segment-writer out)))
          (dolist (key keys)
            (let* ((versions (gethash key (tail-keys tail)))
-                  (n (fill-pointer versions))
+                  (n (versions-count versions))
                   (accountp (< key +slot-tag+)))
              (loop for start from 0 below n by +chunk-versions+
                    for end = (min n (+ start +chunk-versions+))
                    do (encode-versions body versions start end accountp)
-                      (writer-record w key (car (aref versions start)) (- end start)
+                      (writer-record w key (car (versions-entry versions start)) (- end start)
                                      (obuf-bytes body) :body-end (obuf-pos body)))))
          (writer-finish w :from (tail-from tail) :to (tail-to tail) :full-p full-p :level level
                           :wipes (reverse (tail-wipes tail))))))
@@ -136,13 +136,12 @@ last block already in the history, or the state a full segment is about to recor
   (setf (history-job history) job
         (history-tail history) (make-tail (1+ (store:db-number db)))
         (history-code-out history) (open-code-output history job)
-        (history-last-accounts history) (make-hash-table :size (max 1024 (store:db-account-count db))))
-  (let ((last (history-last-accounts history)))
-    (store:map-accounts (lambda (address a)
-                          (declare (ignore a))
-                          (setf (gethash address last) (account-aver db address)))
-                        db))
+        (history-last-accounts history) (make-hash-table :size 4096))
   history)
+
+(defconstant +last-accounts-limit+ (ash 1 20)
+  "Latest account versions the writer keeps in RAM; past this it forgets them all and reads
+each again from the history on its next write.")
 
 (defun write-code (history code)
   "Append CODE to the job's code file (unless known) and make it readable at once."
@@ -159,7 +158,12 @@ last block already in the history, or the state a full segment is about to recor
 (defun note-account (history tail address block v)
   "Record account version V unless it repeats the last one (a wipe always records)."
   (let* ((last (history-last-accounts history))
-         (old (gethash address last)))
+         (old (multiple-value-bind (v found) (gethash address last)
+                (if found
+                    v
+                    (let ((view (history-state history (1- block))))
+                      (when (>= (hash-table-count last) +last-accounts-limit+) (clrhash last))
+                      (setf (gethash address last) (and view (account-version view address))))))))
     (when (or (null old) (aver-wiped-p v) (aver-deleted-p v) (not (aver-same-p old v)))
       (tail-add tail address block v)
       (setf (gethash address last) v))

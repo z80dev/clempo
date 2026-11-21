@@ -1,21 +1,29 @@
 (defpackage #:clempo.store
   (:use #:cl #:clempo.base)
   (:import-from #:clempo.keccak #:keccak256)
-  (:import-from #:clempo.rlp #:rlp-encode)
+  (:import-from #:clempo.rlp #:rlp-encode #:rlp-decode)
   (:import-from #:clempo.trie #:make-secure-trie #:trie-clone #:trie-put #:trie-delete
-                #:trie-root #:trie-proof #:encode-account #:+empty-trie-root+ #:+empty-code-hash+
-                #:trie-from-items)
-  (:documentation "The committed state database: every account, storage slot and code blob
-of the chain in RAM, keyed by integers, with the account and storage tries kept beside them so
-a block's state root costs only its dirty paths. A block's writes are applied between
-DB-BEGIN-BLOCK and DB-COMMIT-BLOCK (or undone by DB-REVERT-BLOCK); persist.lisp turns
-committed blocks into a log and periodic checkpoints.")
+                #:trie-root #:trie-proof #:encode-account #:decode-account
+                #:+empty-trie-root+ #:+empty-code-hash+
+                #:trie-from-items #:node-store-get #:node-store-put)
+  (:documentation "The committed state database: accounts, storage slots and code keyed by
+integers, with the account and storage tries beside them so a block's state root costs only
+its dirty paths. A block's writes are applied between DB-BEGIN-BLOCK and DB-COMMIT-BLOCK (or
+undone by DB-REVERT-BLOCK).
+
+A state database is either in RAM (MAKE-STATEDB: every account, slot and trie node in Lisp
+tables, the database checkpoints and tests use) or backed by an on-disk store (kv.lisp,
+opened by OPEN-STORE in persist.lisp): then the tables are a bounded cache over the store's
+flat index (an account is one key, a slot one key, code one key) and the tries load their
+nodes from it on demand. A backed database keeps every write since the last flush in RAM and
+hands it to the store as one batch; between flushes, after a flush, it evicts what the cache
+limits say.")
   (:export
    ;; accounts
    #:account #:account-nonce #:account-balance #:account-code-hash #:account-storage-root
    #:account-slot-count #:account-commitment
    ;; the state database
-   #:statedb #:make-statedb #:db-number #:db-hash #:db-root-hash
+   #:statedb #:make-statedb #:db-number #:db-hash #:db-root-hash #:db-backed-p
    #:db-account #:db-storage #:db-code #:db-account-count
    #:map-accounts #:map-account-storage #:map-codes
    #:db-block-hash #:db-note-block-hash #:map-recent-hashes
@@ -32,11 +40,15 @@ committed blocks into a log and periodic checkpoints.")
    #:account-diff-nonce #:account-diff-balance #:account-diff-code-hash #:account-diff-slots
    #:account-diff-commitment
    #:make-account-diff #:make-block-diff #:db-apply-diff
+   ;; cache limits
+   #:cache-limits #:make-cache-limits #:db-cache-stats
    ;; persistence
    #:store #:store-db #:store-dir #:store-interval #:open-store #:close-store
-   #:store-commit-block #:store-checkpoint #:store-sync
+   #:store-commit-block #:store-checkpoint #:store-sync #:store-flush #:store-durable-number
+   #:store-sync-policy
    #:store-root-mismatch #:store-root-mismatch-number #:store-root-mismatch-expected
    #:store-root-mismatch-actual #:store-format-error #:store-locked #:store-locked-dir
+   #:store-corrupt-log #:store-corrupt-log-path #:store-corrupt-log-offset
    #:write-checkpoint #:read-checkpoint #:encode-block-diff #:decode-block-diff
    #:code-hash-key #:address-octets #:slot-octets))
 
@@ -51,6 +63,8 @@ committed blocks into a log and periodic checkpoints.")
   "Code table key of a code hash given as 32 octets or an integer."
   (if (integerp hash) hash (octets->integer hash)))
 
+(define-constant +empty-code-key+ (octets->integer +empty-code-hash+))
+
 (defstruct (account (:constructor %make-account (address)) (:copier nil))
   (address 0 :type integer :read-only t)
   (nonce 0 :type (unsigned-byte 64))
@@ -58,16 +72,20 @@ committed blocks into a log and periodic checkpoints.")
   (code-hash +empty-code-hash+ :type hash32)
   ;; T14 (TIP-1108) configuration commitment; nonzero adds the account leaf's fifth string
   (commitment 0 :type (unsigned-byte 256))
-  ;; The root of STORAGE once its trie is clean. A checkpoint load restores it without
-  ;; building the trie; the trie is built from STORAGE on the first write and checked
-  ;; against this root.
+  ;; The root of the storage once its trie is clean. A checkpoint load or a store read
+  ;; restores it without the trie, which is built (in RAM) or opened (backed) when needed.
   (storage-root +empty-trie-root+ :type hash32)
-  (storage nil :type (or null hash-table)) ; slot -> nonzero value
+  (slot-count 0 :type (integer 0))         ; nonzero slots
+  ;; slot -> value. In RAM: every nonzero slot and nothing else. Backed: a cache over the
+  ;; store's slots (zeros included) holding at least every slot written since the last flush.
+  (storage nil :type (or null hash-table))
+  ;; STORAGE holds every nonzero slot (always in RAM; backed after a wipe or for an account
+  ;; with no storage), so a miss reads as zero without the store.
+  (complete-p t)
   (trie nil)                               ; storage trie, NIL until first needed
-  (dirty-slots '() :type list))            ; slots written since the trie was last updated
-
-(defun account-slot-count (account)
-  (let ((s (account-storage account))) (if s (hash-table-count s) 0)))
+  (dirty-slots '() :type list)             ; slots written since the trie was last updated
+  (used nil)                               ; cache clock bit (backed)
+  (owner nil))                             ; the backed database whose store holds the rest
 
 ;;; One undo record per account touched in the open block: the account object and its
 ;;; fields as they were, the first old value of each slot written before any wipe, and the
@@ -76,14 +94,45 @@ committed blocks into a log and periodic checkpoints.")
   (address 0 :type integer)
   account                               ; object before the block, or NIL if absent
   (nonce 0) (balance 0) code-hash (commitment 0) storage-root storage trie
+  (slot-count 0) (complete-p t)
   (old-slots (make-hash-table) :type hash-table) ; slot -> value before the block
   (written (make-hash-table) :type hash-table)   ; every slot written this block
   (wiped-p nil))
 
-(defstruct (statedb (:constructor make-statedb ()) (:conc-name db-))
-  (accounts (make-hash-table :size 4096) :type hash-table) ; address -> account
-  (codes (make-hash-table :size 1024) :type hash-table)    ; hash integer -> octets
-  (trie (make-secure-trie))                                ; account trie
+(defstruct (speculative-block (:constructor make-speculative-block
+                                  (touched saved-trie new-codes number hash root recent
+                                   account-total)))
+  touched saved-trie new-codes number hash root recent account-total)
+
+(defstruct (cache-limits (:constructor make-cache-limits
+                             (&key (accounts (ash 1 20)) (slots (ash 1 23)) (trie-nodes (ash 1 21))
+                                   (code-bytes (ash 256 20)) (dirty (ash 1 22)))))
+  "Bounds of a backed state database's RAM, checked after each flush: cached ACCOUNTS, cached
+SLOTS, decoded TRIE-NODES loaded from the store, CODE-BYTES of cached code. DIRTY is the
+number of writes (accounts, slots and trie nodes) kept in RAM before the store flushes."
+  (accounts 0 :type (integer 1)) (slots 0 :type (integer 1)) (trie-nodes 0 :type (integer 1))
+  (code-bytes 0 :type (integer 1)) (dirty 0 :type (integer 1)))
+
+(defstruct (flush-mark (:constructor make-flush-mark ()))
+  "What a backed database must write for one account at the next flush."
+  (wiped-p nil)                                  ; storage cleared (or account deleted) since
+  (slots (make-hash-table) :type hash-table))    ; slots written since
+
+(defun make-table (backed size)
+  (if backed (make-hash-table :size size :synchronized t) (make-hash-table :size size)))
+
+(defstruct (statedb (:constructor %make-statedb
+                        (backing nodes limits
+                         &aux (accounts (make-table backing 4096))
+                              (codes (make-table backing 1024))
+                              (trie (make-secure-trie :store nodes))))
+                    (:conc-name db-))
+  (backing nil)                                            ; NIL in RAM, else the KV store
+  (nodes nil)                                              ; the tries' node store (backed)
+  (limits nil)
+  (accounts (make-hash-table) :type hash-table)            ; address -> account (backed: or NIL, absent)
+  (codes (make-hash-table) :type hash-table)               ; hash integer -> octets
+  (trie nil)                                               ; account trie
   (dirty (make-hash-table) :type hash-table)               ; address -> t (account trie stale)
   (number -1 :type integer)                                ; last committed block
   (hash nil)
@@ -98,39 +147,158 @@ committed blocks into a log and periodic checkpoints.")
   (speculation-depth 0 :type fixnum)
   (speculative '() :type list)
   ;; serializes proof readers' lazy storage-trie builds (DB-STORAGE-PROOF)
-  (proof-lock (sb-thread:make-mutex :name "statedb proofs")))
+  (proof-lock (sb-thread:make-mutex :name "statedb proofs"))
+  ;; backed: writes since the last flush, and cache bookkeeping
+  (account-total 0 :type integer)                          ; accounts in the state
+  (flush-accounts (make-hash-table) :type hash-table)      ; address -> flush-mark
+  (flush-codes '() :type list)                             ; code keys new since the flush
+  (flushed-root +empty-trie-root+)                         ; state root in the store
+  (dirty-weight 0 :type fixnum)                            ; writes since the flush
+  (cached-slots 0 :type fixnum)                            ; slot entries cached since eviction
+  (code-bytes 0 :type fixnum))                             ; bytes of cached code
 
+(defun make-statedb ()
+  "An empty state database held in RAM."
+  (%make-statedb nil nil nil))
+
+(defun db-backed-p (db) (and (db-backing db) t))
 (defun db-block-open-p (db) (db-open-p db))
-(defun db-account-count (db) (hash-table-count (db-accounts db)))
+
+(defun db-account-count (db)
+  (if (db-backing db) (db-account-total db) (hash-table-count (db-accounts db))))
+
+;;; Account records in the store: nonce, balance, code hash, storage root, commitment and
+;;; slot count.
+
+(defun encode-account-record (a)
+  (let ((sink (make-sink nil 96)))
+    (put-int sink (account-nonce a))
+    (put-int sink (account-balance a))
+    (put-raw sink (account-code-hash a))
+    (put-raw sink (account-storage-root a))
+    (put-int sink (account-commitment a))
+    (put-int sink (account-slot-count a))
+    (sink-octets sink)))
+
+(defun decode-account-record (db address octets)
+  (let ((src (make-source octets))
+        (a (%make-account address)))
+    (setf (account-owner a) db)
+    (setf (account-nonce a) (get-int src)
+          (account-balance a) (get-int src)
+          (account-code-hash a) (get-raw src 32)
+          (account-storage-root a) (get-raw src 32)
+          (account-commitment a) (get-int src)
+          (account-slot-count a) (get-int src))
+    (unless (source-exhausted-p src) (format-error "trailing bytes in account ~40,'0X" address))
+    (setf (account-complete-p a) (octets= (account-storage-root a) +empty-trie-root+))
+    a))
+
+(defun encode-slot-value (v) (integer->octets v (max 1 (ceiling (integer-length v) 8))))
 
 ;;; Reads
 
+(defun load-account (db address)
+  "ADDRESS's account from the store (NIL when absent), cached."
+  (let* ((v (kv-get (db-backing db) (key-account address)))
+         (a (when v (decode-account-record db address v))))
+    (when a (setf (account-used a) t))
+    (setf (gethash address (db-accounts db)) a)))
+
 (declaim (inline db-account))
 (defun db-account (db address)
-  (gethash address (db-accounts db)))
+  (multiple-value-bind (a present) (gethash address (db-accounts db))
+    (cond (a (when (db-backing db) (setf (account-used a) t)) a)
+          ((or present (null (db-backing db))) nil)
+          (t (load-account db address)))))
+
+(defun account-slot (db a slot)
+  "The value of SLOT in account A (whose storage table caches the store when backed)."
+  (let ((s (account-storage a)))
+    (multiple-value-bind (v present) (if s (gethash slot s) (values nil nil))
+      (cond (present v)
+            ((account-complete-p a) 0)
+            (t (let* ((o (kv-get (db-backing db) (key-slot (account-address a) slot)))
+                      (v (if o (octets->integer o) 0)))
+                 (setf (gethash slot (or (account-storage a)
+                                         (setf (account-storage a) (make-table t 16))))
+                       v)
+                 (incf (db-cached-slots db))
+                 v))))))
 
 (defun db-storage (db address slot)
-  (let ((a (gethash address (db-accounts db))))
-    (if a
-        (let ((s (account-storage a))) (if s (values (gethash slot s 0)) 0))
-        0)))
+  (let ((a (db-account db address)))
+    (if a (account-slot db a slot) 0)))
 
 (defun db-code (db hash)
   "Code octets for a code hash (32 octets or integer); the empty vector for the empty hash."
   (let ((key (code-hash-key hash)))
     (or (gethash key (db-codes db))
-        (if (= key (load-time-value (octets->integer +empty-code-hash+)))
-            (load-time-value (make-octets 0))
-            (error "store: no code for hash ~X" key)))))
+        (when (= key +empty-code-key+) (load-time-value (make-octets 0)))
+        (let ((code (and (db-backing db) (kv-get (db-backing db) (key-code key)))))
+          (when code
+            (incf (db-code-bytes db) (length code))
+            (setf (gethash key (db-codes db)) code)))
+        (error "store: no code for hash ~X" key))))
+
+;;; Iteration. A backed database iterates the store and overlays what RAM holds newer than
+;;; it: the writes since the last flush and those of the open and speculative blocks.
+
+(defun unflushed-addresses (db)
+  "Addresses whose RAM state may differ from the store's."
+  (let ((out (make-hash-table)))
+    (flet ((add-touched (table) (maphash (lambda (k v) (declare (ignore v)) (setf (gethash k out) t)) table)))
+      (add-touched (db-flush-accounts db))
+      (add-touched (db-touched db))
+      (dolist (s (db-speculative db)) (add-touched (speculative-block-touched s))))
+    out))
 
 (defun map-accounts (fn db)
   "Call FN with (address account) for every account."
-  (maphash fn (db-accounts db)))
+  (if (null (db-backing db))
+      (maphash fn (db-accounts db))
+      (let ((overlay (unflushed-addresses db)))
+        (multiple-value-bind (lo hi) (key-range-accounts)
+          (kv-map-range (db-backing db) lo hi
+                        (lambda (key value)
+                          (let ((address (key-address key)))
+                            (unless (gethash address overlay)
+                              (multiple-value-bind (a present) (gethash address (db-accounts db))
+                                (let ((a (if present a (decode-account-record db address value))))
+                                  (when a (funcall fn address a)))))))))
+        (maphash (lambda (address flag)
+                   (declare (ignore flag))
+                   (let ((a (db-account db address))) (when a (funcall fn address a))))
+                 overlay))))
 
 (defun map-account-storage (fn account)
-  (let ((s (account-storage account))) (when s (maphash fn s))))
+  "Call FN with (slot value) for every nonzero slot of ACCOUNT."
+  (let ((s (account-storage account)))
+    (cond ((account-complete-p account)
+           (when s (maphash (lambda (slot v) (unless (zerop v) (funcall fn slot v))) s)))
+          (t
+           (multiple-value-bind (lo hi) (key-range-slots (account-address account))
+             (kv-map-range (db-backing (account-owner account)) lo hi
+                           (lambda (key value)
+                             (let ((slot (key-slot-number key)))
+                               (unless (and s (nth-value 1 (gethash slot s)))
+                                 (funcall fn slot (octets->integer value)))))))
+           (when s (maphash (lambda (slot v) (unless (zerop v) (funcall fn slot v))) s))))))
 
-(defun map-codes (fn db) (maphash fn (db-codes db)))
+(defun map-codes (fn db)
+  (if (null (db-backing db))
+      (maphash fn (db-codes db))
+      (let ((new (make-hash-table)))
+        (dolist (k (db-flush-codes db)) (setf (gethash k new) t))
+        (dolist (k (db-new-codes db)) (setf (gethash k new) t))
+        (dolist (s (db-speculative db)) (dolist (k (speculative-block-new-codes s)) (setf (gethash k new) t)))
+        (multiple-value-bind (lo hi) (key-range-codes)
+          (kv-map-range (db-backing db) lo hi
+                        (lambda (key code)
+                          (let ((k (key-hash key)))
+                            (remhash k new)
+                            (funcall fn k code)))))
+        (maphash (lambda (k flag) (declare (ignore flag)) (funcall fn k (db-code db k))) new))))
 
 (defun db-block-hash (db number)
   "Hash of a recent block (the last 256 committed), or NIL."
@@ -155,12 +323,15 @@ the caller bound a trie-hashing parallel map)."
     (trie-from-items items (lambda (e) (values (slot-octets (car e)) (rlp-encode (cdr e))))
                      :secure t)))
 
-(defun ensure-storage-trie (account)
+(defun ensure-storage-trie (db account)
   (or (account-trie account)
-      (let ((trie (build-storage-trie account)))
-        (invariant (octets= (trie-root trie) (account-storage-root account))
-                   "storage of ~40,'0X does not hash to its recorded root" (account-address account))
-        (setf (account-trie account) trie))))
+      (setf (account-trie account)
+            (if (db-backing db)
+                (make-secure-trie :store (db-nodes db) :root (account-storage-root account))
+                (let ((trie (build-storage-trie account)))
+                  (invariant (octets= (trie-root trie) (account-storage-root account))
+                             "storage of ~40,'0X does not hash to its recorded root" (account-address account))
+                  trie)))))
 
 (defun flush-storage (account)
   "Bring the storage trie up to date and return the storage root."
@@ -213,7 +384,7 @@ root is the empty root, which has no nodes)."
   (let ((a (db-account db address)))
     (when a
       (db-state-root db)
-      (let ((trie (sb-thread:with-mutex ((db-proof-lock db)) (ensure-storage-trie a))))
+      (let ((trie (sb-thread:with-mutex ((db-proof-lock db)) (ensure-storage-trie db a))))
         (if (octets= (trie-root trie) +empty-trie-root+)
             '()
             (trie-proof trie (slot-octets slot)))))))
@@ -228,7 +399,7 @@ root is the empty root, which has no nodes)."
   (let ((a (db-account db address)))
     (when a
       (db-state-root db)
-      (let ((trie (sb-thread:with-mutex ((db-proof-lock db)) (ensure-storage-trie a))))
+      (let ((trie (sb-thread:with-mutex ((db-proof-lock db)) (ensure-storage-trie db a))))
         (trie-root trie)
         trie))))
 
@@ -258,12 +429,16 @@ root is the empty root, which has no nodes)."
                     (touch-commitment tc) (account-commitment a)
                     (touch-storage-root tc) (account-storage-root a)
                     (touch-storage tc) (account-storage a)
+                    (touch-slot-count tc) (account-slot-count a)
+                    (touch-complete-p tc) (account-complete-p a)
                     (touch-trie tc) (when trie (trie-clone trie)))))
           (setf (gethash address touched) tc)))))
 
 (defun live-account (db address)
   (or (db-account db address)
-      (setf (gethash address (db-accounts db)) (%make-account address))))
+      (let ((a (%make-account address)))
+        (when (db-backing db) (setf (account-owner a) db (account-used a) t))
+        (setf (gethash address (db-accounts db)) a))))
 
 (defun db-set-account (db address nonce balance code-hash &optional (commitment 0))
   "Create or overwrite ADDRESS's nonce, balance, code hash (32 octets) and T14 configuration
@@ -282,7 +457,9 @@ commitment (0 when it has none)."
   (when (db-account db address)
     ;; A later write recreates the account with empty storage: the diff says wiped.
     (setf (touch-wiped-p (touch db address)) t)
-    (remhash address (db-accounts db))
+    (if (db-backing db)
+        (setf (gethash address (db-accounts db)) nil)
+        (remhash address (db-accounts db)))
     (setf (gethash address (db-dirty db)) t)))
 
 (defun db-wipe-storage (db address)
@@ -292,7 +469,9 @@ commitment (0 when it has none)."
     (setf (touch-wiped-p tc) t)
     (when a
       (setf (account-storage a) nil
-            (account-trie a) (make-secure-trie)
+            (account-complete-p a) t
+            (account-slot-count a) 0
+            (account-trie a) (make-secure-trie :store (db-nodes db))
             (account-dirty-slots a) '()
             (account-storage-root a) +empty-trie-root+
             (gethash address (db-dirty db)) t))))
@@ -300,15 +479,20 @@ commitment (0 when it has none)."
 (defun db-set-storage (db address slot value)
   (let* ((tc (touch db address))
          (a (live-account db address))
+         (old (account-slot db a slot))
+         (backed (db-backing db))
          (storage (or (account-storage a)
-                      (setf (account-storage a) (make-hash-table)))))
-    (ensure-storage-trie a)
+                      (setf (account-storage a) (make-table backed 16)))))
+    (ensure-storage-trie db a)
     (unless (touch-wiped-p tc)
-      (multiple-value-bind (old present) (gethash slot (touch-old-slots tc))
-        (declare (ignore old))
-        (unless present (setf (gethash slot (touch-old-slots tc)) (gethash slot storage 0)))))
+      (multiple-value-bind (prior present) (gethash slot (touch-old-slots tc))
+        (declare (ignore prior))
+        (unless present (setf (gethash slot (touch-old-slots tc)) old))))
     (setf (gethash slot (touch-written tc)) t)
-    (if (zerop value) (remhash slot storage) (setf (gethash slot storage) value))
+    (cond ((and (zerop value) (not backed)) (remhash slot storage))
+          (t (when backed (incf (db-cached-slots db)))
+             (setf (gethash slot storage) value)))
+    (incf (account-slot-count a) (- (if (zerop value) 0 1) (if (zerop old) 0 1)))
     (push slot (account-dirty-slots a))
     (setf (gethash address (db-dirty db)) t)
     value))
@@ -319,6 +503,7 @@ commitment (0 when it has none)."
          (key (octets->integer hash)))
     (unless (gethash key (db-codes db))
       (setf (gethash key (db-codes db)) code)
+      (incf (db-code-bytes db) (length code))
       (when (db-open-p db) (push key (db-new-codes db))))
     hash))
 
@@ -348,7 +533,7 @@ commitment (0 when it has none)."
                             :nonce (account-nonce a) :balance (account-balance a)
                             :code-hash (account-code-hash a) :commitment (account-commitment a)
                             :slots (loop for slot being the hash-keys of (touch-written tc)
-                                         collect (cons slot (db-storage db address slot))))
+                                         collect (cons slot (account-slot db a slot))))
                            (make-account-diff :address address :deleted-p t))
                        accounts)))
              (db-touched db))
@@ -357,15 +542,14 @@ commitment (0 when it has none)."
                      :codes (mapcar (lambda (k) (gethash k (db-codes db)))
                                     (reverse (db-new-codes db))))))
 
-(defun close-block (db)
-  (setf (db-touched db) (make-hash-table)
-        (db-open-p db) nil
+(defun close-block (db &key keep-touched)
+  "Close the open block; KEEP-TOUCHED when a speculative record holds the touch table."
+  (if keep-touched
+      (setf (db-touched db) (make-hash-table))
+      (clrhash (db-touched db)))
+  (setf (db-open-p db) nil
         (db-saved-trie db) nil
         (db-new-codes db) '()))
-
-(defstruct (speculative-block (:constructor make-speculative-block
-                                  (touched saved-trie new-codes number hash root recent)))
-  touched saved-trie new-codes number hash root recent)
 
 (defun forget-codes (db keys)
   "Remove the codes first stored by an undone block (KEYS, code table keys)."
@@ -377,31 +561,64 @@ commitment (0 when it has none)."
     (maphash (lambda (k v) (setf (gethash k copy) v)) table)
     copy))
 
+(defun note-block-writes (db)
+  "Fold the open block's writes into what a backed database flushes next, and its count of
+accounts."
+  (let ((marks (db-flush-accounts db)) (weight 0))
+    (declare (type fixnum weight))
+    (maphash (lambda (address tc)
+               (let ((mark (or (gethash address marks) (setf (gethash address marks) (make-flush-mark))))
+                     (now (db-account db address)))
+                 (cond ((and (touch-account tc) (null now)) (decf (db-account-total db)))
+                       ((and (null (touch-account tc)) now) (incf (db-account-total db))))
+                 (when (touch-wiped-p tc) (setf (flush-mark-wiped-p mark) t))
+                 (let ((slots (flush-mark-slots mark)))
+                   (maphash (lambda (slot flag) (declare (ignore flag)) (setf (gethash slot slots) t) (incf weight))
+                            (touch-written tc)))
+                 (incf weight)))
+             (db-touched db))
+    (setf (db-flush-codes db) (append (db-new-codes db) (db-flush-codes db)))
+    (incf (db-dirty-weight db) weight)))
+
+(defun count-speculative-accounts (db)
+  "The account total after the open block (speculative blocks keep their own count)."
+  (maphash (lambda (address tc)
+             (let ((now (db-account db address)))
+               (cond ((and (touch-account tc) (null now)) (decf (db-account-total db)))
+                     ((and (null (touch-account tc)) now) (incf (db-account-total db))))))
+           (db-touched db)))
+
 (defun db-commit-block (db number hash)
   "Close the open block as block NUMBER with HASH: compute its state root, remember the
 hash for BLOCKHASH, and return the block's diff. Inside WITH-SPECULATIVE-BLOCKS the block's
 undo record is kept so the speculation can be unwound."
   (invariant (db-open-p db) "no open block")
   (let* ((root (db-state-root db))
-         (diff (block-diff-from-touches db number hash root)))
-    (when (plusp (db-speculation-depth db))
+         (diff (block-diff-from-touches db number hash root))
+         (speculative (plusp (db-speculation-depth db))))
+    (when speculative
       (push (make-speculative-block (db-touched db) (db-saved-trie db) (db-new-codes db)
                                     (db-number db) (db-hash db)
-                                    (db-root-hash db) (copy-table (db-recent db)))
+                                    (db-root-hash db) (copy-table (db-recent db))
+                                    (db-account-total db))
             (db-speculative db)))
-    (close-block db)
+    (when (db-backing db)
+      (if speculative (count-speculative-accounts db) (note-block-writes db)))
+    (close-block db :keep-touched speculative)
     (setf (db-number db) number (db-hash db) hash (db-root-hash db) root)
     (db-note-block-hash db number hash)
     diff))
 
 (defun undo-touches (db touched saved-trie)
   "Put every account in TOUCHED back as it was before its block, and the account trie."
-  (let ((accounts (db-accounts db)))
+  (let ((accounts (db-accounts db))
+        (backed (db-backing db)))
     (maphash
      (lambda (address tc)
        (let ((a (touch-account tc)))
          (if (null a)
-             (remhash address accounts)
+             ;; absent before the block (a backed store may still hold an older version)
+             (if backed (setf (gethash address accounts) nil) (remhash address accounts))
              (progn
                (setf (account-nonce a) (touch-nonce tc)
                      (account-balance a) (touch-balance tc)
@@ -409,13 +626,18 @@ undo record is kept so the speculation can be unwound."
                      (account-commitment a) (touch-commitment tc)
                      (account-storage-root a) (touch-storage-root tc)
                      (account-storage a) (touch-storage tc)
+                     (account-slot-count a) (touch-slot-count tc)
+                     (account-complete-p a) (touch-complete-p tc)
                      (account-trie a) (touch-trie tc)
                      (account-dirty-slots a) '())
                (let ((s (account-storage a)))
-                 ;; No table before the block means every recorded old value is zero.
+                 ;; No table before the block means every recorded old value is zero (or,
+                 ;; backed, uncached: the store still holds it).
                  (when s
                    (maphash (lambda (slot old)
-                              (if (zerop old) (remhash slot s) (setf (gethash slot s) old)))
+                              (if (and (zerop old) (not backed))
+                                  (remhash slot s)
+                                  (setf (gethash slot s) old)))
                             (touch-old-slots tc))))
                (setf (gethash address accounts) a)))))
      touched)
@@ -440,12 +662,13 @@ undo record is kept so the speculation can be unwound."
              (setf (db-number db) (speculative-block-number s)
                    (db-hash db) (speculative-block-hash s)
                    (db-root-hash db) (speculative-block-root s)
-                   (db-recent db) (speculative-block-recent s)))))
+                   (db-recent db) (speculative-block-recent s)
+                   (db-account-total db) (speculative-block-account-total s)))))
 
 (defmacro with-speculative-blocks ((db) &body body)
   "Run BODY, in which blocks may be executed and committed on DB one after another (each
 building on the last), then undo all of them, on any exit. Nothing committed inside reaches
-the block log unless BODY logs it itself. May nest."
+the block log or the store unless BODY logs it itself. May nest."
   (let ((d (gensym "DB")) (depth (gensym "DEPTH")))
     `(let* ((,d ,db)
             (,depth (length (db-speculative ,d))))

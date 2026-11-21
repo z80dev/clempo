@@ -122,71 +122,9 @@
   (db-set-storage db 1 5 6)
   (db-commit-block db 0 (block-hash 0)))
 
-(deftest store-survives-restarts-with-a-root-check ()
-  (let ((dir (temp-dir)) (rng (sb-ext:seed-random-state 3)))
-    (unwind-protect
-         (let ((store (open-store dir :genesis #'genesis :interval 8)))
-           (loop for n from 1 to 20
-                 do (random-block (store-db store) rng n)
-                    (store-commit-block store (db-commit-block (store-db store) n (block-hash n))))
-           (let ((expected (snapshot (store-db store)))
-                 (root (db-root-hash (store-db store))))
-             (close-store store)
-             ;; checkpoint at 16, blocks 17..20 from the log
-             (is (probe-file (format nil "~Acheckpoint-~12,'0D.state" dir 16)))
-             (let ((again (open-store dir)))
-               (is= 20 (db-number (store-db again)))
-               (is-equalp root (db-root-hash (store-db again)))
-               (is (equal expected (snapshot (store-db again))))
-               (is-equalp (block-hash 19) (db-block-hash (store-db again) 19))
-               ;; keep going, checkpoint on close, reopen
-               (random-block (store-db again) rng 21)
-               (store-commit-block again (db-commit-block (store-db again) 21 (block-hash 21)))
-               (let ((root21 (db-root-hash (store-db again))))
-                 (close-store again :checkpoint t)
-                 (let ((third (open-store dir)))
-                   (is= 21 (db-number (store-db third)))
-                   (is-equalp root21 (db-root-hash (store-db third)))
-                   (close-store third))))))
-      (sb-ext:delete-directory dir :recursive t))))
-
-(deftest store-cuts-a-torn-log-tail ()
-  (let ((dir (temp-dir)) (rng (sb-ext:seed-random-state 9)))
-    (unwind-protect
-         (let ((store (open-store dir :genesis #'genesis)))
-           (loop for n from 1 to 5
-                 do (random-block (store-db store) rng n)
-                    (store-commit-block store (db-commit-block (store-db store) n (block-hash n))))
-           (close-store store)
-           ;; chop the last record in half
-           (let* ((log (format nil "~Alog-~12,'0D.wal" dir 0))
-                  (bytes (clempo.io:read-file-octets log)))
-             (clempo.io:write-file-octets log (subseq bytes 0 (- (length bytes) 7))))
-           (let ((again (open-store dir)))
-             (is= 4 (db-number (store-db again)))
-             (random-block (store-db again) rng 5)
-             (store-commit-block again (db-commit-block (store-db again) 5 (block-hash 5)))
-             (close-store again))
-           (is= 5 (db-number (store-db (open-store dir)))))
-      (sb-ext:delete-directory dir :recursive t))))
-
-(deftest store-rejects-a-checkpoint-whose-root-is-wrong ()
-  (let ((dir (temp-dir)))
-    (unwind-protect
-         (progn
-           (close-store (open-store dir :genesis #'genesis))
-           ;; flip the recorded root (after magic 8, version 4, number 8, hash 32)
-           (let* ((path (format nil "~Acheckpoint-~12,'0D.state" dir 0))
-                  (bytes (clempo.io:read-file-octets path)))
-             (setf (aref bytes 52) (logxor 1 (aref bytes 52)))
-             (clempo.io:write-file-octets path bytes))
-           (signals store-root-mismatch (open-store dir)))
-      (sb-ext:delete-directory dir :recursive t))))
-
-(deftest statedb-proofs-verify-against-the-roots ()
-  (let ((db (make-statedb)) (rng (sb-ext:seed-random-state 13)))
-    (loop for n from 1 to 5 do (random-block db rng n) (db-commit-block db n (block-hash n)))
-    (let ((root (db-state-root db)) (checked 0))
+(defun check-proofs (db)
+  "Every account and slot of DB proves against its roots; absences prove absent."
+  (let ((root (db-state-root db)) (checked 0))
       (map-accounts
        (lambda (address a)
          (let ((key (integer->octets address 20)))
@@ -208,7 +146,12 @@
       (is (plusp checked))
       ;; absences
       (is (nth-value 1 (clempo.trie:verify-proof root (integer->octets 99 20) (db-account-proof db 99) :secure t)))
-      (is (null (db-storage-proof db 99 0))))))
+      (is (null (db-storage-proof db 99 0)))))
+
+(deftest statedb-proofs-verify-against-the-roots ()
+  (let ((db (make-statedb)) (rng (sb-ext:seed-random-state 13)))
+    (loop for n from 1 to 5 do (random-block db rng n) (db-commit-block db n (block-hash n)))
+    (check-proofs db)))
 
 (defun code-present-p (db code)
   (let ((key (octets->integer (clempo.keccak:keccak256 code))) (found nil))

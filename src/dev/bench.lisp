@@ -51,7 +51,7 @@
       (values result secs cpu-secs gc-secs consed rss))))
 
 (defcommand "bench" (args)
-  "R7: bench -range busy|early|recent [-parent SAVED_DIR -datadir FRESH_DIR] [-sender-threads N] [-result FILE] [-profile FILE [-profile-mode cpu|alloc] [-profile-threads all|main]]"
+  "R7: bench -range busy|early|recent [-parent SAVED_DIR -datadir FRESH_DIR] [-sender-threads N] [-result FILE] [-profile FILE [-profile-mode cpu|alloc] [-profile-threads all|main]] [-cache-accounts N] [-cache-slots N] [-cache-trie-nodes N] [-cache-code-mb N] [-cache-dirty N]"
   (let* ((range (arg args :range)) (spec (assoc range *bench-ranges* :test #'equal))
          (parent (arg args :parent)) (datadir (arg args :datadir)) (profile (arg args :profile))
          (profile-mode (if (equal (arg args :profile-mode "cpu") "alloc") :alloc :cpu))
@@ -78,7 +78,8 @@
             (ensure-directories-exist (uiop:pathname-parent-directory-pathname datadir))
             (uiop:run-program (list "cp" "-R" (namestring parent) (namestring datadir))
                               :error-output *error-output*))
-          (setf store (clempo.store:open-store datadir :genesis #'clempo.executor:load-genesis)))
+          (setf store (clempo.store:open-store datadir :genesis #'clempo.executor:load-genesis
+                                                       :sync *replay-sync* :cache (store-cache-arg args))))
         (unwind-protect
              (let ((db (if store (clempo.store:store-db store) (clempo.executor:genesis-db))))
                (unless (and (= parent-height (clempo.store:db-number db))
@@ -101,6 +102,7 @@
                                "profiled" (if profile :true :false)
                                "sender_threads" sender-threads
                                "persistent" (if store :true :false)
+                               "store_sync" (if store (format nil "~(~{~A~^ ~}~)" *replay-sync*) :null)
                                "blocks" blocks "txs" (clempo.executor:replay-result-txs result) "gas" gas
                                "seconds" secs "blocks_per_s" (/ blocks secs) "mgas_per_s" (/ gas secs 1e6)
                                "cpu_seconds" cpu "gc_seconds" gc "peak_rss_bytes" peak "bytes_consed" consed)))

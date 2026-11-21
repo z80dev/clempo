@@ -206,3 +206,50 @@
                                    (replace b (integer->octets (expt 2 40) 8) :start1 at))))
              (signals history-file-error (clempo.history::open-segment seg))))
       (sb-ext:delete-directory dir :recursive t))))
+
+(deftest views-read-while-the-writer-appends-flushes-and-merges ()
+  ;; No lock between them: four readers make views at random covered blocks and read every
+  ;; account and slot while one writer appends blocks, flushes every 3 (tiers merge, merged
+  ;; inputs are deleted and later unmapped by their finalizers) and the GC runs.
+  (let* ((dir (temp-dir)) (rng (sb-ext:seed-random-state 23))
+         (snapshots (make-array 400 :initial-element nil))
+         (db (genesis-db))
+         (history (open-history dir))
+         (done nil) (reads 0) (mismatches '())
+         (lock (sb-thread:make-mutex)))
+    (unwind-protect
+         (progn
+           (history-start-writer history 0 db)
+           (history-record-state history db)
+           (setf (aref snapshots 0) (snapshot db))
+           (let ((readers
+                   (loop for r below 4
+                         collect (let ((seed (+ 900 r)))
+                                   (sb-thread:make-thread
+                                    (lambda ()
+                                      (let ((rrng (sb-ext:seed-random-state seed)))
+                                        (loop until done
+                                              do (let* ((height (or (history-height history) 0))
+                                                        (n (random (1+ height) rrng))
+                                                        (view (history-state history n)))
+                                                   (when view
+                                                     (let ((got (view-snapshot view)))
+                                                       (sb-thread:with-mutex (lock)
+                                                         (incf reads)
+                                                         (unless (equal got (aref snapshots n))
+                                                           (push n mismatches)))))))))
+                                    :name "history reader")))))
+             (loop for n from 1 to 300
+                   do (random-block db rng)
+                      (let ((diff (store:db-commit-block db n (block-hash n))))
+                        ;; the expected state is in place before the block becomes visible
+                        (setf (aref snapshots n) (snapshot db))
+                        (history-record-block history db diff))
+                      (when (zerop (mod n 3)) (history-flush history :db db))
+                      (when (zerop (mod n 50)) (sb-ext:gc :full t)))
+             (setf done t)
+             (mapc #'sb-thread:join-thread readers))
+           (is (> reads 100) "~D reads" reads)
+           (is (null mismatches) "views disagreed at blocks ~S" (remove-duplicates mismatches))
+           (close-history history))
+      (sb-ext:delete-directory dir :recursive t))))

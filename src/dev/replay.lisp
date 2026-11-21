@@ -132,8 +132,24 @@
 
 (defun json-height (x) (or x :null))
 
+(defparameter *replay-sync* '(:group 1024)
+  "The block log's sync policy for replay and bench datadirs: a replay acknowledges no block
+to anyone, so it syncs every 1,024 blocks (and at each flush and on close) instead of after
+each block; a crash resumes from the last synced block (CLEMPO.STORE:STORE-DURABLE-NUMBER).")
+
+(defun store-cache-arg (args)
+  "Cache limits for a datadir's state database from -cache-accounts, -cache-slots,
+-cache-trie-nodes, -cache-code-mb and -cache-dirty; the store's defaults otherwise."
+  (apply #'clempo.store:make-cache-limits
+         (loop for (flag key scale) in '((:cache-accounts :accounts 1) (:cache-slots :slots 1)
+                                         (:cache-trie-nodes :trie-nodes 1)
+                                         (:cache-code-mb :code-bytes 1048576) (:cache-dirty :dirty 1))
+               for v = (arg-int args flag)
+               when v append (list key (* v scale)))))
+
 (defun replay (&key from to datadir (checkpoint 0) (heal 0) (skip 0) result-path diagnose
-                    interactive (chain :mainnet) (sender-threads +default-sender-threads+))
+                    interactive (chain :mainnet) (sender-threads +default-sender-threads+)
+                    (cache (clempo.store:make-cache-limits)))
   "Run a replay; returns the result JSON object. Callable from a REPL (pass :interactive t to
 get the restarts in the debugger)."
   (check-type sender-threads (integer 1 16))
@@ -143,7 +159,7 @@ get the restarts in the debugger)."
          (store (when datadir
                   (clempo.store:open-store (expand-home datadir)
                                            :genesis (lambda (db) (clempo.executor:load-genesis db :chain chain))
-                                           :interval checkpoint
+                                           :interval checkpoint :sync *replay-sync* :cache cache
                                            :log (lambda (fmt &rest args) (apply #'log-line fmt args)))))
          (db (if store (clempo.store:store-db store) (clempo.executor:genesis-db :chain chain)))
          (history (read-history datadir))
@@ -241,7 +257,7 @@ get the restarts in the debugger)."
       json)))
 
 (defcommand "replay" (args)
-  "R3: replay [-from N] [-to M] [-datadir D] [-checkpoint K] [-sender-threads N] [-heal K] [-skip K] [-result F] [-diagnose] [-interactive]"
+  "R3: replay [-from N] [-to M] [-datadir D] [-checkpoint K (blocks between store flushes)] [-sender-threads N] [-heal K] [-skip K] [-result F] [-diagnose] [-interactive] [-cache-accounts N] [-cache-slots N] [-cache-trie-nodes N] [-cache-code-mb N] [-cache-dirty N]"
   (let ((json (replay :from (arg-int args :from) :to (arg-int args :to)
                       :datadir (arg args :datadir)
                       :checkpoint (arg-int args :checkpoint 0)
@@ -251,7 +267,8 @@ get the restarts in the debugger)."
                       :result-path (arg args :result)
                       :diagnose (arg-flag args :diagnose)
                       :interactive (arg-flag args :interactive)
-                      :chain (intern (string-upcase (arg args :chain "mainnet")) :keyword))))
+                      :chain (intern (string-upcase (arg args :chain "mainnet")) :keyword)
+                      :cache (store-cache-arg args))))
     (if (member (clempo.json:jget json "stop") '(nil :null)) 0 1)))
 
 (defun verify-replay-head (datadir archive height)
