@@ -1,6 +1,6 @@
 (defpackage #:clempo.sha2
   (:use #:cl #:clempo.base)
-  (:export #:sha256 #:sha512 #:make-sha256 #:make-sha512 #:sha256-update
+  (:export #:sha256 #:sha384 #:sha512 #:make-sha256 #:make-sha512 #:sha256-update
            #:sha512-update #:sha256-final #:sha512-final #:hmac-sha256 #:hmac-sha512
            #:hkdf-sha256 #:hkdf-sha256-extract #:hkdf-sha256-expand))
 (in-package #:clempo.sha2)
@@ -27,6 +27,7 @@
          (total (intern (format nil "~A-TOTAL" context)))
          (done (intern (format nil "~A-DONE" context)))
          (constructor (intern (format nil "%~A" make)))
+         (final-size (intern (format nil "%~A" final)))
          (regs (loop repeat 8 collect (gensym)))
          (ws (loop repeat 16 collect (gensym))))
     (labels ((add (&rest args) `(ldb (byte ,width 0) (+ ,@args)))
@@ -36,7 +37,7 @@
                                             `(logior (ash ,x ,(- n))
                                                      (ldb (byte ,width 0) (ash ,x ,(- width n)))))))))
       `(progn
-         (defstruct (,context (:constructor ,constructor ()))
+         (defstruct (,context (:constructor ,constructor (&optional state)))
            (state (make-array 8 :element-type ',word :initial-contents ',init)
                   :type (simple-array ,word (8)))
            (buffer (make-octets ,block) :type octets)
@@ -92,11 +93,11 @@
                    do (,compress state data start) (incf start ,block))
              (replace buffer data :start2 start :end2 end))
            ctx)
-         (defun ,final (ctx)
+         (defun ,final-size (ctx words)
            (check-type ctx ,context)
            (assert (not (,done ctx)))
            (let* ((total (,total ctx)) (used (mod total ,block)) (buffer (,buf ctx))
-                  (state (,st ctx)) (out (make-octets ,(* 8 bytes))))
+                  (state (,st ctx)) (out (make-octets (* words ,bytes))))
              (setf (,done ctx) t (aref buffer used) #x80)
              (fill buffer 0 :start (1+ used))
              (when (>= used ,(- block length-size))
@@ -105,10 +106,11 @@
                (loop for i below ,length-size do
                  (setf (aref buffer (- ,(1- block) i)) (ldb (byte 8 (* i 8)) bits))))
              (,compress state buffer 0)
-             (dotimes (i 8 out)
+             (dotimes (i words out)
                (dotimes (j ,bytes)
                  (setf (aref out (+ (* i ,bytes) j))
                        (ldb (byte 8 (* 8 (- ,(1- bytes) j))) (aref state i)))))))
+         (defun ,final (ctx) (,final-size ctx 8))
          (defun ,hash (data &key (start 0) (end (length data)))
            (,final (,update (,make) data :start start :end end)))))))
 
@@ -116,6 +118,16 @@
   32 64 8 (2 13 22) (6 11 25) (7 18 3) (17 19 10))
 (define-sha make-sha512 sha512-update sha512-final sha512 compress512 sha512-context
   64 80 16 (28 34 39) (14 18 41) (1 8 7) (19 61 6))
+
+(defun sha384 (data &key (start 0) (end (length data)))
+  "FIPS 180-4 SHA-384: SHA-512 compression with a distinct IV and six output words."
+  (let ((ctx (%make-sha512
+              (make-array 8 :element-type '(unsigned-byte 64)
+                          :initial-contents '(#xcbbb9d5dc1059ed8 #x629a292a367cd507
+                                              #x9159015a3070dd17 #x152fecd8f70e5939
+                                              #x67332667ffc00b31 #x8eb44a8768581511
+                                              #xdb0c2e0d64f98fa7 #x47b5481dbefa4fa4)))))
+    (%sha512-final (sha512-update ctx data :start start :end end) 6)))
 
 (defmacro define-hmac (name make update final hash block)
   `(defun ,name (key data &rest more)

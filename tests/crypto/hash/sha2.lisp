@@ -18,6 +18,12 @@
   (is-equalp (hex->octets "8e959b75dae313da8cf4f72814fc143f8f7779c6eb9f7fa17299aeadb6889018501d289e4900f7e4331b99dec4b5433ac7d329eeb6dd26545e96e55b874be909")
              (sha512 (string->octets "abcdefghbcdefghicdefghijdefghijkefghijklfghijklmghijklmnhijklmnoijklmnopjklmnopqklmnopqrlmnopqrsmnopqrstnopqrstu"))))
 
+(deftest sha384-fips-180 ()
+  (is-equalp (hex->octets "cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7")
+             (sha384 (string->octets "0abc1") :start 1 :end 4))
+  (is-equalp (hex->octets "9d0e1809716474cb086e834e310a4a1ced149e9c00f248527972cec5704c2a5b07b8b3dc38ecc4ebae97ddd87f3d8985")
+             (sha384 (fill (make-octets 1000000) 97))))
+
 (deftest hmac-rfc-4231 ()
   (let ((key (fill (make-octets 20) #x0b)) (data (string->octets "Hi There")))
     (is-equalp (hex->octets "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7")
