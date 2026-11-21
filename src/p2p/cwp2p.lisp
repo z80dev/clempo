@@ -4,7 +4,10 @@
   (:documentation "Tempo's commonware authenticated::lookup network over SAKE/CUPS.
 The protocol is Data(0, channel:u64-varint, length:u32-varint, bytes) or Ping(1).
 Channels are registered locally, never negotiated. Tempo uses channels 0..5 and
-SAKE V0/CUPS V0; simplex/DKG payloads additionally carry a mux subchannel varint.
+pins SAKE V0/CUPS V0; simplex/DKG payloads additionally carry a mux subchannel varint.
+SAKE and CUPS versions are not negotiated either (commonware-stream sake/mod.rs):
+DIAL, ACCEPT and CONNECT take :SAKE-VERSION and :CUPS-VERSION (0 or 1, default 0),
+and both ends must be configured alike; a mismatch fails the handshake closed.
 Unlike authenticated::discovery, lookup has no Greeting, signed advertised
 addresses, BitVec, or Peers messages. Peer identities/addresses come from the
 chain's validator registry, not from network gossip. Sending discovery messages
@@ -25,7 +28,8 @@ DISPATCH-MESSAGE. No background scanning or threads are started.")
            #:session #:wrap-connection #:dial #:accept #:connect
            #:close-session #:session-peer #:session-closed-p #:session-max-message-size
            #:register-channel #:channel-handler
-           #:send-data #:send-ping #:receive-message #:receive-data #:dispatch-message))
+           #:send-data #:send-frames #:send-ping #:receive-message #:receive-data
+           #:dispatch-message))
 
 (in-package #:clempo.cwp2p)
 
@@ -222,15 +226,18 @@ MAX-MESSAGE-SIZE+16. CLOSE-SESSION owns it from successful return onward."
                                   (max-message-size (* 16 1024 1024))
                                   (channels '(0 1 2 3 4 5)) (ping-interval-ms 30000)
                                   (now-ms (clempo.io:now-ms)) (max-age-ms 10000)
-                                  (synchrony-ms 5000) ephemeral-secret)
+                                  (synchrony-ms 5000) ephemeral-secret
+                                  (sake-version 0) (cups-version 0))
   "Authenticate an outbound binary stream to the expected PEER and adopt it.
 NAMESPACE is the lookup network namespace, not its derived SAKE namespace.
-Uses Tempo's fixed V0/V0. The stream is closed if upgrade fails."
+SAKE-VERSION/CUPS-VERSION are configured, not negotiated (Tempo pins 0/0, the
+default). The stream is closed if upgrade fails."
   (let ((session (new-session max-message-size channels ping-interval-ms now-ms)))
     (handler-case
         (setf (session-connection session)
               (clempo.cw-stream:dial
-               stream seed peer (stream-namespace namespace) :version 0 :cups-version 0
+               stream seed peer (stream-namespace namespace)
+               :version sake-version :cups-version cups-version
                :now-ms now-ms :max-age-ms max-age-ms :synchrony-ms synchrony-ms
                :max-message-size (+ max-message-size +max-payload-overhead+)
                :ephemeral-secret ephemeral-secret))
@@ -241,17 +248,20 @@ Uses Tempo's fixed V0/V0. The stream is closed if upgrade fails."
                                        (max-message-size (* 16 1024 1024))
                                        (channels '(0 1 2 3 4 5)) (ping-interval-ms 30000)
                                        (now-ms (clempo.io:now-ms)) (max-age-ms 10000)
-                                       (synchrony-ms 5000) ephemeral-secret)
+                                       (synchrony-ms 5000) ephemeral-secret
+                                       (sake-version 0) (cups-version 0))
   "Authenticate and adopt a caller-accepted binary stream. BOUNCER is mandatory:
 it receives the remote public key and must return true only for permitted peers.
 The caller must apply source-IP admission and handshake deadlines to STREAM.
-No address advertisement or discovery handshake follows the SAKE exchange."
+No address advertisement or discovery handshake follows the SAKE exchange.
+SAKE-VERSION/CUPS-VERSION must equal the dialer's; nothing negotiates them."
   (check-type bouncer function)
   (let ((session (new-session max-message-size channels ping-interval-ms now-ms)))
     (handler-case
         (setf (session-connection session)
               (clempo.cw-stream:accept
-               stream seed (stream-namespace namespace) :version 0 :cups-version 0
+               stream seed (stream-namespace namespace)
+               :version sake-version :cups-version cups-version
                :bouncer bouncer :now-ms now-ms :max-age-ms max-age-ms
                :synchrony-ms synchrony-ms
                :max-message-size (+ max-message-size +max-payload-overhead+)
@@ -260,8 +270,9 @@ No address advertisement or discovery handshake follows the SAKE exchange."
     session))
 
 (defun connect (host port seed peer &rest options &key (timeout 10) &allow-other-keys)
-  "Connect only to the explicitly supplied peer; remaining OPTIONS are DIAL's.
-TIMEOUT bounds TCP connect/I/O via the owned transport. Never scans addresses."
+  "Connect only to the explicitly supplied peer; remaining OPTIONS are DIAL's
+(including :SAKE-VERSION/:CUPS-VERSION). TIMEOUT bounds TCP connect/I/O via the
+owned transport. Never scans addresses."
   (let ((dial-options (copy-list options)))
     (remf dial-options :timeout)
     (let ((stream (clempo.p2p-wire:connect-tcp host port :timeout timeout)))
@@ -284,6 +295,23 @@ TIMEOUT bounds TCP connect/I/O via the owned transport. Never scans addresses."
       (ensure-open session)
       (with-session-failure (session)
         (clempo.cw-stream:send-message (session-connection session) frame))))
+  t)
+
+(defun send-frames (session frames)
+  "Send pre-encoded lookup frames (from ENCODE-DATA, or ENCODE-PING) as one batch
+with a single flush, like commonware's send_many. Each frame is checked against
+the session's channels and payload limit before anything is written."
+  (ensure-open session)
+  (dolist (frame frames)
+    (multiple-value-bind (kind channel)
+        (decode-message frame :max-message-size (session-max-message-size session))
+      (when (eq kind :data) (channel-handler session channel))))
+  (sb-thread:with-mutex ((session-send-lock session))
+    (ensure-open session)
+    (with-session-failure (session)
+      (loop for (frame . more) on frames
+            do (clempo.cw-stream:send-message (session-connection session) frame
+                                              :flush (null more)))))
   t)
 
 (defun send-ping (session &key if-due (now-ms (clempo.io:now-ms)))

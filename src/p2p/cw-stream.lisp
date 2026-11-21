@@ -181,15 +181,16 @@
         (send-frame stream synack)
         (make-session stream peer (listen-end state (receive-frame stream 32)) nil
                       :cups-version cups-version :max-message-size max-message-size)))))
-(defun send-message (connection plaintext)
-  "Send one bounded plaintext record. A failed write permanently closes this sender."
+(defun send-message (connection plaintext &key (flush t))
+  "Send one bounded plaintext record. A failed write permanently closes this sender.
+With FLUSH false the record stays buffered until a later flushing send (batching)."
   (when (> (length plaintext) (connection-max-message-size connection)) (protocol-error "CUPS message too large"))
   (let ((cipher (connection-sender connection)) (stream (connection-stream connection)))
     (handler-case
         (let* ((header (if (zerop (connection-version connection)) (uint (+ 16 (length plaintext)))
                            (seal cipher (be (length plaintext) 4))))
                (body (seal cipher plaintext)))
-          (write-octets stream header) (write-octets stream body) (finish-output stream))
+          (write-octets stream header) (write-octets stream body) (when flush (finish-output stream)))
       (error (e) (setf (cipher-closed cipher) t) (error e)))))
 (defun receive-message (connection)
   "Receive one record; every receive failure permanently closes this receiver."

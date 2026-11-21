@@ -4,9 +4,13 @@
   (let ((seen (make-hash-table :test #'equalp))
         (counts (make-array 6 :initial-element 0))
         (by-peer (make-hash-table :test #'equalp)))
-    (clempo.validator:call-with-validator-network
-     manifest slot
+    (apply
+     #'clempo.validator:call-with-validator-network
      (lambda (network)
+       (clempo.validator:network-track
+        network 0 (loop for other across (clempo.validator:manifest-slots manifest) unless (eq other slot)
+                        collect (list (clempo.validator:slot-public-key other) "127.0.0.1"
+                                      (clempo.validator:slot-port other))))
        (let ((deadline (+ (clempo.io:monotonic-ticks) (* seconds internal-time-units-per-second))))
          (loop for remaining = (/ (- deadline (clempo.io:monotonic-ticks)) internal-time-units-per-second)
                while (plusp remaining)
@@ -19,7 +23,9 @@
                        (incf (aref counts channel))
                        (incf (aref (or (gethash key by-peer)
                                        (setf (gethash key by-peer) (make-array 6 :initial-element 0)))
-                                   channel)))))))))
+                                   channel)))))))
+     :seed (clempo.validator:read-slot-seed slot) :listen-host "127.0.0.1"
+     :listen-port (clempo.validator:slot-port slot) (clempo.validator:local-network-options))
     (let ((all-peers (loop for peer across (clempo.validator:manifest-slots manifest)
                            unless (eq peer slot) collect peer)))
       (values

@@ -6,6 +6,8 @@
            #:manifest-slots #:validator-slot #:slot-number #:slot-public-key #:slot-seed-path
            #:slot-share-path #:slot-port #:slot-rpc-url #:manifest-slot #:read-slot-seed
            #:call-with-validator-network #:network-receive #:network-send #:network-peers
+           #:network-track #:network-block #:network-listen-port #:tempo-channel-quotas
+           #:local-network-options
            #:network-event #:network-event-kind #:network-event-peer #:network-event-channel
            #:run-devnet-validator
            #:network-event-frame #:network-event-start #:network-event-end))

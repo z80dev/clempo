@@ -636,9 +636,11 @@ The optional timeout is for controlled devnet runs. REPORTER consumes JSON event
                     (null (set-exclusive-or keys (clempo.dkg:outcome-players outcome) :test #'octets=))
                     (null (set-exclusive-or keys (clempo.dkg:outcome-next-players outcome) :test #'octets=)))
                "manifest validators do not match the genesis DKG outcome")
-    (call-with-validator-network
-     manifest slot
+    (apply
+     #'call-with-validator-network
      (lambda (network)
+       (network-track network 0 (loop for other across (manifest-slots manifest) unless (eq other slot)
+                                      collect (list (slot-public-key other) "127.0.0.1" (slot-port other))))
        (let* ((store (clempo.store:open-store (uiop:ensure-directory-pathname datadir)
                                              :genesis (lambda (db) (clempo.executor:load-genesis db :chain chain))))
               (db (clempo.store:store-db store))
@@ -677,4 +679,6 @@ The optional timeout is for controlled devnet runs. REPORTER consumes JSON event
                   (prune-views app)
                   (apply-effects app (clempo.simplex:voter-tick (validator-app-voter app))))
                 (head-number app))
-           (clempo.store:close-store store)))))))
+           (clempo.store:close-store store))))
+     :seed (read-slot-seed slot) :listen-host "127.0.0.1" :listen-port (slot-port slot)
+     (local-network-options))))

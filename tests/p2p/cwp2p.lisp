@@ -16,7 +16,9 @@
 (defun call-with-session-pair (function &key (dialer-channels '(0 1 2 3 4 5))
                                            (listener-channels '(0 1 2 3 4 5))
                                            (max-message-size 1024)
-                                           (admit t))
+                                           (admit t)
+                                           (dialer-versions '(0 0))
+                                           (listener-versions '(0 0)))
   "Real SAKE/CUPS over loopback TCP, never a public address or validator identity."
   (let ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
         (worker nil) (dialer nil) (listener nil) (accepted-stream nil)
@@ -44,7 +46,9 @@
                                           (octets= peer (hex->octets
                                                         "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c"))))
                                    :channels listener-channels :max-message-size max-message-size
-                                   :now-ms 1700000000000 :ephemeral-secret (repeated-byte 4))))
+                                   :now-ms 1700000000000 :ephemeral-secret (repeated-byte 4)
+                                   :sake-version (first listener-versions)
+                                   :cups-version (second listener-versions))))
                         (error (condition) condition)))
                     :name "commonware loopback accept"))
              (setf client-stream (clempo.p2p-wire:connect-tcp "127.0.0.1" port :timeout 5))
@@ -52,7 +56,9 @@
                    (cw:dial client-stream (repeated-byte 1)
                             (hex->octets "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394")
                             :channels dialer-channels :max-message-size max-message-size
-                            :now-ms 1700000000000 :ephemeral-secret (repeated-byte 3)))
+                            :now-ms 1700000000000 :ephemeral-secret (repeated-byte 3)
+                            :sake-version (first dialer-versions)
+                            :cups-version (second dialer-versions)))
              (let ((result (sb-thread:join-thread worker)))
                (when (typep result 'error) (error result)))
              (funcall function dialer listener)))
@@ -220,3 +226,52 @@
   (signals error
     (call-with-session-pair (lambda (dialer listener) (declare (ignore dialer listener)))
                             :admit nil)))
+
+(deftest authenticated-session-configured-versions ()
+  ;; Versions are configured, never negotiated: V1/V1 works when both ends agree.
+  (dolist (versions '((1 1) (0 1) (1 0)))
+    (call-with-session-pair
+     (lambda (dialer listener)
+       (cw:send-data dialer 4 (octets-of 1 2 3))
+       (multiple-value-bind (channel frame start end) (cw:receive-data listener)
+         (is= 4 channel) (is-equalp (octets-of 1 2 3) (subseq frame start end)))
+       (cw:send-data listener 0 (octets-of 9))
+       (multiple-value-bind (channel frame start end) (cw:receive-data dialer)
+         (is= 0 channel) (is-equalp (octets-of 9) (subseq frame start end))))
+     :dialer-versions versions :listener-versions versions)))
+
+(deftest authenticated-session-version-mismatch-fails-closed ()
+  ;; A SAKE mismatch fails the handshake itself.
+  (signals error
+    (call-with-session-pair (lambda (dialer listener) (declare (ignore dialer listener)))
+                            :dialer-versions '(0 0) :listener-versions '(1 0)))
+  (signals error
+    (call-with-session-pair (lambda (dialer listener) (declare (ignore dialer listener)))
+                            :dialer-versions '(1 1) :listener-versions '(0 1)))
+  ;; A CUPS mismatch derives different keys: the first record fails and closes.
+  (call-with-session-pair
+   (lambda (dialer listener)
+     (cw:send-data dialer 0 (octets-of 7))
+     (signals clempo.p2p-wire:p2p-error (cw:receive-message listener))
+     (is (cw:session-closed-p listener)))
+   :dialer-versions '(0 0) :listener-versions '(0 1)))
+
+(deftest authenticated-session-batched-frames ()
+  (call-with-session-pair
+   (lambda (dialer listener)
+     (cw:send-frames dialer (list (cw:encode-data 3 (octets-of 1)) (cw:encode-ping)
+                                  (cw:encode-data 0 (octets-of 2 2))))
+     (multiple-value-bind (channel frame start end) (cw:receive-data listener)
+       (is= 3 channel) (is-equalp (octets-of 1) (subseq frame start end)))
+     (multiple-value-bind (channel frame start end) (cw:receive-data listener)
+       (is= 0 channel) (is-equalp (octets-of 2 2) (subseq frame start end)))
+     ;; Every frame is checked before any is written; the session stays usable.
+     (signals clempo.p2p-wire:p2p-error
+       (cw:send-frames dialer (list (cw:encode-data 0 (octets-of 1)) (cw:encode-data 9 (octets-of 1)))))
+     (signals clempo.p2p-wire:p2p-error
+       (cw:send-frames dialer (list (cw:encode-data 0 (make-octets 1025)))))
+     (signals clempo.p2p-wire:p2p-error (cw:send-frames dialer (list (octets-of 2))))
+     (is (not (cw:session-closed-p dialer)))
+     (cw:send-frames dialer (list (cw:encode-data 5 (octets-of 5))))
+     (multiple-value-bind (channel frame start end) (cw:receive-data listener)
+       (is= 5 channel) (is-equalp (octets-of 5) (subseq frame start end))))))
