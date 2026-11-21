@@ -62,15 +62,23 @@
    (status :initform (list :tip nil :retries 0 :last-error nil) :accessor node-status)
    (follower :initform nil :accessor node-follower)
    (hash-log :initform nil :accessor node-hash-log)
+   (index-dir :initform nil :accessor node-index-dir)
+   (folded-to :initform -1 :accessor node-folded-to)
+   (segments :initform '() :accessor node-segments)   ; (to blocks-index . txs-index), newest first
    (followed-blocks :initform (make-hash-table :test 'equalp :synchronized t) :reader node-followed-blocks)
    (followed-txs :initform (make-hash-table :test 'equalp :synchronized t) :reader node-followed-txs)
    (started :initform (clempo.io:now-seconds) :reader node-started)))
 
 ;;; The datadir's hash index. blocks.idx/txs.idx (CLEMPO.RPC.CHAIN's format) are seeded from
-;;; the archive when the datadir is created; every block the node follows after that is
-;;; appended to index/followed.log (records: kind 0 block / 1 tx, 32-octet hash, u64 value with
-;;; a tx's value block << 20 | index) and loaded back at start, so a hash anywhere in the
-;;; followed chain resolves locally.
+;;; the archive when the datadir is created. Every block the node follows after that is
+;;; appended to index/followed.log (records: kind 0 block / 1 tx, 32-octet hash, u64 value; a
+;;; tx's value is block << 20 | index) and held in memory until its archive chunk completes;
+;;; then that chunk's entries fold into a sorted segment pair followed-FROM-TO-{txs,blocks}.idx
+;;; in the same format, and the log is rewritten without them. RAM holds at most one chunk
+;;; of entries. Each segment file is written whole and renamed into place, txs before
+;;; blocks, and a segment counts only once its blocks file exists, so a crash at any point
+;;; leaves either the old log (still loaded) or the segment (whose entries the log loader
+;;; then skips).
 
 (define-constant +hash-record+ 41)
 
@@ -84,28 +92,95 @@
         (log-node "node: hash index built in ~,1F s"
                   (/ (- (clempo.io:monotonic-ticks) start) internal-time-units-per-second))))))
 
+(defun value-number (kind value) (if (zerop kind) value (ash value -20)))
+
 (defun note-hash (node kind hash value)
   (setf (gethash hash (if (zerop kind) (node-followed-blocks node) (node-followed-txs node)))
-        (if (zerop kind) value (cons (ash value -20) (ldb (byte 20 0) value)))))
+        value))
+
+(defun segment-path (dir from to kind)
+  (format nil "~Afollowed-~12,'0D-~12,'0D-~(~A~).idx" (namestring dir) from to kind))
+
+(defun load-segments (node dir)
+  "Open every complete followed segment in DIR; returns the last block they cover, or -1."
+  (let ((segments '()))
+    (dolist (path (directory (merge-pathnames "followed-*-blocks.idx" dir)))
+      (let* ((name (pathname-name path))
+             (from (parse-integer name :start 9 :end 21))
+             (to (parse-integer name :start 22 :end 34)))
+        (push (list* to (backend:open-index path)
+                     (backend:open-index (segment-path dir from to :txs)))
+              segments)))
+    (setf (node-segments node) (sort segments #'> :key #'first))
+    (if segments (first (first (node-segments node))) -1)))
 
 (defun open-hash-log (node dir head)
-  "Load DIR/followed.log entries up to HEAD (a crash may leave later ones) and append to it."
+  "Open DIR's followed segments, load followed.log entries past them up to HEAD (a crash may
+leave later ones) and append to the log."
   (let ((path (merge-pathnames "followed.log" dir)) (loaded 0))
     (ensure-directories-exist path)
+    (setf (node-index-dir node) dir
+          (node-folded-to node) (load-segments node dir))
     (when (probe-file path)
       (with-open-file (in path :element-type '(unsigned-byte 8))
         (let ((record (make-octets +hash-record+)))
           (loop while (= +hash-record+ (read-sequence record in))
                 do (let* ((kind (aref record 0))
                           (value (octets->integer record :start 33 :end 41))
-                          (number (if (zerop kind) value (ash value -20))))
-                     (when (<= number head)
+                          (number (value-number kind value)))
+                     (when (< (node-folded-to node) number (1+ head))
                        (note-hash node kind (subseq record 1 33) value)
                        (incf loaded)))))))
     (when (plusp loaded) (log-node "node: ~D followed hashes loaded from ~A" loaded path))
     (setf (node-hash-log node)
           (open path :direction :output :element-type '(unsigned-byte 8)
                      :if-exists :append :if-does-not-exist :create))))
+
+(defun write-hash-records (out kind table)
+  (maphash (lambda (hash value)
+             (write-byte kind out) (write-sequence hash out)
+             (write-sequence (integer->octets value 8) out))
+           table))
+
+(defun fold-followed (node through)
+  "Fold the in-memory entries of blocks up to THROUGH into a segment and drop them from the
+log and from memory."
+  (let* ((dir (node-index-dir node)) (from (1+ (node-folded-to node))))
+    (flet ((take (table kind)
+             (let ((keys '()) (vals '()) (hashes '()))
+               (maphash (lambda (hash value)
+                          (when (<= (value-number kind value) through)
+                            (push (backend:hash-prefix hash) keys) (push value vals)
+                            (push hash hashes)))
+                        table)
+               (values (coerce keys '(vector (unsigned-byte 64)))
+                       (coerce vals '(vector (unsigned-byte 64))) hashes))))
+      (multiple-value-bind (tkeys tvalues thashes) (take (node-followed-txs node) 1)
+        (multiple-value-bind (bkeys bvalues bhashes) (take (node-followed-blocks node) 0)
+          (when (zerop (length bkeys)) (return-from fold-followed nil))
+          (backend:write-index (segment-path dir from through :txs) through tkeys tvalues)
+          (backend:write-index (segment-path dir from through :blocks) through bkeys bvalues)
+          (push (list* through (backend:open-index (segment-path dir from through :blocks))
+                       (backend:open-index (segment-path dir from through :txs)))
+                (node-segments node))
+          (setf (node-folded-to node) through)
+          (dolist (h thashes) (remhash h (node-followed-txs node)))
+          (dolist (h bhashes) (remhash h (node-followed-blocks node)))
+          ;; Rewrite the log with only the unfolded entries, renamed over the old one.
+          (let ((path (namestring (merge-pathnames "followed.log" dir)))
+                (tmp (namestring (merge-pathnames "followed.log.tmp" dir))))
+            (close (node-hash-log node))
+            (with-open-file (out tmp :direction :output :element-type '(unsigned-byte 8)
+                                     :if-exists :supersede)
+              (write-hash-records out 0 (node-followed-blocks node))
+              (write-hash-records out 1 (node-followed-txs node)))
+            (rename-file tmp path)
+            (setf (node-hash-log node)
+                  (open path :direction :output :element-type '(unsigned-byte 8)
+                             :if-exists :append :if-does-not-exist :create)))
+          (log-node "node: folded ~D block and ~D transaction hashes into segment ~D..~D"
+                    (length bkeys) (length tkeys) from through)
+          t)))))
 
 (defun log-block-hashes (node block number)
   (let ((out (node-hash-log node)))
@@ -117,7 +192,26 @@
         (put 0 (blocks:block-hash block) number)
         (loop for tx in (blocks:block-transactions block) for j from 0
               do (put 1 (transactions:transaction-hash tx) (logior (ash number 20) j))))
-      (finish-output out))))
+      (finish-output out)
+      (when (zerop (mod (1+ number) archive:+chunk-blocks+))
+        (fold-followed node number)))))
+
+(defun segment-block-number (node hash)
+  (loop for (to blocks) in (node-segments node)
+        do (loop for n in (backend:index-lookup blocks (backend:hash-prefix hash))
+                 for raw = (backend:backend-block-raw node n)
+                 when (or (null raw) (octets= hash (backend:block-hash-of-raw raw)))
+                   do (return-from segment-block-number n))))
+
+(defun segment-tx-location (node hash)
+  (loop for (to blocks . txs) in (node-segments node)
+        do (loop for v in (backend:index-lookup txs (backend:hash-prefix hash))
+                 for n = (ash v -20) for j = (ldb (byte 20 0) v)
+                 for raw = (backend:backend-block-raw node n)
+                 when (or (null raw)
+                          (let ((tx (nth j (nth-value 2 (backend:block-parts raw)))))
+                            (and tx (octets= hash (clempo.keccak:keccak256 raw :start (car tx) :end (cdr tx))))))
+                   do (return-from segment-tx-location (values n j)))))
 
 (defun node-db (node) (store:store-db (node-store node)))
 
@@ -156,14 +250,18 @@
               for h = (store:db-block-hash db n)
               when (and h (octets= h hash)) return n)
         (gethash hash (node-followed-blocks node))
+        (segment-block-number node hash)
         (call-next-method))))
 
 (defmethod backend:backend-tx-location ((node node-backend) hash)
   (loop for entry across (node-recent node)
         for index = (and entry (position hash (recent-block-transaction-hashes entry) :test #'octets=))
         when index do (return-from backend:backend-tx-location (values (recent-block-number entry) index)))
-  (let ((loc (gethash hash (node-followed-txs node))))
-    (when loc (return-from backend:backend-tx-location (values (car loc) (cdr loc)))))
+  (let ((value (gethash hash (node-followed-txs node))))
+    (when value
+      (return-from backend:backend-tx-location (values (ash value -20) (ldb (byte 20 0) value)))))
+  (multiple-value-bind (n j) (segment-tx-location node hash)
+    (when n (return-from backend:backend-tx-location (values n j))))
   (call-next-method))
 
 (defmethod backend:backend-state ((node node-backend) number)

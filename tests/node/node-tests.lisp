@@ -6,6 +6,8 @@
 
 (in-package #:clempo.node.run-tests)
 
+(define-constant archive-chunk clempo.archive:+chunk-blocks+)
+
 ;;; bin/clempo end to end on mainnet blocks 0..20 (data/README.md) served by a loopback
 ;;; upstream: an empty datadir starts at genesis with certification on, executes the range,
 ;;; restarts from its own store, and stops cleanly on SIGTERM.
@@ -190,21 +192,68 @@ those requests fail, as during an upstream outage."
   ;; datadir's followed.log; entries past the restored head (a crash) are ignored.
   (let ((raws (recorded-blocks)))
     (with-temp-dirs (index)
-      (let ((node (make-instance 'clempo.node::node-backend)))
+      (let ((node (make-instance 'clempo.node::node-backend :archive-dir index :head 20000)))
         (clempo.node::open-hash-log node index 0)
         (loop for n from 1 to 20
               do (clempo.node::log-block-hashes node (blocks:decode-block (svref raws n)) n))
         (close (clempo.node::node-hash-log node)))
-      (let ((node (make-instance 'clempo.node::node-backend))
+      (let ((node (make-instance 'clempo.node::node-backend :archive-dir index :head 20000))
             (block-7 (blocks:decode-block (svref raws 7)))
             (block-15 (blocks:decode-block (svref raws 15))))
         (clempo.node::open-hash-log node index 12)
         (unwind-protect
              (progn
                (is= 7 (gethash (blocks:block-hash block-7) (clempo.node::node-followed-blocks node)))
-               (is-equalp '(7 . 0)
+               (is= (ash 7 20)
                           (gethash (clempo.transactions:transaction-hash
                                     (first (blocks:block-transactions block-7)))
                                    (clempo.node::node-followed-txs node)))
                (is (null (gethash (blocks:block-hash block-15) (clempo.node::node-followed-blocks node)))))
           (close (clempo.node::node-hash-log node)))))))
+
+(defun synthetic-chain (count)
+  "Raw blocks 1..COUNT of a linked synthetic chain (index I holds block I+1)."
+  (let ((parent (make-octets 32)) (out (make-array count)))
+    (dotimes (i count out)
+      (multiple-value-bind (raw hash) (clempo.follow.tests::test-block (1+ i) parent)
+        (setf (svref out i) raw parent hash)))))
+
+(deftest followed-hashes-fold-into-segments ()
+  ;; At each completed archive chunk the in-memory entries fold into an on-disk segment;
+  ;; memory keeps only the open chunk, and lookups and restarts still resolve folded hashes.
+  (let ((chain (synthetic-chain (+ archive-chunk 5))))
+    (with-temp-dirs (index)
+      (let ((node (make-instance 'clempo.node::node-backend :archive-dir index :head 20000)))
+        (clempo.node::open-hash-log node index 0)
+        (loop for i from 0 below (length chain)
+              do (clempo.node::log-block-hashes node (blocks:decode-block (svref chain i)) (1+ i)))
+        ;; Blocks 1..9999 folded at block 9999; 10000..10005 remain in memory.
+        (is= (- archive-chunk 1) (clempo.node::node-folded-to node))
+        (is= 6 (hash-table-count (clempo.node::node-followed-blocks node)))
+        (is (probe-file (format nil "~Afollowed-000000000000-~12,'0D-blocks.idx" index (1- archive-chunk))))
+        (let ((hash-7 (blocks:block-hash (blocks:decode-block (svref chain 6)))))
+          (is= 7 (clempo.node::segment-block-number node hash-7))
+          (close (clempo.node::node-hash-log node))
+          ;; Restart at head 10003: the segment answers 7; the log holds only 10000..10003.
+          (let ((again (make-instance 'clempo.node::node-backend :archive-dir index :head 20000)))
+            (clempo.node::open-hash-log again index 10003)
+            (unwind-protect
+                 (progn
+                   (is= 7 (clempo.node::segment-block-number again hash-7))
+                   (is= 4 (hash-table-count (clempo.node::node-followed-blocks again))))
+              (close (clempo.node::node-hash-log again)))))))))
+
+(deftest hash-index-seeded-from-a-complete-chunk ()
+  (let ((chain (synthetic-chain archive-chunk)))
+    (with-temp-dirs (archive index)
+      ;; Chunk 0 holds blocks 0..9999: a synthetic genesis stand-in then blocks 1..9999.
+      (let ((blocks (make-array archive-chunk)))
+        (setf (svref blocks 0) (clempo.follow.tests::test-block 0 (make-octets 32)))
+        (replace blocks chain :start1 1)
+        (clempo.archive:write-chunk 0 blocks archive))
+      (ensure-directories-exist index)
+      (clempo.node::seed-hash-index index archive 5000)
+      (let ((blocks-index (clempo.rpc.chain:open-index (format nil "~Ablocks.idx" index)))
+            (hash (blocks:block-hash (blocks:decode-block (svref chain 41)))))
+        (is (member 42 (clempo.rpc.chain:index-lookup blocks-index (clempo.rpc.chain:hash-prefix hash))))
+        (is= 5000 (clempo.rpc.chain:index-covered-height index))))))
