@@ -462,6 +462,8 @@ accept is canonical"
            (*spec* (make-spec fork))
            (*block* (make-block-env :number 1 :gas-limit 30000000))
            (*jit* (and jit #'jit-run-frame))
+           (*jit-compiler* (and jit #'jit-compile-synchronously))
+           (*jit-max-code-size* most-positive-fixnum)
            (*jit-threshold* 0))
       (multiple-value-bind (status gas-left output)
           (call-message :call #xca11 to to 0 input gas 0 nil)
@@ -482,15 +484,25 @@ accept is canonical"
                                                 #'< :key #'car)))
                       #'< :key #'first)))))))
 
-(defun jit-differ (accounts &rest keys)
-  "Run interpreted and compiled; fail when they differ or the JIT compiler failed."
+(defun jit-installs () (+ (jit-stats-compiled *jit-stats*) (jit-stats-shared *jit-stats*)))
+
+(defun jit-run-code (accounts &rest keys)
+  "RUN-CODE compiled; fails unless some code was actually compiled (or taken from the
+cache), so an API change that leaves the JIT off cannot make a differential vacuous."
   (let* ((failed (jit-stats-failed *jit-stats*))
-         (want (apply #'run-code accounts keys))
-         (got (apply #'run-code accounts :jit t keys)))
-    (unless (equalp want got)
-      (fail "interpreter ~S~%  JIT ~S" (subseq want 0 3) (subseq got 0 3)))
+         (installs (jit-installs))
+         (outcome (apply #'run-code accounts :jit t keys)))
     (unless (= failed (jit-stats-failed *jit-stats*))
       (fail "JIT compiler failed: ~A" (third (first (jit-stats-failures *jit-stats*)))))
+    (when (= installs (jit-installs)) (fail "the JIT run compiled nothing"))
+    outcome))
+
+(defun jit-differ (accounts &rest keys)
+  "Run interpreted and compiled; fail when they differ or the JIT compiler failed."
+  (let ((want (apply #'run-code accounts keys))
+        (got (apply #'jit-run-code accounts keys)))
+    (unless (equalp want got)
+      (fail "interpreter ~S~%  JIT ~S" (subseq want 0 3) (subseq got 0 3)))
     want))
 
 (deffuzz "u256" "EvmJitAgent"
@@ -517,7 +529,9 @@ model, interpreted and compiled"
     (setf *input* (mapcar (lambda (c) (list (first (first c)) (second c))) cases))
     (dolist (jit '(nil t))
       (destructuring-bind (status gas-left output &rest more)
-          (run-code `((#xc0de ,code)) :gas 1000000 :jit jit)
+          (if jit
+              (jit-run-code `((#xc0de ,code)) :gas 1000000)
+              (run-code `((#xc0de ,code)) :gas 1000000))
         (declare (ignore gas-left more))
         (unless (eq status :return) (fail "~:[interpreter~;JIT~] halted with ~S" jit status))
         (loop for i from 0 below (length cases)

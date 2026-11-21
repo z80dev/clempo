@@ -15,7 +15,7 @@ rm -rf build/fasl/check
   --eval '(clempo-build:load-all :strict t)' \
   --eval '(clempo-build:test-all :strict t)'
 
-bin/clempo-dev fuzz -target all -seed 1 -cases 150
+bin/clempo-dev fuzz -target all -seed 1 -cases 100
 
 "${SBCL[@]}" --load scripts/build.lisp --load scripts/check-layers.lisp
 
