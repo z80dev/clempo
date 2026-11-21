@@ -3,7 +3,8 @@
   :description "secp256k1, p256, p384, bn254, bls12-381, kzg, modexp"
   :depends-on ("clempo-base" "clempo-crypto-keccak" "clempo-crypto-hash")
   :serial t
-  :components ((:file "modexp")
+  :components ((:file "native-word")
+               (:file "modexp")
                (:file "prime-curve")
                (:file "secp256k1-native-field")
                (:file "secp256k1-native-scalar")
@@ -32,7 +33,8 @@
   :depends-on ("clempo-crypto-ec" "clempo-codec")
   :serial t
   :pathname "../../../tests/crypto/ec/"
-  :components ((:file "secp256k1/native-group-tests")
+  :components ((:file "native-word")
+               (:file "secp256k1/native-group-tests")
                (:file "prime-curves")
                (:file "secp256k1/native-tests")
                (:file "p256-field")

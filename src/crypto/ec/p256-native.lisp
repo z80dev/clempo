@@ -17,7 +17,7 @@
              (subtract (words carry)
                (loop for word in words for pword in ps collect
                  `(setf (values ,word ,carry)
-                        (sb-bignum::%subtract-with-borrow ,word ,pword ,carry)))))
+                        (clempo.ec.word:subtract-with-borrow ,word ,pword ,carry)))))
       `(progn
          (defparameter ,(name "R2")
            (make-array 4 :element-type '(unsigned-byte 64)
@@ -37,7 +37,7 @@
                     (declare (type (unsigned-byte 64) ,@words) (type bit carry))
                     ,@(loop for word in words for i from 0 collect
                         `(setf (values ,word carry)
-                               (,(if addp 'sb-bignum::%add-with-carry 'sb-bignum::%subtract-with-borrow)
+                               (,(if addp 'clempo.ec.word:add-with-carry 'clempo.ec.word:subtract-with-borrow)
                                 (aref a (+ ao ,i)) (aref b (+ bo ,i)) carry)))
                     ,(if addp
                          `(when (or (= carry 1) ,(ge words 3))
@@ -45,7 +45,7 @@
                          `(when (zerop carry)
                             ,@(loop for word in words for pword in ps collect
                                 `(setf (values ,word carry)
-                                       (sb-bignum::%add-with-carry ,word ,pword carry)))))
+                                       (clempo.ec.word:add-with-carry ,word ,pword carry)))))
                     ,@(loop for word in words for i from 0 collect `(setf (aref out (+ o ,i)) ,word)))
                   (values))))
          ,(let ((as (loop repeat 4 collect (gensym "A")))
@@ -71,10 +71,10 @@
                            `(setf (values carry ,(nth (+ i j) rs))
                                   (clempo.secp256k1::mul-add-word m ,pword ,(nth (+ i j) rs) carry)))
                        (setf (values ,(nth (+ i 4) rs) bit)
-                             (sb-bignum::%add-with-carry ,(nth (+ i 4) rs) carry 0))
+                             (clempo.ec.word:add-with-carry ,(nth (+ i 4) rs) carry 0))
                        ,@(loop for j from (+ i 5) below 9 collect
                            `(setf (values ,(nth j rs) bit)
-                                  (sb-bignum::%add-with-carry ,(nth j rs) 0 bit)))))
+                                  (clempo.ec.word:add-with-carry ,(nth j rs) 0 bit)))))
                  (when (or (plusp ,(nth 8 rs)) ,(ge (subseq rs 4 8) 3))
                    (setf bit 1) ,@(subtract (subseq rs 4 8) 'bit))
                  ,@(loop for r in (subseq rs 4 8) for i from 0 collect `(setf (aref out (+ o ,i)) ,r)))

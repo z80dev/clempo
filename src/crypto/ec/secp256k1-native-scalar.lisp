@@ -29,7 +29,7 @@
      (declare (type bit carry))
      ,@(loop for i below count collect
          `(setf (values (aref out (+ o ,i)) carry)
-                (sb-bignum::%subtract-with-borrow (aref a (+ ao ,i)) (aref b (+ bo ,i)) carry)))
+                (clempo.ec.word:subtract-with-borrow (aref a (+ ao ,i)) (aref b (+ bo ,i)) carry)))
      carry))
 (defun sw-sub! (out o a ao b bo &optional (count 4))
   (declare #.clempo.base:*hot* (type secp-words out a b) (type fixnum o ao bo count))
@@ -39,7 +39,7 @@
      (declare (type bit carry))
      ,@(loop for i below 4 collect
          `(setf (values (aref out (+ o ,i)) carry)
-                (sb-bignum::%add-with-carry (aref a (+ ao ,i)) (aref b (+ bo ,i)) carry)))
+                (clempo.ec.word:add-with-carry (aref a (+ ao ,i)) (aref b (+ bo ,i)) carry)))
      carry))
 (defun sw-add! (out o a ao b bo)
   (declare #.clempo.base:*hot* (type secp-words out a b) (type fixnum o ao bo))
@@ -99,14 +99,14 @@
               (loop for y in bs for j from 0 collect
                 `(setf (values ,carry ,(nth j ts)) (mul-add-word ,x ,y ,(nth j ts) ,carry)))
               (list `(setf (values ,(nth 4 ts) ,bit)
-                            (sb-bignum::%add-with-carry ,(nth 4 ts) ,carry 0)
+                            (clempo.ec.word:add-with-carry ,(nth 4 ts) ,carry 0)
                            ,(nth 5 ts) (+ ,(nth 5 ts) ,bit))
-                    `(setf ,m (nth-value 1 (sb-bignum::%multiply-and-add ,(first ts) +sc-montgomery-factor+ 0)))
+                    `(setf ,m (nth-value 1 (clempo.ec.word:multiply-and-add ,(first ts) +sc-montgomery-factor+ 0)))
                     `(setf ,carry 0))
               (loop for n in ns for j from 0 collect
                 `(setf (values ,carry ,(nth j ts)) (mul-add-word ,m ,n ,(nth j ts) ,carry)))
               (list `(setf (values ,(nth 4 ts) ,bit)
-                            (sb-bignum::%add-with-carry ,(nth 4 ts) ,carry 0)
+                            (clempo.ec.word:add-with-carry ,(nth 4 ts) ,carry 0)
                            ,(nth 5 ts) (+ ,(nth 5 ts) ,bit)))
               (loop for j below 5 collect `(setf ,(nth j ts) ,(nth (1+ j) ts)))
               (list `(setf ,(nth 5 ts) 0))))
@@ -119,7 +119,7 @@
            (setf ,bit 1)
            ,@(loop for n in ns for j from 0 collect
                `(setf (values ,(nth j ts) ,bit)
-                      (sb-bignum::%subtract-with-borrow ,(nth j ts) ,n ,bit))))
+                      (clempo.ec.word:subtract-with-borrow ,(nth j ts) ,n ,bit))))
          ,@(loop for j below 4 collect `(setf (aref out (+ o ,j)) ,(nth j ts))) (values)))))
 (define-sc-montgomery)
 (defun sc-mul! (out o a ao b bo work wo)
@@ -167,9 +167,9 @@
   (let ((carry (ldb (byte 1 63) (aref work (+ product 5)))))
     (declare (type bit carry))
     (setf (values (aref work coefficient) carry)
-          (sb-bignum::%add-with-carry (aref work (+ product 6)) 0 carry)
+          (clempo.ec.word:add-with-carry (aref work (+ product 6)) 0 carry)
           (aref work (+ coefficient 1))
-          (sb-bignum::%add-with-carry (aref work (+ product 7)) 0 carry))) (values))
+          (clempo.ec.word:add-with-carry (aref work (+ product 7)) 0 carry))) (values))
 (defun sg-absolute! (work component)
   (declare #.clempo.base:*hot* (type secp-words work) (type fixnum component))
   (if (logbitp 63 (aref work (+ component 4)))
@@ -177,7 +177,7 @@
         (declare (type bit carry))
         (dotimes (i 5)
           (setf (values (aref work (+ component i)) carry)
-                (sb-bignum::%add-with-carry
+                (clempo.ec.word:add-with-carry
                  (ldb (byte 64 0) (lognot (aref work (+ component i)))) 0 carry))) -1)
       1))
 (defun sg-wnaf! (digits start work component sign width)
@@ -196,16 +196,16 @@
           (if (plusp digit)
               (progn
                 (setf (values (aref work component) carry)
-                      (sb-bignum::%subtract-with-borrow (aref work component) digit 1))
+                      (clempo.ec.word:subtract-with-borrow (aref work component) digit 1))
                 (loop for i of-type fixnum from 1 below 4 do
                   (setf (values (aref work (+ component i)) carry)
-                        (sb-bignum::%subtract-with-borrow (aref work (+ component i)) 0 carry))))
+                        (clempo.ec.word:subtract-with-borrow (aref work (+ component i)) 0 carry))))
               (progn
                 (setf (values (aref work component) carry)
-                      (sb-bignum::%add-with-carry (aref work component) (- digit) 0))
+                      (clempo.ec.word:add-with-carry (aref work component) (- digit) 0))
                 (loop for i of-type fixnum from 1 below 4 do
                   (setf (values (aref work (+ component i)) carry)
-                        (sb-bignum::%add-with-carry (aref work (+ component i)) 0 carry)))))))
+                        (clempo.ec.word:add-with-carry (aref work (+ component i)) 0 carry)))))))
       (sw-shift-right1! work component) (incf length)) length))
 (defun sg-decompose! (arena scalar digits stream1 stream2 width work)
   "Write signed GLV wNAFs. Thirty-two disjoint work words; SCALAR is canonical."

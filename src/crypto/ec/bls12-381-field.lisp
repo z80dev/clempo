@@ -22,9 +22,10 @@
 (defun fp-multiply-add-word (a b c d)
   (declare #.clempo.base:*hot* (type (unsigned-byte 64) a b c d))
   ;; SBCL 2.6.8 ARM64's four-argument intrinsic can overwrite Y with HI
-  ;; before MUL reads Y. The three-argument intrinsic plus ADD is safe.
-  (multiple-value-bind (hi lo) (sb-bignum::%multiply-and-add a b c)
-    (multiple-value-bind (low carry) (sb-bignum::%add-with-carry lo d 0)
+  ;; before MUL reads Y. The shared three-argument word macro plus ADD avoids
+  ;; that intrinsic, and selects portable arithmetic when native support is absent.
+  (multiple-value-bind (hi lo) (clempo.ec.word:multiply-and-add a b c)
+    (multiple-value-bind (low carry) (clempo.ec.word:add-with-carry lo d 0)
       (values (ldb (byte 64 0) (+ hi carry)) low))))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
@@ -44,7 +45,7 @@
             (setf ,carry 1)
             ,@(loop for word in words for p in ps collect
                 `(setf (values ,word ,carry)
-                       (sb-bignum::%subtract-with-borrow ,word ,p ,carry)))))))))
+                       (clempo.ec.word:subtract-with-borrow ,word ,p ,carry)))))))))
 
 (defmacro define-fp-basic-operations ()
   `(progn
@@ -91,8 +92,8 @@
               (declare (type (unsigned-byte 64) ,@words) (type bit ,carry))
               ,@(loop for word in words for i from 0 collect
                   `(setf (values ,word ,carry)
-                         (,(if addp 'sb-bignum::%add-with-carry
-                                    'sb-bignum::%subtract-with-borrow)
+                         (,(if addp 'clempo.ec.word:add-with-carry
+                                    'clempo.ec.word:subtract-with-borrow)
                           ,(if negp 0 `(aref a (+ a-offset ,i)))
                           ,(if negp `(aref a (+ a-offset ,i)) `(aref b (+ b-offset ,i)))
                           ,carry)))
@@ -102,7 +103,7 @@
                         (setf ,carry 0)
                         ,@(loop for word in words for p in (fp-modulus-words) collect
                             `(setf (values ,word ,carry)
-                                   (sb-bignum::%add-with-carry ,word ,p ,carry))))))
+                                   (clempo.ec.word:add-with-carry ,word ,p ,carry))))))
               ,@(loop for word in words for i from 0 collect
                   `(setf (aref out (+ out-offset ,i)) ,word)))
             (values)))))

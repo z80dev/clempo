@@ -14,6 +14,8 @@
        (if (< ,index (sb-bignum:%bignum-length ,integer))
            (sb-bignum::%bignum-ref ,integer ,index) 0)))
 
+;; Keep the ARM64 assembler references inside reader guards. Other targets use
+;; the shared word macros below, including their portable arithmetic fallback.
 #+arm64
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (sb-c:defknown %p384-word-mac
@@ -49,8 +51,8 @@
   (declare #.clempo.base:*hot* (type (unsigned-byte 64) a b c d))
   #+arm64 (%p384-word-mac a b c d)
   #-arm64
-  (multiple-value-bind (hi lo) (sb-bignum::%multiply-and-add a b c)
-    (multiple-value-bind (low carry) (sb-bignum::%add-with-carry lo d 0)
+  (multiple-value-bind (hi lo) (clempo.ec.word:multiply-and-add a b c)
+    (multiple-value-bind (low carry) (clempo.ec.word:add-with-carry lo d 0)
       (values (ldb (byte 64 0) (+ hi carry)) low))))
 
 #+arm64
@@ -81,10 +83,10 @@
   (declare #.clempo.base:*hot* (type (unsigned-byte 64) m c d))
   #+arm64 (%p384-word-mac-minus-one m c d)
   #-arm64
-  (multiple-value-bind (lo carry) (sb-bignum::%subtract-with-borrow c m 1)
+  (multiple-value-bind (lo carry) (clempo.ec.word:subtract-with-borrow c m 1)
     (let ((hi (ldb (byte 64 0) (+ m carry -1))))
       (declare (type (unsigned-byte 64) hi))
-      (multiple-value-bind (low carry) (sb-bignum::%add-with-carry lo d 0)
+      (multiple-value-bind (low carry) (clempo.ec.word:add-with-carry lo d 0)
         (values (ldb (byte 64 0) (+ hi carry)) low)))))
 
 (defmacro define-p384-raw-operations ()
@@ -123,7 +125,7 @@
              (subtract (words carry)
                (loop for word in words for pword in ps collect
                  `(setf (values ,word ,carry)
-                        (sb-bignum::%subtract-with-borrow ,word ,pword ,carry))))
+                        (clempo.ec.word:subtract-with-borrow ,word ,pword ,carry))))
              (store (words)
                (loop for word in words for i from 0 collect `(setf (aref out (+ o ,i)) ,word))))
       `(progn
@@ -145,7 +147,7 @@
                     (declare (type (unsigned-byte 64) ,@words) (type bit carry))
                     ,@(loop for word in words for i from 0 collect
                         `(setf (values ,word carry)
-                               (,(if addp 'sb-bignum::%add-with-carry 'sb-bignum::%subtract-with-borrow)
+                               (,(if addp 'clempo.ec.word:add-with-carry 'clempo.ec.word:subtract-with-borrow)
                                 (aref a (+ ao ,i)) (aref b (+ bo ,i)) carry)))
                     ,(if addp
                          `(when (or (= carry 1) ,(ge words 5))
@@ -155,7 +157,7 @@
                          `(when (zerop carry)
                             ,@(loop for word in words for pword in ps collect
                                 `(setf (values ,word carry)
-                                       (sb-bignum::%add-with-carry ,word ,pword carry)))))
+                                       (clempo.ec.word:add-with-carry ,word ,pword carry)))))
                     ,@(store words))
                   (values))))
          ,(let ((words (loop repeat 6 collect (gensym "W"))))
@@ -167,7 +169,7 @@
                      (declare (type (unsigned-byte 64) ,@words) (type bit carry))
                      ,@(loop for word in words for pword in ps for i from 0 collect
                          `(setf (values ,word carry)
-                                (sb-bignum::%subtract-with-borrow ,pword (aref a (+ ao ,i)) carry)))
+                                (clempo.ec.word:subtract-with-borrow ,pword (aref a (+ ao ,i)) carry)))
                      ,@(store words)))
                (values)))
          ,(let ((rs (loop repeat 7 collect (gensym "R"))))
@@ -188,7 +190,7 @@
                                   (p384-mul-add-word
                                    (aref a (+ ao ,j)) bword ,(nth j rs) carry)))
                        (setf (values ,(nth 6 rs) top)
-                             (sb-bignum::%add-with-carry ,(nth 6 rs) carry 0))
+                             (clempo.ec.word:add-with-carry ,(nth 6 rs) carry 0))
                        (setf m (ldb (byte 64 0) (* ,(first rs) ,factor)) carry 0)
                        ,@(loop for pword in ps for j from 0 collect
                            `(setf (values carry ,(nth j rs))
@@ -196,7 +198,7 @@
                                        `(p384-mul-add-minus-one m ,(nth j rs) carry)
                                        `(p384-mul-add-word m ,pword ,(nth j rs) carry))))
                        (setf (values ,(nth 6 rs) bit)
-                             (sb-bignum::%add-with-carry ,(nth 6 rs) carry 0))
+                             (clempo.ec.word:add-with-carry ,(nth 6 rs) carry 0))
                        ;; If the first addition overflowed, its new top is zero,
                        ;; so the second cannot also overflow: TOP+BIT is a bit.
                        (setf top (+ top bit))
@@ -233,7 +235,7 @@
                  (when (oddp ,(first words))
                    ,@(loop for w in words for pword in ps collect
                        `(setf (values ,w carry)
-                              (sb-bignum::%add-with-carry ,w ,pword carry))))
+                              (clempo.ec.word:add-with-carry ,w ,pword carry))))
                  ,@(loop for w in words for next in (append (rest words) '(nil))
                          for i from 0 collect
                      `(setf (aref out (+ o ,i))
@@ -279,13 +281,13 @@
                            (setf carry 1)
                            ,@(loop for u in us for v in vs collect
                                `(setf (values ,u carry)
-                                      (sb-bignum::%subtract-with-borrow ,u ,v carry)))
+                                      (clempo.ec.word:subtract-with-borrow ,u ,v carry)))
                            (,(name "SUB!") out o out o work (+ wo 6)))
                          (progn
                            (setf carry 1)
                            ,@(loop for v in vs for u in us collect
                                `(setf (values ,v carry)
-                                      (sb-bignum::%subtract-with-borrow ,v ,u carry)))
+                                      (clempo.ec.word:subtract-with-borrow ,v ,u carry)))
                            (,(name "SUB!") work (+ wo 6) work (+ wo 6) out o))))
                    (unless ,(onep us) (p384-copy! out o work (+ wo 6))))
                  (,(name "MUL!") out o out o ,(name "R2") 0))))

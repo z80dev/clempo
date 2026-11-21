@@ -39,3 +39,15 @@ claim of execution on a different CPU architecture.
 - Curve parameters are [SEC 2 secp384r1](https://www.secg.org/sec2-v2.pdf), the NIST P-384 curve. No reference implementation code was incorporated.
 
 Tests exercise every Wycheproof record, high-/low-s twins of valid signatures, both RFC known answers, modified signatures/digests, scalar/key/digest-length boundaries, native carry/alias/group properties, and positive-cache isolation/mutation/eviction cases. Run through `scripts/verify.sh` or load `clempo-crypto-ec/tests` and run tests with package prefix `CLEMPO.P384` (including the field-test package).
+
+## Word backend portability
+
+secp256k1, P256, P384 and BLS381 share `clempo.ec.word`'s carry, no-borrow and
+high/low multiplication contract. Its reader probes optional SBCL symbols with
+`find-symbol`, never interns a missing name into a locked implementation package.
+Recognized 64-bit ARM64/x86-64 intrinsics expand directly when present; otherwise
+real Common Lisp 32-bit-half arithmetic is compiled. Compiler-only intrinsics
+need not be `fboundp`. Outgoing subtraction carry is one for **no** borrow on
+both backends. ARM64 assembler, VOPs and assembler nicknames remain reader-gated
+by `#+arm64`; non-ARM64 compiles the arithmetic fallback. Coordinate import and
+export still require 64-bit SBCL bignum digits; this is not 32-bit SBCL support.
