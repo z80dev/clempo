@@ -70,7 +70,7 @@
 
 (defmethod backend:backend-state ((node node-backend) number)
   (let ((db (node-db node)))
-    (when (= number (store:db-number db)) db)))
+    (if (= number (store:db-number db)) db (call-next-method))))
 
 (defmethod follow:apply-follow-block ((node node-backend) block)
   (let* ((datastore (node-store node))

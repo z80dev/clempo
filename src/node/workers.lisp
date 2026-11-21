@@ -57,10 +57,12 @@
     (when failure (error failure)))
   nil)
 
-(defun call-with-workers (function &key (threads 4) (name "parallel work"))
+(defun call-with-workers (function &key (threads 4) (name "parallel work") (worker-context #'funcall))
   "Call FUNCTION with a synchronous mapper (function, jobs) for at most 16
 jobs per batch. Only the calling thread may submit batches. THREADS includes
-the caller; 1 passes NIL to select the caller's own serial path."
+the caller; 1 passes NIL to select the caller's own serial path.
+WORKER-CONTEXT is called once in each worker thread with that thread's loop,
+so it can bind per-thread specials; the caller supplies its own bindings."
   (check-type threads (integer 1 16))
   (if (= threads 1)
       (funcall function nil)
@@ -68,7 +70,9 @@ the caller; 1 passes NIL to select the caller's own serial path."
         (unwind-protect
              (progn
                (dotimes (i (1- threads))
-                 (push (sb-thread:make-thread (lambda () (worker-loop pool)) :name name) workers))
+                 (push (sb-thread:make-thread (lambda () (funcall worker-context (lambda () (worker-loop pool))))
+                                              :name name)
+                       workers))
                (funcall function (lambda (fn jobs) (run-batch pool fn jobs))))
           (sb-thread:with-mutex ((worker-pool-lock pool))
             (setf (worker-pool-stopped pool) t)
