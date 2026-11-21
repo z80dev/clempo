@@ -3,7 +3,7 @@
 | Rung | Score | Commit | Date |
 |---|---|---|---|
 | R0 Gate | scaffold: base, io, keccak, RLP, JSON, http, JSON-RPC client, layer check | - | 2026-11-20 |
-| R1 Decode | mainnet 640/640 (T0..T13), moderato 33/33 | 1edd52f | 2026-11-21 |
+| R1 Decode | mainnet 640/640 (T0..T13), moderato 33/33; full archive 50,050,000/50,050,000 blocks (35,979,413 txs) re-encoded and checked against eth_getBlockByNumber, 0 failures | 1edd52f, 4e28f4d | 2026-11-21 |
 | R2 Genesis | yes: matching state roots and block hashes on mainnet and Moderato | `ec20b6b` | 2026-11-21 |
 | R3 Replay | 20,500,000 (every block 1..20,500,000 from genesis matches gas, receipts root, bloom and state root, state on disk, no heals; through T1/T1A, T1B, T1C, T2 and T3; run continuing toward the tip) | `b56e883` | 2026-11-21 |
 | R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `750c66b` | 2026-11-21 |
@@ -404,3 +404,5 @@ to exactly 20,000 unique blocks, and preserved the original end height despite
 the isolated archive view gaining another chunk. It finished with zero failed
 blocks and no duplicate completed chunks; evidence is
 `~/scratch/clempo/r1-archive/resume-test.eI4u3S/{first.log,resumed.log,result.json}`.
+
+R1 full archive (2026-11-21, 4e28f4d): `CLEMPO_RPC=http://127.0.0.1:8545 nice -n 10 bin/clempo-dev r1-archive -threads 6 -batch 100 -result ~/scratch/clempo/r1-archive/full-1795243500.json` checked every mainnet block 0..50,049,999 (50,050,000 blocks, 35,979,413 transactions, 15,342,450 signature recoveries, 48.6 GB of raw blocks) against the reference's eth_getBlockByNumber(full): byte-identical re-encoding, block hash, transactions root, every tx hash and sender. 0 failures in 4,493 s (11,139 blocks/s, 6 threads, sharing the host with replays).
