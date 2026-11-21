@@ -151,7 +151,10 @@ DEFCALL table."
   "charge_input_cost: per-word calldata gas."
   (deduct-gas (input-cost *spec* (length input))))
 
-(defun has-duplicates-metered (values &key (test #'eql))
+(defun has-duplicates-metered (values &key (test 'equal))
   "has_duplicates_metered: T11 dedup gas, then whether VALUES repeats an element."
   (deduct-gas (dedup-cost *spec* (length values)))
-  (loop for (v . rest) on values thereis (member v rest :test test)))
+  (let ((seen (make-hash-table :test test)))
+    (dolist (v values nil)
+      (when (gethash v seen) (return t))
+      (setf (gethash v seen) t))))
