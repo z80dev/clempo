@@ -14,7 +14,9 @@
 
 (define-constant +checkpoint-magic+ (string->octets "CLEMPOCK"))
 (define-constant +checkpoint-end+ (string->octets "CLEMPOEN"))
-(defconstant +format-version+ 1)
+(defconstant +format-version+ 1)       ; MANIFEST
+;;; Checkpoint versions: 1 has no account commitments; 2 adds each account's T14 commitment.
+(defconstant +checkpoint-version+ 2)
 
 (define-condition store-root-mismatch (error)
   ((number :initarg :number :reader store-root-mismatch-number)
@@ -80,7 +82,7 @@
 (defun write-checkpoint-to (db out)
   (let ((sink (make-sink out)))
     (put-raw sink +checkpoint-magic+)
-    (put-u32 sink +format-version+)
+    (put-u32 sink +checkpoint-version+)
     (put-u64 sink (db-number db))
     (put-raw sink (db-hash db))
     (put-raw sink (db-root-hash db))
@@ -94,6 +96,7 @@
                     (put-int sink (account-nonce a))
                     (put-int sink (account-balance a))
                     (put-raw sink (account-code-hash a))
+                    (put-int sink (account-commitment a))
                     (put-raw sink (flush-storage a))
                     (put-u64 sink (account-slot-count a))
                     (map-account-storage (lambda (slot value) (put-int sink slot) (put-int sink value)) a))
@@ -114,7 +117,8 @@ compare its root with the recorded one."
     (let ((src (make-source in))
           (db (make-statedb)))
       (unless (octets= (get-raw src 8) +checkpoint-magic+) (format-error "~A: not a checkpoint" path))
-      (unless (= (get-u32 src) +format-version+) (format-error "~A: unknown version" path))
+      (let ((version (get-u32 src)))
+       (unless (member version '(1 2)) (format-error "~A: unknown version" path))
       (let ((number (get-u64 src)) (hash (get-raw src 32)) (root (get-raw src 32)))
         (loop repeat (get-u32 src) do (let ((n (get-u64 src))) (db-note-block-hash db n (get-raw src 32))))
         (let ((codes (db-codes db)))
@@ -128,6 +132,7 @@ compare its root with the recorded one."
                      (setf (account-nonce a) (get-int src)
                            (account-balance a) (get-int src)
                            (account-code-hash a) (get-raw src 32)
+                           (account-commitment a) (if (= version 1) 0 (get-int src))
                            (account-storage-root a) (get-raw src 32))
                      (let ((n (get-u64 src)))
                        (when (plusp n)
@@ -144,7 +149,7 @@ compare its root with the recorded one."
             (unless (octets= actual root)
               (error 'store-root-mismatch :number number :expected root :actual actual))))
         (setf (db-root-hash db) root)
-        db))))
+        db)))))
 
 ;;; The block log
 
@@ -158,11 +163,13 @@ compare its root with the recorded one."
     (put-u32 sink (length (block-diff-accounts diff)))
     (dolist (d (block-diff-accounts diff))
       (put-raw sink (address-octets (account-diff-address d)))
-      (put-u8 sink (logior (if (account-diff-deleted-p d) 1 0) (if (account-diff-wiped-p d) 2 0)))
+      (put-u8 sink (logior (if (account-diff-deleted-p d) 1 0) (if (account-diff-wiped-p d) 2 0)
+                           (if (zerop (account-diff-commitment d)) 0 4)))
       (unless (account-diff-deleted-p d)
         (put-int sink (account-diff-nonce d))
         (put-int sink (account-diff-balance d))
         (put-raw sink (account-diff-code-hash d))
+        (unless (zerop (account-diff-commitment d)) (put-int sink (account-diff-commitment d)))
         (put-u32 sink (length (account-diff-slots d)))
         (loop for (slot . value) in (account-diff-slots d)
               do (put-int sink slot) (put-int sink value))))
@@ -181,6 +188,7 @@ compare its root with the recorded one."
                                (make-account-diff
                                 :address address :wiped-p (logbitp 1 flags)
                                 :nonce (get-int src) :balance (get-int src) :code-hash (get-raw src 32)
+                                :commitment (if (logbitp 2 flags) (get-int src) 0)
                                 :slots (loop repeat (get-u32 src)
                                              collect (let ((slot (get-int src))) (cons slot (get-int src))))))))))
     (unless (source-exhausted-p src) (format-error "trailing bytes in block record ~D" number))

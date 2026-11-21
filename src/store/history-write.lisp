@@ -122,7 +122,8 @@ the encoded versions."
   (let ((a (store:db-account db address)))
     (if a
         (make-aver nil wiped-p (store:account-nonce a) (store:account-balance a)
-                   (store:account-code-hash a) (plusp (store:account-slot-count a)))
+                   (store:account-code-hash a) (plusp (store:account-slot-count a))
+                   (store:account-commitment a))
         (make-aver t wiped-p 0 0 +empty-code-hash+ nil))))
 
 (defun open-code-output (history job)

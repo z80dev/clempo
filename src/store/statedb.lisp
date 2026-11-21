@@ -13,7 +13,7 @@ committed blocks into a log and periodic checkpoints.")
   (:export
    ;; accounts
    #:account #:account-nonce #:account-balance #:account-code-hash #:account-storage-root
-   #:account-slot-count
+   #:account-slot-count #:account-commitment
    ;; the state database
    #:statedb #:make-statedb #:db-number #:db-hash #:db-root-hash
    #:db-account #:db-storage #:db-code #:db-account-count
@@ -30,6 +30,7 @@ committed blocks into a log and periodic checkpoints.")
    #:block-diff-accounts #:block-diff-codes
    #:account-diff #:account-diff-address #:account-diff-deleted-p #:account-diff-wiped-p
    #:account-diff-nonce #:account-diff-balance #:account-diff-code-hash #:account-diff-slots
+   #:account-diff-commitment
    #:make-account-diff #:make-block-diff #:db-apply-diff
    ;; persistence
    #:store #:store-db #:store-dir #:store-interval #:open-store #:close-store
@@ -55,6 +56,8 @@ committed blocks into a log and periodic checkpoints.")
   (nonce 0 :type (unsigned-byte 64))
   (balance 0 :type integer)
   (code-hash +empty-code-hash+ :type hash32)
+  ;; T14 (TIP-1108) configuration commitment; nonzero adds the account leaf's fifth string
+  (commitment 0 :type (unsigned-byte 256))
   ;; The root of STORAGE once its trie is clean. A checkpoint load restores it without
   ;; building the trie; the trie is built from STORAGE on the first write and checked
   ;; against this root.
@@ -72,7 +75,7 @@ committed blocks into a log and periodic checkpoints.")
 (defstruct (touch (:constructor make-touch (address account)))
   (address 0 :type integer)
   account                               ; object before the block, or NIL if absent
-  (nonce 0) (balance 0) code-hash storage-root storage trie
+  (nonce 0) (balance 0) code-hash (commitment 0) storage-root storage trie
   (old-slots (make-hash-table) :type hash-table) ; slot -> value before the block
   (written (make-hash-table) :type hash-table)   ; every slot written this block
   (wiped-p nil))
@@ -185,7 +188,8 @@ the caller bound a trie-hashing parallel map)."
                      (if a
                          (trie-put trie (address-octets address)
                                    (encode-account (account-nonce a) (account-balance a)
-                                                   (flush-storage a) (account-code-hash a)))
+                                                   (flush-storage a) (account-code-hash a)
+                                                   (account-commitment a)))
                          (trie-delete trie (address-octets address)))))
                  dirty)
         ;; DB-ROOT-HASH stays the last committed root; an open block's root is only returned.
@@ -251,6 +255,7 @@ root is the empty root, which has no nodes)."
               (setf (touch-nonce tc) (account-nonce a)
                     (touch-balance tc) (account-balance a)
                     (touch-code-hash tc) (account-code-hash a)
+                    (touch-commitment tc) (account-commitment a)
                     (touch-storage-root tc) (account-storage-root a)
                     (touch-storage tc) (account-storage a)
                     (touch-trie tc) (when trie (trie-clone trie)))))
@@ -260,13 +265,15 @@ root is the empty root, which has no nodes)."
   (or (db-account db address)
       (setf (gethash address (db-accounts db)) (%make-account address))))
 
-(defun db-set-account (db address nonce balance code-hash)
-  "Create or overwrite ADDRESS's nonce, balance and code hash (32 octets)."
+(defun db-set-account (db address nonce balance code-hash &optional (commitment 0))
+  "Create or overwrite ADDRESS's nonce, balance, code hash (32 octets) and T14 configuration
+commitment (0 when it has none)."
   (touch db address)
   (let ((a (live-account db address)))
     (setf (account-nonce a) nonce
           (account-balance a) balance
           (account-code-hash a) code-hash
+          (account-commitment a) commitment
           (gethash address (db-dirty db)) t)
     a))
 
@@ -318,10 +325,12 @@ root is the empty root, which has no nodes)."
 ;;; Block diffs: what a committed block changed, the unit of the log.
 
 (defstruct (account-diff (:constructor make-account-diff
-                             (&key address deleted-p wiped-p nonce balance code-hash slots)))
+                             (&key address deleted-p wiped-p nonce balance code-hash
+                                   (commitment 0) slots)))
   (address 0 :type integer)
   deleted-p wiped-p
   (nonce 0) (balance 0) code-hash
+  (commitment 0)
   (slots '() :type list))              ; ((slot . value) ...), value 0 = cleared
 
 (defstruct (block-diff (:constructor make-block-diff (&key number hash root accounts codes)))
@@ -337,7 +346,7 @@ root is the empty root, which has no nodes)."
                            (make-account-diff
                             :address address :wiped-p (touch-wiped-p tc)
                             :nonce (account-nonce a) :balance (account-balance a)
-                            :code-hash (account-code-hash a)
+                            :code-hash (account-code-hash a) :commitment (account-commitment a)
                             :slots (loop for slot being the hash-keys of (touch-written tc)
                                          collect (cons slot (db-storage db address slot))))
                            (make-account-diff :address address :deleted-p t))
@@ -397,6 +406,7 @@ undo record is kept so the speculation can be unwound."
                (setf (account-nonce a) (touch-nonce tc)
                      (account-balance a) (touch-balance tc)
                      (account-code-hash a) (touch-code-hash tc)
+                     (account-commitment a) (touch-commitment tc)
                      (account-storage-root a) (touch-storage-root tc)
                      (account-storage a) (touch-storage tc)
                      (account-trie a) (touch-trie tc)
@@ -455,7 +465,7 @@ Returns the root."
       (cond ((account-diff-deleted-p d) (db-delete-account db address))
             (t (when (account-diff-wiped-p d) (db-wipe-storage db address))
                (db-set-account db address (account-diff-nonce d) (account-diff-balance d)
-                                  (account-diff-code-hash d))
+                                  (account-diff-code-hash d) (account-diff-commitment d))
                (loop for (slot . value) in (account-diff-slots d)
                      do (db-set-storage db address slot value))))))
   (let ((root (db-state-root db)))

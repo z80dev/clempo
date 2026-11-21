@@ -69,10 +69,11 @@ read (the RPC backend's write lock).")
 
 ;;; Account versions
 
-(defstruct (aver (:constructor make-aver (deleted-p wiped-p nonce balance code-hash storage-p)))
+(defstruct (aver (:constructor make-aver (deleted-p wiped-p nonce balance code-hash storage-p
+                                           &optional (commitment 0))))
   "An account after a block. DELETED-P: absent. WIPED-P: its storage was cleared in that block.
-STORAGE-P: it has nonzero storage."
-  deleted-p wiped-p (nonce 0) (balance 0) code-hash storage-p)
+STORAGE-P: it has nonzero storage. COMMITMENT: its T14 configuration commitment (0: none)."
+  deleted-p wiped-p (nonce 0) (balance 0) code-hash storage-p (commitment 0))
 
 (defun aver-same-p (a b)
   "Equal fields (the wipe flag aside)."
@@ -81,6 +82,7 @@ STORAGE-P: it has nonzero storage."
            (and (eql (aver-nonce a) (aver-nonce b))
                 (eql (aver-balance a) (aver-balance b))
                 (octets= (aver-code-hash a) (aver-code-hash b))
+                (eql (aver-commitment a) (aver-commitment b))
                 (eq (aver-storage-p a) (aver-storage-p b))))))
 
 ;;; Byte output: a growable buffer
@@ -132,16 +134,18 @@ STORAGE-P: it has nonzero storage."
   (incf (obuf-pos b) (- end start)))
 
 (defun encode-aver (b v)
-  (put8 b (logior (if (aver-deleted-p v) 1 0) (if (aver-wiped-p v) 2 0)
-                  (if (aver-storage-p v) 4 0)
-                  (if (and (not (aver-deleted-p v))
-                           (not (octets= (aver-code-hash v) +empty-code-hash+)))
-                      8 0)))
-  (unless (aver-deleted-p v)
-    (put-varint b (aver-nonce v))
-    (put-word b (aver-balance v))
-    (unless (octets= (aver-code-hash v) +empty-code-hash+)
-      (put-octets b (aver-code-hash v)))))
+  (let ((live (not (aver-deleted-p v))))
+    (put8 b (logior (if (aver-deleted-p v) 1 0) (if (aver-wiped-p v) 2 0)
+                    (if (aver-storage-p v) 4 0)
+                    (if (and live (not (octets= (aver-code-hash v) +empty-code-hash+))) 8 0)
+                    (if (and live (plusp (aver-commitment v))) 16 0)))
+    (when live
+      (put-varint b (aver-nonce v))
+      (put-word b (aver-balance v))
+      (unless (octets= (aver-code-hash v) +empty-code-hash+)
+        (put-octets b (aver-code-hash v)))
+      (when (plusp (aver-commitment v))
+        (put-word b (aver-commitment v))))))
 
 ;;; Byte input from a mapped file
 
@@ -200,8 +204,11 @@ read outside its mapping (the readers run at the hot policy's safety)."
       (if (logbitp 0 flags)
           (make-aver t (logbitp 1 flags) 0 0 +empty-code-hash+ nil)
           (let* ((nonce (varint)) (balance (word))
-                 (code (if (logbitp 3 flags) (sap-octets sap pos 32 limit) +empty-code-hash+)))
-            (make-aver nil (logbitp 1 flags) nonce balance code (logbitp 2 flags)))))))
+                 (code (if (logbitp 3 flags)
+                           (prog1 (sap-octets sap pos 32 limit) (incf pos 32))
+                           +empty-code-hash+))
+                 (commitment (if (logbitp 4 flags) (word) 0)))
+            (make-aver nil (logbitp 1 flags) nonce balance code (logbitp 2 flags) commitment))))))
 
 (defun skip-aver (sap pos limit)
   (declare #.*hot* (type fixnum pos limit) (type sb-sys:system-area-pointer sap))
@@ -212,7 +219,11 @@ read outside its mapping (the readers run at the hot policy's safety)."
         (let ((len (u8)))
           (when (> len 32) (corrupt-segment "word longer than 32 bytes"))
           (skip len))
-        (when (logbitp 3 flags) (skip 32))))
+        (when (logbitp 3 flags) (skip 32))
+        (when (logbitp 4 flags)
+          (let ((len (u8)))
+            (when (> len 32) (corrupt-segment "word longer than 32 bytes"))
+            (skip len)))))
     pos))
 
 ;;; Segment files
@@ -656,11 +667,11 @@ executor layer, which may see this one)."
              (values v block)))))
 
 (defun history-account (view address)
-  "(values found-p nonce balance code-hash) of ADDRESS in VIEW."
+  "(values found-p nonce balance code-hash commitment) of ADDRESS in VIEW."
   (let ((v (account-version view address)))
     (if (and v (not (aver-deleted-p v)))
-        (values t (aver-nonce v) (aver-balance v) (aver-code-hash v))
-        (values nil 0 0 +empty-code-hash+))))
+        (values t (aver-nonce v) (aver-balance v) (aver-code-hash v) (aver-commitment v))
+        (values nil 0 0 +empty-code-hash+ 0))))
 
 (defun history-storage-empty-p (view address)
   (let ((v (account-version view address)))

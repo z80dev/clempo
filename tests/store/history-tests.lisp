@@ -17,10 +17,13 @@
   (dotimes (i 25)
     (let ((address (1+ (random +addresses+ rng))))
       (case (random 12 rng)
-        ((0 1 2) (store:db-set-account db address (random 5 rng) (random 1000 rng)
-                                       (if (zerop (random 3 rng))
-                                           (store:db-put-code db (octets-of (random 256 rng) (random 256 rng)))
-                                           +empty-code-hash+)))
+        ((0 1 2) (let ((nonce (random 5 rng)))
+                   (store:db-set-account db address nonce (random 1000 rng)
+                                         (if (zerop (random 3 rng))
+                                             (store:db-put-code db (octets-of (random 256 rng) (random 256 rng)))
+                                             +empty-code-hash+)
+                                         ;; nonce 3: a T14 configuration commitment
+                                         (if (= nonce 3) (+ (ash address 240) i 1) 0))))
         (3 (store:db-delete-account db address))
         (4 (store:db-wipe-storage db address))
         (t (store:db-set-storage db address (random +slots+ rng)
@@ -36,13 +39,14 @@
                         (if a (store:account-nonce a) 0)
                         (if a (store:account-balance a) 0)
                         (octets->hex (if a (store:account-code-hash a) +empty-code-hash+))
+                        (if a (store:account-commitment a) 0)
                         (and a (plusp (store:account-slot-count a)))
                         (loop for slot below +slots+ collect (store:db-storage db address slot))))))
 
 (defun view-snapshot (view)
   (loop for address from 1 to +addresses+
-        collect (multiple-value-bind (found nonce balance code-hash) (history-account view address)
-                  (list found nonce balance (octets->hex code-hash)
+        collect (multiple-value-bind (found nonce balance code-hash commitment) (history-account view address)
+                  (list found nonce balance (octets->hex code-hash) commitment
                         (and found (not (history-storage-empty-p view address)))
                         (loop for slot below +slots+ collect (history-storage view address slot))))))
 
