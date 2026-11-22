@@ -1,6 +1,12 @@
 ;;; Optimal-ate product on the M twist, with allocation-free projective lines.
 (in-package #:clempo.bls12-381)
 
+(clempo.base:defbound +miller-loop-bits+ 64
+  "Bits of |x| = #xd201000000010000, the Miller loop parameter. The top bit is the
+starting point R = Q; the loop runs over the bits below it."
+  (= +miller-loop-bits+ (integer-length #xd201000000010000))
+  (typep (- +miller-loop-bits+ 2) 'fixnum))
+
 (defun miller-double! (arena r p line lo w wo)
   (declare #.clempo.base:*hot* (type mont-words arena line w) (type fixnum r p lo wo))
   ;; For Jacobian R=(X:Y:Z), scale the affine tangent by 2YZ³:
@@ -54,7 +60,7 @@
   "Validated pair table at word zero, 84 words per pair. No boundary conversions."
   (declare #.clempo.base:*hot* (type mont-words arena) (type fixnum f count line work))
   (f12-one! arena f)
-  (loop for bit of-type fixnum downfrom 62 to 0 do
+  (loop for bit of-type fixnum downfrom (- +miller-loop-bits+ 2) to 0 do
     (f12-square! arena f arena f arena work)
     (dotimes (i count)
       (let ((base (* i 84)))

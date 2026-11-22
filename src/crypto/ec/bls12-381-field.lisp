@@ -4,19 +4,27 @@
 ;;; overlaps are not. Caller scratch must be disjoint from all operands.
 (in-package #:clempo.bls12-381)
 
+(clempo.base:defbound +fp-limbs+ 6
+  "64-bit Montgomery limbs in an Fp element; R = 2^(64 limbs)."
+  (>= (* 64 +fp-limbs+) (integer-length +p+))
+  ;; Callers' sums stay below 2p < R, so reduction needs no extra word.
+  (< (* 2 +p+) (ash 1 (* 64 +fp-limbs+)))
+  ;; FP-MUL! keeps no carry word: the top limb of p leaves a spare bit.
+  (< (ash +p+ (- (* 64 (1- +fp-limbs+)))) (1- (ash 1 63))))
+
 (deftype fp-arena () '(simple-array (unsigned-byte 64) (*)))
-(deftype fp-offset () `(integer 0 ,(- array-dimension-limit 6)))
+(deftype fp-offset () `(integer 0 ,(- array-dimension-limit +fp-limbs+)))
 
 (defconstant +fp-montgomery-factor+ #x89f3fffcfffcfffd)
 
 ;; Immutable conversion operands, never shared mutable scratch.
 (defparameter *fp-r-squared*
-  (make-array 6 :element-type '(unsigned-byte 64)
+  (make-array +fp-limbs+ :element-type '(unsigned-byte 64)
               :initial-contents '(#xf4df1f341c341746 #x0a76e6a609d104f1
                                   #x8de5476c4c95b6d5 #x67eb88a9939d83c0
                                   #x9a793e85b519952d #x11988fe592cae3aa)))
 (defparameter *fp-integer-one*
-  (make-array 6 :element-type '(unsigned-byte 64) :initial-contents '(1 0 0 0 0 0)))
+  (make-array +fp-limbs+ :element-type '(unsigned-byte 64) :initial-contents '(1 0 0 0 0 0)))
 
 (declaim (inline fp-multiply-add-word))
 (defun fp-multiply-add-word (a b c d)
@@ -30,7 +38,7 @@
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defun fp-modulus-words ()
-    (loop for i below 6 collect (ldb (byte 64 (* i 64)) +p+)))
+    (loop for i below +fp-limbs+ collect (ldb (byte 64 (* i 64)) +p+)))
 
   (defun fp-reduce-word-forms (words carry)
     ;; All callers produce values below 2p; 2p < R, so no seventh word.
@@ -41,7 +49,7 @@
                      `(or (> ,(nth i words) ,(nth i ps))
                           (and (= ,(nth i words) ,(nth i ps))
                                ,(at-least (1- i)))))))
-        `((when ,(at-least 5)
+        `((when ,(at-least (1- +fp-limbs+))
             (setf ,carry 1)
             ,@(loop for word in words for p in ps collect
                 `(setf (values ,word ,carry)
@@ -51,27 +59,27 @@
   `(progn
      (defun fp-zero! (out out-offset)
        (declare #.clempo.base:*hot* (type fp-arena out) (type fp-offset out-offset))
-       ,@(loop for i below 6 collect `(setf (aref out (+ out-offset ,i)) 0))
+       ,@(loop for i below +fp-limbs+ collect `(setf (aref out (+ out-offset ,i)) 0))
        (values))
      (defun fp-one! (out out-offset)
        (declare #.clempo.base:*hot* (type fp-arena out) (type fp-offset out-offset))
-       ,@(loop for i below 6
-               for word = (ldb (byte 64 (* i 64)) (mod (ash 1 384) +p+))
+       ,@(loop for i below +fp-limbs+
+               for word = (ldb (byte 64 (* i 64)) (mod (ash 1 (* 64 +fp-limbs+)) +p+))
                collect `(setf (aref out (+ out-offset ,i)) ,word))
        (values))
      (defun fp-copy! (out out-offset a a-offset)
        (declare #.clempo.base:*hot* (type fp-arena out a)
                 (type fp-offset out-offset a-offset))
-       ,@(loop for i below 6 collect
+       ,@(loop for i below +fp-limbs+ collect
            `(setf (aref out (+ out-offset ,i)) (aref a (+ a-offset ,i))))
        (values))
      (defun fp-zero-p (a a-offset)
        (declare #.clempo.base:*hot* (type fp-arena a) (type fp-offset a-offset))
-       (zerop (logior ,@(loop for i below 6 collect `(aref a (+ a-offset ,i))))))
+       (zerop (logior ,@(loop for i below +fp-limbs+ collect `(aref a (+ a-offset ,i))))))
      (defun fp-equal-p (a a-offset b b-offset)
        (declare #.clempo.base:*hot* (type fp-arena a b)
                 (type fp-offset a-offset b-offset))
-       (and ,@(loop for i below 6 collect
+       (and ,@(loop for i below +fp-limbs+ collect
                 `(= (aref a (+ a-offset ,i)) (aref b (+ b-offset ,i))))))))
 
 (define-fp-basic-operations)
@@ -81,7 +89,7 @@
      ,@(loop for name in '(fp-add! fp-sub! fp-neg!)
              for addp = (eq name 'fp-add!)
              for negp = (eq name 'fp-neg!)
-             for words = (loop repeat 6 collect (gensym "WORD"))
+             for words = (loop repeat +fp-limbs+ collect (gensym "WORD"))
              for carry = (gensym "CARRY")
              collect
          `(defun ,name (out out-offset a a-offset ,@(unless negp '(b b-offset)))
@@ -113,8 +121,8 @@
 (defmacro define-fp-multiply ()
   ;; Coarsely integrated operand scanning. Only six accumulator words are
   ;; live between rounds. p < 2^381 leaves ample headroom for the top carries.
-  (let ((as (loop repeat 6 collect (gensym "A")))
-        (ts (loop repeat 6 collect (gensym "T")))
+  (let ((as (loop repeat +fp-limbs+ collect (gensym "A")))
+        (ts (loop repeat +fp-limbs+ collect (gensym "T")))
         (b (gensym "B")) (m (gensym "M"))
         (carry (gensym "CARRY")) (top (gensym "TOP")) (borrow (gensym "BORROW")))
     `(defun fp-mul! (out out-offset a a-offset b b-offset)
@@ -125,7 +133,7 @@
              (,b 0) (,m 0) (,carry 0) (,top 0) (,borrow 0))
          (declare (type (unsigned-byte 64) ,@as ,@ts ,b ,m ,carry ,top)
                   (type bit ,borrow))
-         ,@(loop for i below 6 append
+         ,@(loop for i below +fp-limbs+ append
              (append
               `((setf ,b (aref b (+ b-offset ,i)) ,carry 0))
               (loop for a in as for word in ts collect
@@ -165,7 +173,7 @@
      (declare #.clempo.base:*hot* (type fp-arena out) (type fp-offset out-offset)
               (type integer integer))
      (let ((n (if (<= 0 integer (1- +p+)) integer (mod integer +p+))))
-       ,@(loop for i below 6 collect
+       ,@(loop for i below +fp-limbs+ collect
            `(setf (aref out (+ out-offset ,i)) (fp-positive-integer-word n ,i))))
      (fp-mul! out out-offset out out-offset *fp-r-squared* 0)
      (values)))
@@ -175,16 +183,16 @@
 (defun fp-to-integer (a a-offset)
   "Export once at the boundary, without temporary wide bignums or division."
   (declare #.clempo.base:*hot* (type fp-arena a) (type fp-offset a-offset))
-  (let ((words (make-array 6 :element-type '(unsigned-byte 64) :initial-element 0)))
+  (let ((words (make-array +fp-limbs+ :element-type '(unsigned-byte 64) :initial-element 0)))
     (declare (dynamic-extent words))
     (fp-mul! words 0 a a-offset *fp-integer-one* 0)
     (when (zerop (logior (aref words 1) (aref words 2) (aref words 3)
                         (aref words 4) (aref words 5)))
       (return-from fp-to-integer (aref words 0)))
-    (let ((out (sb-bignum::%allocate-bignum 7)))
-      (dotimes (i 6) (setf (sb-bignum::%bignum-ref out i) (aref words i)))
-      (setf (sb-bignum::%bignum-ref out 6) 0)
-      (sb-bignum::%normalize-bignum out 7))))
+    (let ((out (sb-bignum::%allocate-bignum (1+ +fp-limbs+))))
+      (dotimes (i +fp-limbs+) (setf (sb-bignum::%bignum-ref out i) (aref words i)))
+      (setf (sb-bignum::%bignum-ref out +fp-limbs+) 0)
+      (sb-bignum::%normalize-bignum out (1+ +fp-limbs+)))))
 
 (defun fp-pow! (out out-offset a a-offset exponent work work-offset)
   "Raise A to a nonnegative integer EXPONENT. WORK has at least 24 disjoint words."

@@ -26,6 +26,12 @@
 
 (defconstant +p+ #x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab)
 (defconstant +r+ #x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001)
+(clempo.base:defbound +digit-bytes+ 8
+  "Big-endian encoding bytes read into one bignum digit."
+  (= +digit-bytes+ sb-vm:n-word-bytes)
+  ;; The 32-byte scalar and 48-byte Fp readers split into whole digits.
+  (zerop (mod 32 +digit-bytes+))
+  (zerop (mod 48 +digit-bytes+)))
 (define-condition invalid-point (error) ())
 (defun invalid () (error 'invalid-point))
 
@@ -111,15 +117,16 @@
   `(defun ,name (bytes start)
      (declare #.clempo.base:*hot* (type clempo.base:octets bytes) (type fixnum start))
      (unless (<= 0 start (+ start ,size) (length bytes)) (invalid))
-     (let ((out (sb-bignum::%allocate-bignum ,(1+ (/ size 8)))))
-       ,@(loop for limb below (/ size 8)
-               for offset = (- size (* (1+ limb) 8))
+     (let ((out (sb-bignum::%allocate-bignum ,(1+ (/ size +digit-bytes+)))))
+       ,@(loop for limb below (/ size +digit-bytes+)
+               for offset = (- size (* (1+ limb) +digit-bytes+))
                collect
           `(setf (sb-bignum::%bignum-ref out ,limb)
-                 (logior ,@(loop for j below 8 collect
-                             `(ash (aref bytes (+ start ,(+ offset j))) ,(* (- 7 j) 8))))))
-       (setf (sb-bignum::%bignum-ref out ,(/ size 8)) 0)
-       (sb-bignum::%normalize-bignum out ,(1+ (/ size 8))))))
+                 (logior ,@(loop for j below +digit-bytes+ collect
+                             `(ash (aref bytes (+ start ,(+ offset j)))
+                                   ,(* (- (1- +digit-bytes+) j) 8))))))
+       (setf (sb-bignum::%bignum-ref out ,(/ size +digit-bytes+)) 0)
+       (sb-bignum::%normalize-bignum out ,(1+ (/ size +digit-bytes+))))))
 (define-bls-integer-reader read-bls-integer32 32)
 (define-bls-integer-reader read-bls-integer48 48)
 

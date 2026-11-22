@@ -5,6 +5,17 @@
 ;;; Parameter vectors below are immutable after load; hot calls allocate nothing.
 (in-package #:clempo.p384)
 
+(clempo.base:defbound +p384-limbs+ 6
+  "64-bit Montgomery limbs in a P-384 residue; R = 2^(64 limbs)."
+  ;; Both moduli fill every limb: below R, and above R/2 (PS-FROM-DIGEST! subtracts once).
+  (= (* 64 +p384-limbs+) (integer-length +p384-p+))
+  (= (* 64 +p384-limbs+) (integer-length +p384-n+)))
+(clempo.base:defbound +p384-limb-bytes+ 8
+  "Big-endian digest bytes packed into one limb."
+  (= (* 8 +p384-limb-bytes+) 64)
+  ;; PS-FROM-DIGEST! reads a 384-bit digest into exactly the limbs.
+  (= (* 8 +p384-limbs+ +p384-limb-bytes+) (integer-length +p384-n+)))
+
 (deftype p384-arena () '(simple-array (unsigned-byte 64) (*)))
 
 (defmacro p384-integer-limb (integer index)
@@ -98,28 +109,28 @@
   `(progn
      (defun p384-zero! (out o)
        (declare #.clempo.base:*hot* (type p384-arena out) (type fixnum o))
-       ,@(loop for i below 6 collect `(setf (aref out (+ o ,i)) 0))
+       ,@(loop for i below +p384-limbs+ collect `(setf (aref out (+ o ,i)) 0))
        (values))
      (defun p384-copy! (out o a ao)
        (declare #.clempo.base:*hot* (type p384-arena out a) (type fixnum o ao))
-       ,@(loop for i below 6 collect `(setf (aref out (+ o ,i)) (aref a (+ ao ,i))))
+       ,@(loop for i below +p384-limbs+ collect `(setf (aref out (+ o ,i)) (aref a (+ ao ,i))))
        (values))
      (defun p384-zero-p (a ao)
        (declare #.clempo.base:*hot* (type p384-arena a) (type fixnum ao))
-       (zerop (logior ,@(loop for i below 6 collect `(aref a (+ ao ,i))))))
+       (zerop (logior ,@(loop for i below +p384-limbs+ collect `(aref a (+ ao ,i))))))
      (defun p384-equal-p (a ao b bo)
        (declare #.clempo.base:*hot* (type p384-arena a b) (type fixnum ao bo))
-       (and ,@(loop for i below 6 collect `(= (aref a (+ ao ,i)) (aref b (+ bo ,i))))))))
+       (and ,@(loop for i below +p384-limbs+ collect `(= (aref a (+ ao ,i)) (aref b (+ bo ,i))))))))
 
 (define-p384-raw-operations)
 
 (defparameter *p384-integer-one*
-  (make-array 6 :element-type '(unsigned-byte 64) :initial-contents '(1 0 0 0 0 0)))
+  (make-array +p384-limbs+ :element-type '(unsigned-byte 64) :initial-contents '(1 0 0 0 0 0)))
 
 (defmacro define-p384-residue (prefix modulus &key digest)
   (let* ((p (symbol-value modulus))
-         (radix (ash 1 384))
-         (ps (loop for i below 6 collect (ldb (byte 64 (* i 64)) p)))
+         (radix (ash 1 (* 64 +p384-limbs+)))
+         (ps (loop for i below +p384-limbs+ collect (ldb (byte 64 (* i 64)) p)))
          ;; Constant generation only; no generic integer arithmetic at runtime.
          (factor (mod (- (clempo.ec:invert (first ps) (ash 1 64))) (ash 1 64))))
     (labels ((name (suffix) (intern (format nil "~A-~A" prefix suffix) '#:clempo.p384))
@@ -135,16 +146,16 @@
                (loop for word in words for i from 0 collect `(setf (aref out (+ o ,i)) ,word))))
       `(progn
          (defparameter ,(name "R2")
-           (make-array 6 :element-type '(unsigned-byte 64)
-                       :initial-contents ',(loop for i below 6 collect
+           (make-array +p384-limbs+ :element-type '(unsigned-byte 64)
+                       :initial-contents ',(loop for i below +p384-limbs+ collect
                                              (ldb (byte 64 (* i 64)) (mod (* radix radix) p)))))
          (defun ,(name "ONE!") (out o)
            (declare #.clempo.base:*hot* (type p384-arena out) (type fixnum o))
-           ,@(loop for i below 6 collect
+           ,@(loop for i below +p384-limbs+ collect
                `(setf (aref out (+ o ,i)) ,(ldb (byte 64 (* i 64)) (mod radix p))))
            (values))
          ,@(loop for addp in '(t nil) collect
-             (let ((words (loop repeat 6 collect (gensym "W"))))
+             (let ((words (loop repeat +p384-limbs+ collect (gensym "W"))))
                `(defun ,(name (if addp "ADD!" "SUB!")) (out o a ao b bo)
                   (declare #.clempo.base:*hot* (type p384-arena out a b)
                            (type fixnum o ao bo))
@@ -155,7 +166,7 @@
                                (,(if addp 'clempo.ec.word:add-with-carry 'clempo.ec.word:subtract-with-borrow)
                                 (aref a (+ ao ,i)) (aref b (+ bo ,i)) carry)))
                     ,(if addp
-                         `(when (or (= carry 1) ,(ge words 5))
+                         `(when (or (= carry 1) ,(ge words (1- +p384-limbs+)))
                             ;; With a high carry, subtract modulo R. The borrow
                             ;; consumes that carry since a+b < 2p < 2R.
                             (setf carry 1) ,@(subtract words 'carry))
@@ -165,7 +176,7 @@
                                        (clempo.ec.word:add-with-carry ,word ,pword carry)))))
                     ,@(store words))
                   (values))))
-         ,(let ((words (loop repeat 6 collect (gensym "W"))))
+         ,(let ((words (loop repeat +p384-limbs+ collect (gensym "W"))))
             `(defun ,(name "NEG!") (out o a ao)
                (declare #.clempo.base:*hot* (type p384-arena out a) (type fixnum o ao))
                (if (p384-zero-p a ao)
@@ -177,7 +188,7 @@
                                 (clempo.ec.word:subtract-with-borrow ,pword (aref a (+ ao ,i)) carry)))
                      ,@(store words)))
                (values)))
-         ,(let ((rs (loop repeat 7 collect (gensym "R"))))
+         ,(let ((rs (loop repeat (1+ +p384-limbs+) collect (gensym "R"))))
             `(defun ,(name "MUL!") (out o a ao b bo)
                (declare #.clempo.base:*hot* (type p384-arena out a b)
                         (type fixnum o ao bo))
@@ -188,32 +199,33 @@
                  ;; Full-width CIOS: seven accumulator words, not twelve product
                  ;; words plus twelve live operands. Keep both top carry bits
                  ;; before shifting; the BLS381 headroom shortcut is invalid here.
-                 ,@(loop for i below 6 append
+                 ,@(loop for i below +p384-limbs+ append
                      `((setf bword (aref b (+ bo ,i)) carry 0)
-                       ,@(loop for j below 6 collect
+                       ,@(loop for j below +p384-limbs+ collect
                            `(setf (values carry ,(nth j rs))
                                   (p384-mul-add-word
                                    (aref a (+ ao ,j)) bword ,(nth j rs) carry)))
-                       (setf (values ,(nth 6 rs) top)
-                             (clempo.ec.word:add-with-carry ,(nth 6 rs) carry 0))
+                       (setf (values ,(nth +p384-limbs+ rs) top)
+                             (clempo.ec.word:add-with-carry ,(nth +p384-limbs+ rs) carry 0))
                        (setf m (ldb (byte 64 0) (* ,(first rs) ,factor)) carry 0)
                        ,@(loop for pword in ps for j from 0 collect
                            `(setf (values carry ,(nth j rs))
                                   ,(if (= pword #xffffffffffffffff)
                                        `(p384-mul-add-minus-one m ,(nth j rs) carry)
                                        `(p384-mul-add-word m ,pword ,(nth j rs) carry))))
-                       (setf (values ,(nth 6 rs) bit)
-                             (clempo.ec.word:add-with-carry ,(nth 6 rs) carry 0))
+                       (setf (values ,(nth +p384-limbs+ rs) bit)
+                             (clempo.ec.word:add-with-carry ,(nth +p384-limbs+ rs) carry 0))
                        ;; If the first addition overflowed, its new top is zero,
                        ;; so the second cannot also overflow: TOP+BIT is a bit.
                        (setf top (+ top bit))
-                       ,@(loop for j below 6 collect
+                       ,@(loop for j below +p384-limbs+ collect
                            `(setf ,(nth j rs) ,(nth (1+ j) rs)))
-                       (setf ,(nth 6 rs) top)))
+                       (setf ,(nth +p384-limbs+ rs) top)))
                  ;; Each round T < A+p; at the boundary T < 2p < 2R.
-                 (when (or (plusp ,(nth 6 rs)) ,(ge (subseq rs 0 6) 5))
-                   (setf bit 1) ,@(subtract (subseq rs 0 6) 'bit))
-                 ,@(store (subseq rs 0 6)))
+                 (when (or (plusp ,(nth +p384-limbs+ rs))
+                           ,(ge (subseq rs 0 +p384-limbs+) (1- +p384-limbs+)))
+                   (setf bit 1) ,@(subtract (subseq rs 0 +p384-limbs+) 'bit))
+                 ,@(store (subseq rs 0 +p384-limbs+)))
                (values)))
          (defun ,(name "SQUARE!") (out o a ao)
            (declare #.clempo.base:*hot* (type p384-arena out a) (type fixnum o ao))
@@ -222,7 +234,7 @@
            "Import a canonical nonnegative integer; the caller checks n < modulus."
            (declare #.clempo.base:*hot* (type p384-arena out) (type fixnum o)
                     (type (integer 0 ,(1- p)) n))
-           ,@(loop for i below 6 collect
+           ,@(loop for i below +p384-limbs+ collect
                `(setf (aref out (+ o ,i)) (p384-integer-limb n ,i)))
            (,(name "MUL!") out o out o ,(name "R2") 0))
          (defun ,(name "TO-ORDINARY!") (out o a ao)
@@ -230,7 +242,7 @@
            (declare #.clempo.base:*hot* (type p384-arena out a) (type fixnum o ao))
            (,(name "MUL!") out o a ao *p384-integer-one* 0))
          (declaim (inline ,(name "RAW-HALF!")))
-         ,(let ((words (loop repeat 6 collect (gensym "W"))))
+         ,(let ((words (loop repeat +p384-limbs+ collect (gensym "W"))))
             `(defun ,(name "RAW-HALF!") (out o)
                "Halve a canonical ordinary coefficient modulo this odd modulus."
                (declare #.clempo.base:*hot* (type p384-arena out) (type fixnum o))
@@ -247,8 +259,8 @@
                             (logior (ash ,w -1)
                                     (ash ,(if next `(logand ,next 1) 'carry) 63)))))
                (values)))
-         ,(let ((us (loop repeat 6 collect (gensym "U")))
-                (vs (loop repeat 6 collect (gensym "V"))))
+         ,(let ((us (loop repeat +p384-limbs+ collect (gensym "U")))
+                (vs (loop repeat +p384-limbs+ collect (gensym "V"))))
             (labels ((onep (words)
                        `(and (= ,(first words) 1) (zerop (logior ,@(rest words)))))
                      (ge-words (a b i)
@@ -281,7 +293,7 @@
                        ,@(shift-words us) (,(name "RAW-HALF!") out o))
                      (loop while (evenp ,(first vs)) do
                        ,@(shift-words vs) (,(name "RAW-HALF!") work (+ wo 6)))
-                     (if ,(ge-words us vs 5)
+                     (if ,(ge-words us vs (1- +p384-limbs+))
                          (progn
                            (setf carry 1)
                            ,@(loop for u in us for v in vs collect
@@ -297,21 +309,23 @@
                    (unless ,(onep us) (p384-copy! out o work (+ wo 6))))
                  (,(name "MUL!") out o out o ,(name "R2") 0))))
          ,@(when digest
-             (let ((words (loop repeat 6 collect (gensym "W"))))
+             (let ((words (loop repeat +p384-limbs+ collect (gensym "W"))))
                `((defun ,(name "FROM-DIGEST!") (out o hash48)
                    "Import all 48 big-endian bytes, reducing once modulo N."
                    (declare #.clempo.base:*hot* (type p384-arena out) (type fixnum o)
                             (type (simple-array (unsigned-byte 8) (*)) hash48))
                    (let (,@(loop for word in words for i from 0 collect
-                             `(,word (logior ,@(loop for j below 8 collect
+                             `(,word (logior ,@(loop for j below +p384-limb-bytes+ collect
                                                 `(ash (the (unsigned-byte 64)
-                                                           (aref hash48 ,(+ (* (- 5 i) 8) j)))
-                                                      ,(* (- 7 j) 8))))))
+                                                           (aref hash48 ,(+ (* (- (1- +p384-limbs+) i)
+                                                                               +p384-limb-bytes+)
+                                                                            j)))
+                                                      ,(* (- (1- +p384-limb-bytes+) j) 8))))))
                          (carry 1))
                      (declare (type (unsigned-byte 64) ,@words) (type bit carry))
                      ;; Both moduli are above R/2. For this scalar-only entry,
                      ;; every 384-bit digest is therefore below 2N.
-                     (when ,(ge words 5) ,@(subtract words 'carry))
+                     (when ,(ge words (1- +p384-limbs+)) ,@(subtract words 'carry))
                      ,@(store words))
                    (,(name "MUL!") out o out o ,(name "R2") 0)))))))))
 

@@ -5,6 +5,18 @@
 (defconstant +f12-work-words+ 512)
 (defconstant +f12-pow-work-words+ 656)
 
+(clempo.base:defbound +f6-degree+ 3
+  "Fp2 coefficients of an Fp6 element: Fp6 = Fp2[v]/(v^3 - xi)."
+  ;; DEFINE-EXTENSION-LINEAR F6 36: three Fp2 coefficients of two Fp limb vectors.
+  (= (* +f6-degree+ 2 +fp-limbs+) 36)
+  ;; F6-MUL!'s three products and its result fit below its Fp2 scratch at word 96.
+  (<= (* 2 +f6-degree+ 2 +fp-limbs+) 96))
+(clempo.base:defbound +f12-f2-degree+ 6
+  "Fp2 coefficients of an Fp12 element: Fp12 = Fp6[w]/(w^2 - v)."
+  (= +f12-f2-degree+ (* 2 +f6-degree+))
+  ;; DEFINE-EXTENSION-LINEAR F12 72, and the 72-word stride of each Frobenius power.
+  (= (* +f12-f2-degree+ 2 +fp-limbs+) 72))
+
 (defmacro define-extension-linear (prefix words)
   (let ((copy (intern (format nil "~A-COPY!" prefix)))
         (zero (intern (format nil "~A-ZERO!" prefix)))
@@ -83,7 +95,7 @@
 (defun f6-mul! (out o a ao b bo w wo)
   (declare #.clempo.base:*hot* (type mont-words out a b w) (type fixnum o ao bo wo))
   ;; v0,v1,v2; result; two sums; nested Fp2 scratch. Exact aliases are safe.
-  (dotimes (i 3) (f2-mul! w (+ wo (* i 12)) a (+ ao (* i 12)) b (+ bo (* i 12)) w (+ wo 96)))
+  (dotimes (i +f6-degree+) (f2-mul! w (+ wo (* i 12)) a (+ ao (* i 12)) b (+ bo (* i 12)) w (+ wo 96)))
   (f2-add! w (+ wo 72) a (+ ao 12) a (+ ao 24))
   (f2-add! w (+ wo 84) b (+ bo 12) b (+ bo 24))
   (f2-mul! w (+ wo 36) w (+ wo 72) w (+ wo 84) w (+ wo 96))
@@ -150,7 +162,7 @@
   (f2-mul! w (+ wo 48) a ao w wo w (+ wo 96))
   (f2-add! w (+ wo 36) w (+ wo 36) w (+ wo 48))
   (f2-inv! w (+ wo 36) w (+ wo 36) w (+ wo 96))
-  (dotimes (i 3)
+  (dotimes (i +f6-degree+)
     (f2-mul! out (+ o (* i 12)) w (+ wo (* i 12)) w (+ wo 36) w (+ wo 96))) (values))
 
 (defun f12-mul! (out o a ao b bo w wo)
@@ -227,7 +239,7 @@
   (declare #.clempo.base:*hot* (type mont-words out a w) (type fixnum o ao power wo))
   (let ((base (* (mod power 12) 72)))
     (declare (type fixnum base))
-    (dotimes (i 6)
+    (dotimes (i +f12-f2-degree+)
       (if (oddp power)
           (f2-conjugate! w wo a (+ ao (* i 12)))
           (f2-copy! w wo a (+ ao (* i 12))))

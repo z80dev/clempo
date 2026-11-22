@@ -9,6 +9,12 @@ depends on H or the data; bit 0 of a block is the top bit of its first byte).")
 (deftype u64 () '(unsigned-byte 64))
 (deftype hash-key () '(simple-array (unsigned-byte 64) (2)))
 
+(defbound +word-bytes+ 8
+  "Big-endian bytes in one u64 word; a 16-byte GCM block is two of them."
+  (= (* 8 +word-bytes+) 64)
+  ;; HASH-KEY and the GHASH state hold one block as words.
+  (subtypep 'hash-key `(simple-array (unsigned-byte 64) (,(floor 16 +word-bytes+)))))
+
 (defstruct (gcm (:constructor %make-gcm (cipher h)))
   (cipher nil :read-only t)
   (h nil :type hash-key :read-only t))
@@ -18,11 +24,13 @@ depends on H or the data; bit 0 of a block is the top bit of its first byte).")
   (declare #.*hot* (type octets octets) (type fixnum start))
   (let ((x 0))
     (declare (type u64 x))
-    (dotimes (i 8 x) (setf x (logior (ldb (byte 64 0) (ash x 8)) (aref octets (+ start i)))))))
+    (dotimes (i +word-bytes+ x)
+      (setf x (logior (ldb (byte 64 0) (ash x 8)) (aref octets (+ start i)))))))
 
 (defun store64 (x octets start)
   (declare #.*hot* (type u64 x) (type octets octets) (type fixnum start))
-  (dotimes (i 8) (setf (aref octets (+ start i)) (ldb (byte 8 (- 56 (* 8 i))) x))))
+  (dotimes (i +word-bytes+)
+    (setf (aref octets (+ start i)) (ldb (byte 8 (- (* 8 (1- +word-bytes+)) (* 8 i))) x))))
 
 (defun make-gcm (key)
   "Expand an AES-128 or AES-256 KEY into a GCM context."
@@ -128,9 +136,12 @@ over BMUL64 on the bit-reflected halves, then the GCM reduction, all branch-free
     (store64 (* 8 (- end start)) lens 8)
     (ghash-blocks h state lens 0 16)
     (let ((tag (aes-encrypt-block (gcm-cipher gcm) (counter-block nonce 1))))
-      (dotimes (i 8) (setf (aref tag i) (logxor (aref tag i) (ldb (byte 8 (- 56 (* 8 i))) (aref state 0)))
-                           (aref tag (+ 8 i)) (logxor (aref tag (+ 8 i))
-                                                      (ldb (byte 8 (- 56 (* 8 i))) (aref state 1)))))
+      (dotimes (i +word-bytes+)
+        (setf (aref tag i) (logxor (aref tag i) (ldb (byte 8 (- (* 8 (1- +word-bytes+)) (* 8 i)))
+                                                      (aref state 0)))
+              (aref tag (+ +word-bytes+ i)) (logxor (aref tag (+ +word-bytes+ i))
+                                                    (ldb (byte 8 (- (* 8 (1- +word-bytes+)) (* 8 i)))
+                                                         (aref state 1)))))
       tag)))
 
 (defparameter *empty* (make-octets 0))

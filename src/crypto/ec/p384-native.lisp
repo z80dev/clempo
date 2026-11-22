@@ -3,12 +3,27 @@
 ;;; by one batch inversion, not a common-Z curve isomorphism (a remains -3).
 (in-package #:clempo.p384)
 
+(clempo.base:defbound +p384-point-words+ 18
+  "Words in a Jacobian point: X, Y and Z of one residue each."
+  (= +p384-point-words+ (* 3 +p384-limbs+)))
+(clempo.base:defbound +p384-minus-a+ 3
+  "-a of the curve y^2 = x^3 + a x + b: on-curve checks subtract x this many times."
+  (= (mod (* +p384-gy+ +p384-gy+) +p384-p+)
+     (mod (+ (expt +p384-gx+ 3) (- (* +p384-minus-a+ +p384-gx+)) +p384-b+) +p384-p+)))
+(clempo.base:defbound +p384-y4-doublings+ 3
+  "Doublings taking Y^4 to the 8Y^4 of a=-3 Jacobian doubling: Y3 = M(S - X3) - 8Y^4."
+  (= (ash 1 +p384-y4-doublings+) 8))
+(clempo.base:defbound +p384-joint-streams+ 2
+  "Scalar streams of the joint u1 G + u2 Q ladder."
+  ;; The stream scalars sit at words 36 and 42, before r at 48 (P384-SCRATCH).
+  (<= (+ 36 (* +p384-joint-streams+ +p384-limbs+)) 48))
+
 (defun p384-jzero! (a o)
   (declare #.clempo.base:*hot* (type p384-arena a) (type fixnum o))
   (p384-zero! a o) (pf-one! a (+ o 6)) (p384-zero! a (+ o 12)))
 (defun p384-jcopy! (a o b bo)
   (declare #.clempo.base:*hot* (type p384-arena a b) (type fixnum o bo))
-  (dotimes (i 18) (setf (aref a (+ o i)) (aref b (+ bo i)))) (values))
+  (dotimes (i +p384-point-words+) (setf (aref a (+ o i)) (aref b (+ bo i)))) (values))
 
 (defun p384-jdouble! (out o p po work wo)
   "a=-3 doubling; 48 disjoint workspace words."
@@ -29,7 +44,7 @@
         (pf-sub! work x work x work s) (pf-sub! work x work x work s)
         (pf-sub! work y work s work x) (pf-mul! work y work y work m)
         (pf-square! work t0 work yy)
-        (dotimes (i 3) (pf-add! work t0 work t0 work t0))
+        (dotimes (i +p384-y4-doublings+) (pf-add! work t0 work t0 work t0))
         (pf-sub! work y work y work t0)
         (pf-mul! work z p (+ po 6) p (+ po 12)) (pf-add! work z work z work z)
         (p384-copy! out o work x) (p384-copy! out (+ o 6) work y)
@@ -109,19 +124,22 @@
   "Build affine Q,3Q,... with one inversion. Workspace: 6*count+108 words.
 Q must be finite and on this prime-order curve; table and work are disjoint."
   (declare #.clempo.base:*hot* (type p384-arena table q work) (type fixnum to count qo wo))
-  (let ((twice (+ wo (* 6 count))) (tmp (+ wo (* 6 count) 18)))
+  (let ((twice (+ wo (* 6 count))) (tmp (+ wo (* 6 count) +p384-point-words+)))
     (declare (type fixnum twice tmp))
     (p384-jcopy! table to q qo)
     (p384-jdouble! work twice q qo work tmp)
     (loop for i of-type fixnum from 1 below count do
-      (p384-jadd! table (+ to (* 18 i)) table (+ to (* 18 (1- i))) work twice work tmp))
+      (p384-jadd! table (+ to (* +p384-point-words+ i)) table (+ to (* +p384-point-words+ (1- i)))
+                  work twice work tmp))
     (pf-one! work wo)
     (loop for i of-type fixnum from 1 below count do
-      (pf-mul! work (+ wo (* 6 i)) work (+ wo (* 6 (1- i))) table (+ to (* 18 (1- i)) 12)))
-    (pf-mul! work tmp work (+ wo (* 6 (1- count))) table (+ to (* 18 (1- count)) 12))
+      (pf-mul! work (+ wo (* 6 i)) work (+ wo (* 6 (1- i)))
+               table (+ to (* +p384-point-words+ (1- i)) 12)))
+    (pf-mul! work tmp work (+ wo (* 6 (1- count)))
+             table (+ to (* +p384-point-words+ (1- count)) 12))
     (pf-inv! work twice work tmp work (+ tmp 6))
     (loop for i of-type fixnum downfrom (1- count) to 0
-          for p of-type fixnum = (+ to (* 18 i)) do
+          for p of-type fixnum = (+ to (* +p384-point-words+ i)) do
       (pf-mul! work tmp work twice work (+ wo (* 6 i)))
       (pf-mul! work twice work twice table (+ p 12))
       (pf-square! work (+ tmp 6) work tmp)
@@ -138,7 +156,7 @@ Q must be finite and on this prime-order curve; table and work are disjoint."
     (pf-one! a 12) (pf-from-integer! a 18 +p384-b+)
     (pf-from-integer! a 24 +p384-n+) a))
 (defparameter *p384-generator-table*
-  (let ((table (make-array (* 18 +p384-generator-count+)
+  (let ((table (make-array (* +p384-point-words+ +p384-generator-count+)
                            :element-type '(unsigned-byte 64) :initial-element 0))
         (work (make-array (+ (* 6 +p384-generator-count+) 108)
                           :element-type '(unsigned-byte 64) :initial-element 0)))
@@ -147,7 +165,7 @@ Q must be finite and on this prime-order curve; table and work are disjoint."
 (defun p384-affine-on-curve-p (p po work wo)
   (declare #.clempo.base:*hot* (type p384-arena p work) (type fixnum po wo))
   (pf-square! work wo p po) (pf-mul! work wo work wo p po)
-  (dotimes (i 3) (pf-sub! work wo work wo p po))
+  (dotimes (i +p384-minus-a+) (pf-sub! work wo work wo p po))
   (pf-add! work wo work wo *p384-constants* 18)
   (pf-square! work (+ wo 6) p (+ po 6))
   (p384-equal-p work wo work (+ wo 6)))
@@ -207,10 +225,10 @@ Q must be finite and on this prime-order curve; table and work are disjoint."
     (p384-jzero! a 18)
     (loop for bit of-type fixnum downfrom (1- length) to 0 do
       (p384-jdouble! a 18 a 18 a 216)
-      (dotimes (stream 2)
+      (dotimes (stream +p384-joint-streams+)
         (let* ((digit (if (zerop stream) (aref gd bit) (aref qd bit)))
                (table (if (zerop stream) *p384-generator-table* a))
-               (offset (+ (if (zerop stream) 0 72) (* 18 (ash (abs digit) -1)))))
+               (offset (+ (if (zerop stream) 0 72) (* +p384-point-words+ (ash (abs digit) -1)))))
           (declare (type fixnum digit offset) (type p384-arena table))
           (unless (zerop digit)
             (p384-jcopy! a 54 table offset)
