@@ -23,7 +23,7 @@ The six R3p differences are T14 keychain grants where clempo follows a newer ref
 
 ## Why Lisp
 
-The bet was that a node in Lisp could be smaller and easier to keep in step with a fast-moving protocol, without being slower. The evidence so far:
+The bet was that a node in Lisp could be smaller and easier to keep in step with a fast-moving protocol, without being slower. The evidence so far is below; [docs/WHY-LISP.md](docs/WHY-LISP.md) works through each point beside the Rust reference and goempo.
 
 **Protocol declarations generate code and documentation.** `scripts/metrics.sh` reports current source size; lines of code are not a measure of protocol coverage.
 
@@ -58,16 +58,89 @@ The bet was that a node in Lisp could be smaller and easier to keep in step with
 (read (token-transfer-policy-id token)) ; one SLOAD, then the field is extracted
 ```
 
-**Divergences stop in a condition you can resume from.** A block that disagrees with mainnet signals `block-mismatch` with restarts: `retry-block` (after recompiling the fix into the running image, so the warm state survives), `heal-from-reference` (apply the reference's state diff and continue), `skip-block`, `abort-replay`. The heal restart let a survey run ahead of the clean replay and classify every class of divergence before the replay reached it.
+An opcode is one form. The interpreter splices every body into one `case` that SBCL compiles to a jump table, and the optional EVM compiler splices the same bodies into compiled bytecode, so the two engines cannot disagree about what an opcode means:
+
+```lisp
+;; src/evm/ops.lisp
+(defop #x01 add (a b) (:gas 3 :pushes 1) (push-word (u+ a b)))
+(defop #x09 mulmod (a b n) (:gas 8 :pushes 1) (push-word (mul-mod a b n)))
+(defop #x5f push0 () (:gas 2 :pushes 1 :since :shanghai) (push-word 0))
+```
+
+A precompile method is one form too: `defcall` parses the Solidity signature, checks it against the parameter list at compile time, and registers the selector, ABI types, static-call check and fork window with the dispatcher.
+
+```lisp
+;; src/tempo/precompiles/tip20.lisp
+(defcall tip20-token transfer* ((to address) (amount u256))
+    (:sol "transfer(address to, uint256 amount)" :returns "bool" :mutates t)
+  (transfer self sender to amount))
+(defcall tip20-token logo-uri* () (:sol "logoURI()" :returns "string" :since :t5) (logo-uri self))
+```
+
+A fork gate records where it is. `fork-if` and its relatives register their source position when the file loads; `spec/forks/t3.md` lists this one:
+
+```lisp
+;; src/tempo/precompiles/address-registry.lisp
+(defun resolve-recipient (to)
+  (fork-if (:before :t3) (return-from resolve-recipient to))
+  (if (virtual-address-p to)
+      (or (get-master (master-id to)) (revert 'virtual-address-unregistered))
+      to))
+```
+
+**Divergences stop in a condition you can resume from.** A block that disagrees with mainnet signals `block-mismatch` with restarts: `retry-block` (after recompiling the fix into the running image, so the warm state survives), `heal-from-reference` (apply the reference's state diff and continue), `skip-block`, `abort-replay`. The heal restart let a survey run ahead of the clean replay and classify every class of divergence before the replay reached it. The replay loop offers the restarts; its caller picks one before anything unwinds, or leaves the choice to the debugger:
+
+```lisp
+;; src/tempo/executor/replay.lisp (abridged)
+(restart-case (progn (run block) (incf n))
+  (retry-block () (undo))
+  (heal-from-reference () (undo) (funcall heal-fn db n block) ... (commit block) (incf n))
+  (skip-block () ... (commit block) (incf n))
+  (abort-replay (&optional condition) (undo) ... (loop-finish)))
+
+;; src/dev/replay.lisp (abridged): the -heal and -skip flags become a policy
+(handler-bind ((error (lambda (c)
+                        (cond ((and (< heals heal) (find-restart 'heal-from-reference c))
+                               (incf heals) (invoke-restart 'heal-from-reference))
+                              ((and (typep c 'block-mismatch) (< skips skip))
+                               (incf skips) (invoke-restart 'skip-block))
+                              (t (invoke-restart 'abort-replay c))))))
+  (replay-blocks db from to ...))
+```
 
 **Native code where it counts, still written in Lisp.**
 - Keccak-f and SHA-256 use the arm64 crypto instructions through SBCL's `define-vop`, with portable Lisp as the fallback: 799 MB/s and 2.7 GB/s.
 - secp256k1, P-256, P-384 and BLS12-381 run on typed limb arithmetic that allocates nothing per call. ecrecover takes 45 µs and a BLS signature check 2.7 ms.
 - The optional EVM compiler translates bytecode into Lisp and uses SBCL's own `compile`; the interpreter is also measured and tested independently.
 
-**Context lives in special variables.** The executor, the RPC threads, the tests and the simulator rebind `*world*`, `*spec*`, `*storage*`, `*tracer*`, `*clock*` and `*entropy*`. The simulator is deterministic because the consensus code takes its clock and randomness from `*clock*` and `*entropy*`, and `scripts/check-layers.lisp` forbids any other route in the non-IO layers.
+**Context lives in special variables.** The executor, the RPC threads, the tests and the simulator rebind `*world*`, `*spec*`, `*storage*`, `*tracer*`, `*clock*` and `*entropy*`. The simulator is deterministic because the consensus code takes its clock and randomness from `*clock*` and `*entropy*`, and `scripts/check-layers.lisp` forbids any other route in the non-IO layers. Nothing between the simulator and the consensus code takes a clock parameter:
+
+```lisp
+;; src/sim/run.lisp (abridged)
+(let* (...
+       (io:*entropy* (io:make-seeded-entropy (getf config :seed))))
+  (multiple-value-bind (clock handle) (io:make-manual-clock 0)
+    (let* ((io:*clock* clock)
+           (sim (make-simulation config))
+           ...
+           (status (run-loop sim handle target max-ms)))
+      (sim-result sim status))))
+```
 
 **Limits are proven when compiled; locks and threads are audited when tested.** `defbound` names a fixed limit with the relations that make it safe, checked by the compiler as Go's `const _ = uint(a - b)` is: the EVM's stack, call depth and 4 GiB memory limit (its quadratic cost stays a fixnum), RLP and JSON nesting depths, store key and footer sizes, the HTTP line buffer, and the limb, lane and round counts of the field and hash code. A false proof fails the build, and the gate refuses a fixed-count loop in hot code whose count is not such a limit. Every mutex is taken through `clempo.lock`, which in check builds records the order locks are taken in and signals on a cycle, as Linux's lockdep does; the test harness fails a test that records one, or that leaves a thread running, as goleak does.
+
+The 4 GiB memory limit and its proofs:
+
+```lisp
+;; src/evm/frame.lisp (abridged)
+(defbound +max-memory+ (ash 1 32)
+  "Memory beyond 4 GiB is out of gas for any reachable gas limit."
+  ;; MEMORY-COST squares the word count in fixnum arithmetic.
+  (typep (* (ceiling +max-memory+ 32) (ceiling +max-memory+ 32)) 'fixnum)
+  ;; GROW-MEMORY at most doubles a buffer of this size.
+  (typep (* 2 +max-memory+) 'fixnum)
+  ...)
+```
 
 **Shared state declares its guard.** In the layers that run threads (rpc, store, sync, node, validator, p2p), a structure or class that holds a mutex or is mutated under one is defined with `clempo.guard`, and every slot names its guard, as Clang's `GUARDED_BY` does: a lock in the same object or elsewhere, writes-only locking for whole values published to lock-free readers, one owning thread, immutable after construction, compare-and-swap only, or an exemption that states its reason. In check builds every accessor checks its guard, and the test harness fails a test in which any access broke one. A global variable mutated at run time is declared with `defshared`, and the gate checks that each mutation sits inside its lock. This is not Go's `-race`. The race detector watches every memory access in a run and reports any two unordered accesses, annotated or not. The guards check only declared state, and only against its declaration. A structure that neither holds a mutex nor is mutated under one is not inventoried, and neither is a variable captured by closures, an object reached through a guarded slot and changed after the lock is released, or state in the layers outside that list (the EVM's caches among them). A `:lock-writes` read, an exemption, or a path the tests never run is not checked. In return, a broken guard is found on every run that performs the access, not only on runs whose threads happen to interleave badly.
 
