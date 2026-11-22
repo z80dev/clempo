@@ -439,7 +439,7 @@ LIVE-ACCOUNT as accounts are created; backed, only the unflushed accounts are lo
     (if (db-backing db)
         (loop for address being the hash-keys of (unflushed-addresses db)
               when (= key (octets->integer (keccak256 (integer->octets address 20)))) return address)
-        (sb-thread:with-mutex ((db-proof-lock db))
+        (clempo.lock:with-lock ((db-proof-lock db))
           (gethash key (or (db-preimages db)
                            (let ((index (make-hash-table :size (max 16 (hash-table-count (db-accounts db))))))
                              (loop for address being the hash-keys of (db-accounts db)
@@ -495,7 +495,7 @@ holds unchanged opens from the storage root in its account leaf."
   "Keep DB's preimage index, once built, covering ADDRESS."
   (let ((index (db-preimages db)))
     (when index
-      (sb-thread:with-mutex ((db-proof-lock db))
+      (clempo.lock:with-lock ((db-proof-lock db))
         (setf (gethash (octets->integer (keccak256 (integer->octets address 20))) index) address)))))
 
 (defun live-account (db address)

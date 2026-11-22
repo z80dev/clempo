@@ -4,7 +4,7 @@ These measurements are revision-specific. Paths under `logs/` describe local art
 
 | Rung | Score | Commit | Date |
 |---|---|---|---|
-| R0 Gate | yes: `scripts/verify.sh` (cold strict compile of every layer, 825 tests passed, 0 failed, 0 skipped, incl. the precompile oracle; fixed-seed fuzzing of every target; layer and determinism check; spec/ drift check) | `37db9c6` + path/label cleanup | 2026-11-21 |
+| R0 Gate | yes: `scripts/verify.sh` (cold strict compile of every layer with its compile-time bound proofs, 849 tests passed, 0 failed, 0 skipped, incl. the precompile oracle, each audited for leaked threads and, in the check build, lock-order cycles; fixed-seed fuzzing of every target; layer and determinism check, incl. bound citations in hot fixed-count loops and locks through `clempo.lock`; spec/ drift check) | `e918873` series | 2026-11-21 |
 | R1 Decode | mainnet 640/640 (T0..T13), moderato 33/33; full archive 50,050,000/50,050,000 blocks (35,979,413 txs) re-encoded and checked against eth_getBlockByNumber, 0 failures | 1edd52f, 4e28f4d | 2026-11-21 |
 | R2 Genesis | yes: matching state roots and block hashes on mainnet and Moderato | `ec20b6b` | 2026-11-21 |
 | R3 Replay | **50,049,999** (the archive tip; goempo's frontier 49,399,999): every mainnet block executed from genesis matches gas used, receipts root, logs bloom and state root. The disk-backed Linux replay reached the same height with no heals or skips. | `6354034` (disk-backed), `d1d277e` (earlier replay), `0fad06f` | 2026-11-21 |
