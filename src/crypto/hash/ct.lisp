@@ -12,7 +12,8 @@
 (defpackage #:clempo.ct
   (:use #:cl)
   (:export #:with-data-independent-timing #:words #:make-words
-           #:+digits+ #:digits #:make-digits #:recode-odd! #:bit-mask #:equal-mask #:nonzero-bit
+           #:+digits+ #:+window-bits+ #:+window-entries+ #:+scalar-words+
+           #:digits #:make-digits #:recode-odd! #:bit-mask #:equal-mask #:nonzero-bit
            #:words-from-octets! #:words-to-octets! #:wipe #:with-wiped
            #:hex-to-octets #:octets-to-hex
            #:define-ct-field #:define-ct-quadratic-field #:define-ct-curve))
@@ -74,6 +75,15 @@ CPU has FEAT_DIT; a no-op elsewhere), restoring the previous mode afterwards."
 (deftype word () '(unsigned-byte 64))
 (deftype words () '(simple-array (unsigned-byte 64) (*)))
 
+(clempo.base:defbound +word-octets+ 8
+  "Octets in a word."
+  (= (* 8 +word-octets+) 64))
+
+(clempo.base:defbound +scalar-words+ 4
+  "Words in a 256-bit scalar of 32 octets, or in a group order below 2^256."
+  (= (* +scalar-words+ +word-octets+) 32)
+  (>= (* 64 +scalar-words+) 256))
+
 (defun make-words (n)
   (make-array n :element-type '(unsigned-byte 64) :initial-element 0))
 
@@ -111,10 +121,10 @@ CPU has FEAT_DIT; a no-op elsewhere), restoring the previous mode afterwards."
   (dotimes (i n)
     (let ((w 0))
       (declare (type word w))
-      (dotimes (j 8)
+      (dotimes (j +word-octets+)
         (let ((byte (if little-endian
-                        (aref octets (+ start (* 8 i) j))
-                        (aref octets (+ start (* 8 (- n 1 i)) (- 7 j))))))
+                        (aref octets (+ start (* +word-octets+ i) j))
+                        (aref octets (+ start (* +word-octets+ (- n 1 i)) (- (1- +word-octets+) j))))))
           (setf w (logior w (ash byte (* 8 j))))))
       (setf (aref out (+ o i)) w)))
   (values))
@@ -124,10 +134,10 @@ CPU has FEAT_DIT; a no-op elsewhere), restoring the previous mode afterwards."
            (type fixnum ao n start))
   (dotimes (i n)
     (let ((w (aref a (+ ao i))))
-      (dotimes (j 8)
+      (dotimes (j +word-octets+)
         (setf (aref octets (if little-endian
-                               (+ start (* 8 i) j)
-                               (+ start (* 8 (- n 1 i)) (- 7 j))))
+                               (+ start (* +word-octets+ i) j)
+                               (+ start (* +word-octets+ (- n 1 i)) (- (1- +word-octets+) j))))
               (ldb (byte 8 (* 8 j)) w)))))
   (values))
 
@@ -486,11 +496,27 @@ operations DEFINE-CT-FIELD defines (no LESS-BIT or word import)."
                 (* t2 cb3 t2) (* x3 t2 z3) (+ y3 t0 t2) (* z3 t1 z3) (+ t1 t2 t2) (+ t2 t1 t2)
                 (- t0 t0 t2) (* y3 t0 y3) (+ y3 x3 y3) (* t1 x1 y1) (* x3 t0 t1) (+ x3 x3 x3))))))
 
-(eval-when (:compile-toplevel :load-toplevel :execute)
-  (defconstant +digits+ 65
-    "Signed odd base-16 digits of a scalar below 2^257."))
+(clempo.base:defbound +window-bits+ 4
+  "Bits per signed odd digit: base 16. A window shifts within two adjacent words."
+  (zerop (mod 256 +window-bits+))
+  (< 0 +window-bits+ 64))
 
-(deftype digits () '(simple-array (signed-byte 8) (65)))
+(clempo.base:defbound +window-entries+ 8
+  "Table entries per window: the odd multiples 1, 3, ..., 2^+WINDOW-BITS+ - 1."
+  (= (* 2 +window-entries+) (ash 1 +window-bits+)))
+
+(clempo.base:defbound +digits+ 65
+  "Signed odd base-16 digits of a scalar below 2^257: one per window of 256 bits, and
+one more for the bit the recoding's addition of the order carries out."
+  (= +digits+ (1+ (/ 256 +window-bits+)))
+  (typep (- 1 (ash 1 +window-bits+)) '(signed-byte 8)))
+
+(clempo.base:defbound +recoding-words+ 5
+  "Words of k' = k + ORDER < 2^257 while recoding: a scalar's words and one for the carry."
+  (= +recoding-words+ (1+ +scalar-words+))
+  (>= (* 64 +recoding-words+) 257))
+
+(deftype digits () `(simple-array (signed-byte 8) (,+digits+)))
 (declaim (inline make-digits))
 (defun make-digits () (make-array +digits+ :element-type '(signed-byte 8) :initial-element 0))
 
@@ -503,15 +529,15 @@ odd (Joye and Tunstall's regular recoding), with masks in place of branches."
   (declare #.clempo.base:*hot* (type digits digits) (type clempo.base:octets scalar)
            (type words order))
   (assert (= (length scalar) 32))
-  (let ((k (make-words 5)))
+  (let ((k (make-words +recoding-words+)))
     (declare (dynamic-extent k))
-    (words-from-octets! k 0 4 scalar 0)
+    (words-from-octets! k 0 +scalar-words+ scalar 0)
     (let ((mask (bit-mask (logxor 1 (logand (aref k 0) 1)))) (carry 0))
       (declare (type word mask) (type bit carry))
-      (dotimes (i 4)
+      (dotimes (i +scalar-words+)
         (setf (values (aref k i) carry)
               (clempo.ec.word:add-with-carry (aref k i) (logand mask (aref order i)) carry)))
-      (setf (aref k 4) carry))
+      (setf (aref k +scalar-words+) carry))
     (dotimes (i (1- +digits+))
       (let* ((low (logand (aref k 0) 31))
              (adjust (ldb (byte 64 0) (- 16 low)))
@@ -521,11 +547,11 @@ odd (Joye and Tunstall's regular recoding), with masks in place of branches."
         (setf (aref digits i) (- low 16))
         ;; k' - d = k' + (16 - low), sign-extended across the words, then / 16.
         (setf (values (aref k 0) carry) (clempo.ec.word:add-with-carry (aref k 0) adjust 0))
-        (loop for j from 1 below 5 do
+        (loop for j from 1 below +recoding-words+ do
           (setf (values (aref k j) carry) (clempo.ec.word:add-with-carry (aref k j) extend carry)))
-        (dotimes (j 4)
+        (dotimes (j (1- +recoding-words+))
           (setf (aref k j) (logior (ash (aref k j) -4) (ldb (byte 64 0) (ash (aref k (1+ j)) 60)))))
-        (setf (aref k 4) (ash (aref k 4) -4))))
+        (setf (aref k (1- +recoding-words+)) (ash (aref k (1- +recoding-words+)) -4))))
     (setf (aref digits (1- +digits+)) (aref k 0))
     digits))
 
@@ -571,8 +597,8 @@ ORDER is the odd order of the points multiplied (RECODE-ODD!)."
       `(progn
          (declaim (type words ,constants ,order-words))
          (defparameter ,order-words
-           (let ((w (make-words 4)))
-             (dotimes (i 4 w) (setf (aref w i) (ldb (byte 64 (* 64 i)) ,order)))))
+           (let ((w (make-words +scalar-words+)))
+             (dotimes (i +scalar-words+ w) (setf (aref w i) (ldb (byte 64 (* 64 i)) ,order)))))
          (defparameter ,constants
            (let ((c (make-words ,(* 3 width))))
              (,(funcall f "FROM-INTEGER!") c 0 ',a)
@@ -611,7 +637,7 @@ ORDER is the odd order of the points multiplied (RECODE-ODD!)."
                   (magnitude (+ (logxor digit (- sign)) sign))
                   (y (make-words ,width)))
              (declare (type bit sign) (type (integer 0 15) magnitude) (dynamic-extent y))
-             (,(funcall name "SELECT!") out o table to 8 (ash magnitude -1))
+             (,(funcall name "SELECT!") out o table to +window-entries+ (ash magnitude -1))
              (,(funcall f "NEG!") y 0 out (+ o ,width))
              (,(funcall f "CMOV!") out (+ o ,width) y 0 sign))
            (values))
@@ -621,34 +647,35 @@ ORDER is the odd order of the points multiplied (RECODE-ODD!)."
 entry that is never the identity."
            (declare #.clempo.base:*hot* (type words out p) (type fixnum o po)
                     (type clempo.base:octets scalar))
-           (let ((table (make-words ,(* 8 point))) (acc (make-words ,point))
+           (let ((table (make-words ,(* +window-entries+ point))) (acc (make-words ,point))
                  (entry (make-words ,point)) (digits (make-digits)))
              (declare (dynamic-extent table acc entry digits))
              (recode-odd! digits scalar ,order-words)
              (dotimes (i ,point) (setf (aref table i) (aref p (+ po i))))
              (,(funcall name "DOUBLE!") entry 0 p po)
-             (loop for k from 1 below 8 do
+             (loop for k from 1 below +window-entries+ do
                (,(funcall name "ADD!") table (* k ,point) table (* (1- k) ,point) entry 0))
              (,(funcall name "SIGNED-ENTRY!") acc 0 table 0 (aref digits ,(1- +digits+)))
              (loop for i from ,(- +digits+ 2) downto 0 do
-               (dotimes (j 4) (,(funcall name "DOUBLE!") acc 0 acc 0))
+               (dotimes (j +window-bits+) (,(funcall name "DOUBLE!") acc 0 acc 0))
                (,(funcall name "SIGNED-ENTRY!") entry 0 table 0 (aref digits i))
                (,(funcall name "ADD!") acc 0 acc 0 entry 0))
              (dotimes (i ,point) (setf (aref out (+ o i)) (aref acc i))))
            (values))
          (defun ,(funcall name "BUILD-COMB") (x y)
-           "Row i < +DIGITS+ holds (2j+1)*16^i*(X,Y) for j < 8, from public affine integers."
-           (let ((table (make-words (* +digits+ 8 ,point)))
+           "Row i < +DIGITS+ holds (2j+1)*16^i*(X,Y) for j < +WINDOW-ENTRIES+, from public
+affine integers."
+           (let ((table (make-words (* +digits+ +window-entries+ ,point)))
                  (base (make-words ,point)) (twice (make-words ,point)))
              (,(funcall name "FROM-AFFINE-INTEGERS!") base 0 x y)
              (dotimes (i +digits+ table)
-               (let ((row (* i 8 ,point)))
+               (let ((row (* i +window-entries+ ,point)))
                  (dotimes (k ,point) (setf (aref table (+ row k)) (aref base k)))
                  (,(funcall name "DOUBLE!") twice 0 base 0)
-                 (loop for j from 1 below 8 do
+                 (loop for j from 1 below +window-entries+ do
                    (,(funcall name "ADD!") table (+ row (* j ,point)) table (+ row (* (1- j) ,point)) twice 0))
                  ;; 16 * base = 15 * base + base.
-                 (,(funcall name "ADD!") base 0 table (+ row (* 7 ,point)) base 0)))))
+                 (,(funcall name "ADD!") base 0 table (+ row (* (1- +window-entries+) ,point)) base 0)))))
          (defun ,(funcall name "MUL-COMB!") (out o table scalar)
            "OUT := SCALAR*G for a comb TABLE of G and 32 big-endian SCALAR octets: one
 masked, never-identity entry per signed odd digit and no doublings."
@@ -659,7 +686,7 @@ masked, never-identity entry per signed odd digit and no doublings."
              (recode-odd! digits scalar ,order-words)
              (,(funcall name "SIGNED-ENTRY!") acc 0 table 0 (aref digits 0))
              (loop for i from 1 below +digits+ do
-               (,(funcall name "SIGNED-ENTRY!") entry 0 table (* i 8 ,point) (aref digits i))
+               (,(funcall name "SIGNED-ENTRY!") entry 0 table (* i +window-entries+ ,point) (aref digits i))
                (,(funcall name "ADD!") acc 0 acc 0 entry 0))
              (dotimes (i ,point) (setf (aref out (+ o i)) (aref acc i))))
            (values))

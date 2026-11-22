@@ -1,16 +1,28 @@
 (defpackage #:clempo.field25519
   (:use #:cl #:clempo.base)
-  (:export #:+p+ #:+zero+ #:+one+ #:field #:from-integer #:to-integer #:f+ #:f- #:f* #:sq
+  (:export #:+p+ #:+limbs+ #:+zero+ #:+one+ #:field #:from-integer #:to-integer #:f+ #:f- #:f* #:sq
            #:inverse #:pow2523 #:integer-le #:octets-le #:clamped-octets))
 (in-package #:clempo.field25519)
 
 (defconstant +p+ (- (ash 1 255) 19))
-(defconstant +limb-mask+ (1- (ash 1 51)))
-(deftype field () '(simple-array (unsigned-byte 64) (5)))
+(defconstant +limb-bits+ 51)
+(defconstant +limb-mask+ (1- (ash 1 +limb-bits+)))
+
+(defbound +limbs+ 5
+  "Radix 2^51 limbs of a field element."
+  (>= (* +limbs+ +limb-bits+) (integer-length +p+))
+  ;; 2^255 = 19 (mod p): a product's limbs i+j >= +LIMBS+ fold back scaled by 19.
+  (= (mod (ash 1 (* +limbs+ +limb-bits+)) +p+) 19)
+  ;; A doubled, 19-scaled limb is one multiplicand word, and a product coefficient (at
+  ;; most +LIMBS+ such terms) fits the two-word accumulator.
+  (< (* 2 19 (ash 1 +limb-bits+)) (ash 1 64))
+  (< (* +limbs+ 2 19 (ash 1 (* 2 +limb-bits+))) (ash 1 128)))
+
+(deftype field () `(simple-array (unsigned-byte 64) (,+limbs+)))
 
 (defun from-integer (x)
-  (let ((a (make-array 5 :element-type '(unsigned-byte 64))))
-    (dotimes (i 5 a) (setf (aref a i) (ldb (byte 51 (* i 51)) x)))))
+  (let ((a (make-array +limbs+ :element-type '(unsigned-byte 64))))
+    (dotimes (i +limbs+ a) (setf (aref a i) (ldb (byte +limb-bits+ (* i +limb-bits+)) x)))))
 
 (defparameter +zero+ (from-integer 0))
 (defparameter +one+ (from-integer 1))
@@ -22,9 +34,9 @@
     (if (>= x +p+) (- x +p+) x)))
 
 (eval-when (:compile-toplevel :load-toplevel :execute)
-  (defun limb-vars () (loop repeat 5 collect (gensym "LIMB")))
+  (defun limb-vars () (loop repeat +limbs+ collect (gensym "LIMB")))
   (defun limb-load (vars a)
-    (loop for x in vars for i below 5 collect `(,x (the (unsigned-byte 51) (aref ,a ,i)))))
+    (loop for x in vars for i below +limbs+ collect `(,x (the (unsigned-byte 51) (aref ,a ,i)))))
   (defun normalize-forms (vars)
     (destructuring-bind (a b c d e) vars
       (declare (ignore b c d))
@@ -35,15 +47,15 @@
                         `((setf ,a (ldb (byte 64 0) (+ ,a (* 19 (ash ,e -51))))
                                 ,e (logand +limb-mask+ ,e))))))))
   (defun store-limbs (vars)
-    `(let ((out (make-array 5 :element-type '(unsigned-byte 64))))
-       ,@(loop for x in vars for i below 5 collect `(setf (aref out ,i) ,x))
+    `(let ((out (make-array ,+limbs+ :element-type '(unsigned-byte 64))))
+       ,@(loop for x in vars for i below +limbs+ collect `(setf (aref out ,i) ,x))
        out)))
 
 (defmacro define-linear (name subtract)
   (let ((r (limb-vars)))
     `(defun ,name (a b)
        (declare #.clempo.base:*hot* (type field a b))
-       (let (,@(loop for x in r for i below 5 collect
+       (let (,@(loop for x in r for i below +limbs+ collect
                      `(,x ,(if subtract
                                `(- (+ (the (unsigned-byte 51) (aref a ,i))
                                       ,(* 2 (- +limb-mask+ (if (zerop i) 18 0))))
@@ -66,10 +78,10 @@
        (let (,@(limb-load xs 'a) ,@(unless square (limb-load ys 'b))
              ,@(loop for x in r collect `(,x 0)) (carry 0))
          (declare (type (unsigned-byte 64) ,@xs ,@(unless square ys) ,@r carry))
-         ,@(loop for k below 5 for out in r collect
+         ,@(loop for k below +limbs+ for out in r collect
                  `(let ((lo carry) (hi 0))
                     (declare (type (unsigned-byte 64) lo hi))
-                    ,@(loop for i below 5 for j = (mod (- k i) 5)
+                    ,@(loop for i below +limbs+ for j = (mod (- k i) +limbs+)
                             unless (and square (> i j)) collect
                             (let ((x (nth i xs)) (y (nth j (if square xs ys)))
                                   (scale (* (if (> (+ i j) k) 19 1) (if (and square (/= i j)) 2 1))))

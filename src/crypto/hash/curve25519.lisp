@@ -12,11 +12,11 @@
   "A and B, exchanged when SWAP is 1, as fresh field elements. SWAP crosses the call as
 a bit: an all-ones mask word would be boxed, and that allocation is visible in timing."
   (declare #.clempo.base:*hot* (type field a b) (type bit swap))
-  (let ((x (make-array 5 :element-type '(unsigned-byte 64)))
-        (y (make-array 5 :element-type '(unsigned-byte 64)))
+  (let ((x (make-array +limbs+ :element-type '(unsigned-byte 64)))
+        (y (make-array +limbs+ :element-type '(unsigned-byte 64)))
         (mask (clempo.ct:bit-mask swap)))
     (declare (type (unsigned-byte 64) mask))
-    (dotimes (i 5 (values x y))
+    (dotimes (i +limbs+ (values x y))
       (let ((d (logand mask (logxor (aref a i) (aref b i)))))
         (setf (aref x i) (logxor (aref a i) d) (aref y i) (logxor (aref b i) d))))))
 
@@ -127,48 +127,49 @@ The Montgomery ladder swaps with masks, so no branch or index depends on SECRET.
   ;; A comb of odd multiples, (2j+1)*16^i*B for i < 65 and j < 8: fixed-base
   ;; multiplication has no doublings, and with signed odd digits (CLEMPO.CT:RECODE-ODD!)
   ;; no entry it reads is the identity.
-  (let ((table (make-array (list clempo.ct:+digits+ 8))) (base *base*)
-        (points (make-array 8)) (products (make-array 8)))
+  (let ((table (make-array (list clempo.ct:+digits+ clempo.ct:+window-entries+))) (base *base*)
+        (points (make-array clempo.ct:+window-entries+))
+        (products (make-array clempo.ct:+window-entries+)))
     (dotimes (i clempo.ct:+digits+ table)
       (let ((twice (cache (double-point base))) (p base) (product +one+))
-        (dotimes (j 8)
+        (dotimes (j clempo.ct:+window-entries+)
           (setf (aref points j) p (aref products j) product)
           (setf product (f* product (point-z p)) p (add p twice nil)))
         ;; One inversion per row; the backwards sweep recovers each Z^-1.
         (let ((inv (inverse product)))
-          (loop for j from 7 downto 0 for q = (aref points j) do
+          (loop for j from (1- clempo.ct:+window-entries+) downto 0 for q = (aref points j) do
             (setf (aref table i j) (cache (to-affine q (f* inv (aref products j))))
                   inv (f* inv (point-z q))))))
-      (dotimes (j 4) (setf base (double-point base))))))
+      (dotimes (j clempo.ct:+window-bits+) (setf base (double-point base))))))
 
 (defparameter *fixed-base* (base-multiples))
 
 (defparameter *order-words*
-  (let ((w (clempo.ct:make-words 4)))
-    (dotimes (i 4 w) (setf (aref w i) (ldb (byte 64 (* 64 i)) +order+)))))
+  (let ((w (clempo.ct:make-words clempo.ct:+scalar-words+)))
+    (dotimes (i clempo.ct:+scalar-words+ w) (setf (aref w i) (ldb (byte 64 (* 64 i)) +order+)))))
 
 (defun select-base (row digit)
-  "DIGIT*16^ROW*B for an odd DIGIT in [-15, 15]: all eight entries of ROW read under
-masks, then a masked negation (swap y-x with y+x, negate 2dxy)."
+  "DIGIT*16^ROW*B for an odd DIGIT in [-15, 15]: all +WINDOW-ENTRIES+ entries of ROW read
+under masks, then a masked negation (swap y-x with y+x, negate 2dxy)."
   (declare #.clempo.base:*hot* (type (integer 0 64) row) (type (integer -15 15) digit))
   (let* ((sign (logand 1 (ash digit -63)))
          (index (ash (+ (logxor digit (- sign)) sign) -1))
          (negate (clempo.ct:bit-mask sign))
-         (ymx (make-array 5 :element-type '(unsigned-byte 64) :initial-element 0))
-         (ypx (make-array 5 :element-type '(unsigned-byte 64) :initial-element 0))
-         (z (make-array 5 :element-type '(unsigned-byte 64) :initial-element 0))
-         (dxy (make-array 5 :element-type '(unsigned-byte 64) :initial-element 0)))
+         (ymx (make-array +limbs+ :element-type '(unsigned-byte 64) :initial-element 0))
+         (ypx (make-array +limbs+ :element-type '(unsigned-byte 64) :initial-element 0))
+         (z (make-array +limbs+ :element-type '(unsigned-byte 64) :initial-element 0))
+         (dxy (make-array +limbs+ :element-type '(unsigned-byte 64) :initial-element 0)))
     (declare (type bit sign) (type (integer 0 7) index) (type (unsigned-byte 64) negate))
-    (dotimes (j 8)
+    (dotimes (j clempo.ct:+window-entries+)
       (let ((mask (clempo.ct:equal-mask j index)) (entry (aref *fixed-base* row j)))
         (declare (type cached entry) (type (unsigned-byte 64) mask))
         (macrolet ((take (out accessor)
                      `(let ((from (,accessor entry)))
-                        (dotimes (i 5)
+                        (dotimes (i +limbs+)
                           (setf (aref ,out i) (logior (aref ,out i) (logand mask (aref from i))))))))
           (take ymx cached-ymx) (take ypx cached-ypx) (take z cached-z) (take dxy cached-dxy))))
     (let ((minus (f- +zero+ dxy)))
-      (dotimes (i 5)
+      (dotimes (i +limbs+)
         (let ((d (logand negate (logxor (aref ymx i) (aref ypx i)))))
           (setf (aref ymx i) (logxor (aref ymx i) d) (aref ypx i) (logxor (aref ypx i) d)
                 (aref dxy i) (logior (logand negate (aref minus i)) (logandc1 negate (aref dxy i)))))))

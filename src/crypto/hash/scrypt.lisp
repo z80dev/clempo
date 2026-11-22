@@ -23,8 +23,17 @@
 
 (deftype words () '(simple-array (unsigned-byte 32) (*)))
 
+(defbound +block-words+ 16
+  "Words of a 64-octet Salsa20 block; scrypt's 32R-word blocks hold 2R of them."
+  (= (* 4 +block-words+) 64)
+  (= (* 2 +block-words+) 32))
+
+(defbound +double-rounds+ 4
+  "Column-and-row round pairs: Salsa20/8 runs eight rounds."
+  (= (* 2 +double-rounds+) 8))
+
 (defmacro define-salsa-core ()
-  (let ((x (loop for i below 16 collect (gensym (format nil "X~D-" i)))))
+  (let ((x (loop for i below +block-words+ collect (gensym (format nil "X~D-" i)))))
     (flet ((quarter (a b c d)
              (loop for (target left right shift) in (list (list b a d 7) (list c b a 9)
                                                          (list d c b 13) (list a d c 18))
@@ -36,13 +45,13 @@
       `(defun salsa-core (block offset)
          "Salsa20/8 in place on 16 words of BLOCK starting at OFFSET."
          (declare #.clempo.base:*hot* (type words block) (type fixnum offset))
-         (let (,@(loop for v in x for i below 16 collect `(,v (aref block (+ offset ,i)))))
+         (let (,@(loop for v in x for i below +block-words+ collect `(,v (aref block (+ offset ,i)))))
            (declare (type (unsigned-byte 32) ,@x))
-           (dotimes (round 4)
+           (dotimes (round +double-rounds+)
              ,@(loop for (a b c d) in '((0 4 8 12) (5 9 13 1) (10 14 2 6) (15 3 7 11)
                                         (0 1 2 3) (5 6 7 4) (10 11 8 9) (15 12 13 14))
                      append (quarter a b c d)))
-           ,@(loop for v in x for i below 16 collect
+           ,@(loop for v in x for i below +block-words+ collect
                    `(setf (aref block (+ offset ,i)) (ldb (byte 32 0) (+ (aref block (+ offset ,i)) ,v)))))
          (values)))))
 (define-salsa-core)
@@ -51,10 +60,10 @@
   "Salsa20/8 core of a 64-octet INPUT (RFC 7914 section 3); returns 64 octets."
   (check-type input octets)
   (assert (= (length input) 64))
-  (let ((w (make-array 16 :element-type '(unsigned-byte 32))) (out (make-octets 64)))
-    (dotimes (i 16) (setf (aref w i) (octets->integer-le input (* 4 i))))
+  (let ((w (make-array +block-words+ :element-type '(unsigned-byte 32))) (out (make-octets 64)))
+    (dotimes (i +block-words+) (setf (aref w i) (octets->integer-le input (* 4 i))))
     (salsa-core w 0)
-    (dotimes (i 16 out)
+    (dotimes (i +block-words+ out)
       (dotimes (j 4) (setf (aref out (+ (* 4 i) j)) (ldb (byte 8 (* 8 j)) (aref w i)))))))
 
 (defun octets->integer-le (o start)
@@ -64,15 +73,15 @@
 (defun block-mix (x y r)
   "scryptBlockMix of the 32R words of X into Y; X ends up holding the result."
   (declare #.clempo.base:*hot* (type words x y) (type (integer 1 1024) r))
-  (let ((tmp (make-array 16 :element-type '(unsigned-byte 32)))
+  (let ((tmp (make-array +block-words+ :element-type '(unsigned-byte 32)))
         (blocks (* 2 r)))
     (declare (dynamic-extent tmp))
-    (replace tmp x :start2 (* 16 (1- blocks)))
+    (replace tmp x :start2 (* +block-words+ (1- blocks)))
     (dotimes (i blocks)
-      (dotimes (k 16) (setf (aref tmp k) (logxor (aref tmp k) (aref x (+ (* 16 i) k)))))
+      (dotimes (k +block-words+) (setf (aref tmp k) (logxor (aref tmp k) (aref x (+ (* +block-words+ i) k)))))
       (salsa-core tmp 0)
       ;; Even outputs first, then odd ones.
-      (replace y tmp :start1 (* 16 (+ (ash i -1) (if (oddp i) r 0)))))
+      (replace y tmp :start1 (* +block-words+ (+ (ash i -1) (if (oddp i) r 0)))))
     (replace x y)
     (values)))
 
@@ -87,7 +96,7 @@
       (replace v x :start1 (* i width))
       (block-mix x y r))
     (dotimes (i n)
-      (let ((base (* width (logand (aref x (- width 16)) (1- n)))))
+      (let ((base (* width (logand (aref x (- width +block-words+)) (1- n)))))
         (declare (type fixnum base))
         (dotimes (k width) (setf (aref x k) (logxor (aref x k) (aref v (+ base k))))))
       (block-mix x y r))

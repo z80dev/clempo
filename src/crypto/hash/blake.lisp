@@ -36,25 +36,39 @@
                              ,a ,(add a b (nth yi m)) ,d ,(ror d a r2)
                              ,c ,(add c d) ,b ,(ror b c r3))))))))
 
+(defbound +state-words+ 8
+  "Words of the BLAKE2b chaining value h; the work vector's upper half starts as the IV."
+  (= (length *iv64*) +state-words+))
+
+(defbound +block-words+ 16
+  "Message words of a 128-octet BLAKE2b block: each round's schedule permutes all of them."
+  (= (* 8 +block-words+) 128)
+  (every (lambda (row) (equal (sort (copy-list row) #'<) (loop for i below +block-words+ collect i)))
+         *sigma2*))
+
+(defbound +work-words+ 16
+  "Words of the work vector v: the chaining value and the IV."
+  (= +work-words+ (* 2 +state-words+)))
+
 (defmacro define-blake2f ()
-  (let ((v (loop repeat 16 collect (gensym))) (m (loop repeat 16 collect (gensym))))
+  (let ((v (loop repeat +work-words+ collect (gensym))) (m (loop repeat +block-words+ collect (gensym))))
     `(defun compress2 (rounds h words t0 t1 final out)
        (declare #.clempo.base:*hot* (type (unsigned-byte 32) rounds)
                 (type (simple-array (unsigned-byte 64) (8)) h out)
                 (type (simple-array (unsigned-byte 64) (16)) words)
                 (type (unsigned-byte 64) t0 t1) (type boolean final))
-       (let (,@(loop for x in v for i below 16
+       (let (,@(loop for x in v for i below +work-words+
                      for initial = (if (< i 8) `(aref h ,i) (nth (- i 8) *iv64*))
                      collect `(,x ,(case i (12 `(logxor t0 ,initial)) (13 `(logxor t1 ,initial))
                                         (14 `(if final (logxor #xffffffffffffffff ,initial) ,initial))
                                         (t initial))))
-             ,@(loop for x in m for i below 16 collect `(,x (aref words ,i))))
+             ,@(loop for x in m for i below +block-words+ collect `(,x (aref words ,i))))
          (declare (type (unsigned-byte 64) ,@v ,@m))
          (loop with remaining of-type (unsigned-byte 32) = rounds while (plusp remaining) do
            ,@(loop for sigma in *sigma2* append
                    `((when (zerop remaining) (return)) (decf remaining)
                      ,@(mix-round v m sigma 64 '(32 24 16 63)))))
-         ,@(loop for i below 8 collect
+         ,@(loop for i below +state-words+ collect
                  `(setf (aref out ,i) (logxor (aref h ,i) ,(nth i v) ,(nth (+ i 8) v)))))
        out)))
 (define-blake2f)
@@ -67,7 +81,7 @@
   (check-type counters (simple-array (unsigned-byte 64) (2)))
   (check-type final boolean)
   (compress2 rounds h m (aref counters 0) (aref counters 1) final
-             (make-array 8 :element-type '(unsigned-byte 64))))
+             (make-array +state-words+ :element-type '(unsigned-byte 64))))
 
 (defmacro load-le (data start width)
   (let ((v (gensym)) (s (gensym)))
@@ -78,11 +92,11 @@
 (defun blake2f-precompile (input)
   (check-type input octets)
   (when (and (= (length input) 213) (< (aref input 212) 2))
-    (let ((h (make-array 8 :element-type '(unsigned-byte 64)))
-          (m (make-array 16 :element-type '(unsigned-byte 64)))
+    (let ((h (make-array +state-words+ :element-type '(unsigned-byte 64)))
+          (m (make-array +block-words+ :element-type '(unsigned-byte 64)))
           (out (make-octets 64)))
-      (dotimes (i 8) (setf (aref h i) (load-le input (+ 4 (* 8 i)) 64)))
-      (dotimes (i 16) (setf (aref m i) (load-le input (+ 68 (* 8 i)) 64)))
+      (dotimes (i +state-words+) (setf (aref h i) (load-le input (+ 4 (* 8 i)) 64)))
+      (dotimes (i +block-words+) (setf (aref m i) (load-le input (+ 68 (* 8 i)) 64)))
       (compress2 (logior (ash (aref input 0) 24) (ash (aref input 1) 16)
                          (ash (aref input 2) 8) (aref input 3))
                  h m (load-le input 196 64) (load-le input 204 64) (= (aref input 212) 1) h)
@@ -91,30 +105,54 @@
 
 (in-package #:clempo.blake3)
 
+(eval-when (:compile-toplevel :load-toplevel :execute)
+  (defparameter *permutation* '(2 6 3 10 7 0 4 13 1 11 12 5 9 14 15 8)
+    "BLAKE3's message permutation between rounds."))
+
+(defbound +cv-words+ 8
+  "Words of a BLAKE3 chaining value; the work vector's third quarter starts as the IV."
+  (= (length clempo.blake2f::*iv32*) +cv-words+)
+  (= (* 4 +cv-words+) 32))
+
+(defbound +block-words+ 16
+  "Message words of a 64-octet BLAKE3 block, all of them moved by the permutation."
+  (= (* 4 +block-words+) 64)
+  (equal (sort (copy-list *permutation*) #'<) (loop for i below +block-words+ collect i)))
+
+(defbound +work-words+ 16
+  "Words of the work vector: the chaining value, four IV words, counter, size and flags;
+a wide output's words."
+  (= +work-words+ (+ +cv-words+ 4 2 1 1))
+  (= +work-words+ (* 2 +cv-words+)))
+
+(defbound +rounds+ 7
+  "BLAKE3's rounds: BLAKE2s's mixing with three of its ten rounds removed."
+  (= (+ +rounds+ 3) (length clempo.blake2f::*sigma2*)))
+
 (defmacro define-blake3-compressor ()
-  (let ((v (loop repeat 16 collect (gensym))) (m (loop repeat 16 collect (gensym)))
-        (perm '(2 6 3 10 7 0 4 13 1 11 12 5 9 14 15 8)))
+  (let ((v (loop repeat +work-words+ collect (gensym))) (m (loop repeat +block-words+ collect (gensym)))
+        (perm *permutation*))
     `(defun compress3 (cv data start counter size flags out wide)
        (declare #.clempo.base:*hot* (type octets data) (type fixnum start)
                 (type (simple-array (unsigned-byte 32) (*)) cv out)
                 (type (unsigned-byte 64) counter) (type (unsigned-byte 32) size flags))
-       (let (,@(loop for x in v for i below 16 collect
+       (let (,@(loop for x in v for i below +work-words+ collect
                      `(,x ,(cond ((< i 8) `(aref cv ,i))
                                  ((< i 12) (nth (- i 8) clempo.blake2f::*iv32*))
                                  (t (nth (- i 12) '((ldb (byte 32 0) counter) (ash counter -32) size flags))))))
-             ,@(loop for x in m for i below 16 collect
+             ,@(loop for x in m for i below +block-words+ collect
                      `(,x (clempo.blake2f::load-le data (+ start ,(* 4 i)) 32))))
          (declare (type (unsigned-byte 32) ,@v ,@m))
-         ,@(loop repeat 7 for indices = (loop for i below 16 collect i)
+         ,@(loop repeat +rounds+ for indices = (loop for i below +block-words+ collect i)
                  then (mapcar (lambda (i) (nth i indices)) perm)
                  append (clempo.blake2f::mix-round v m indices 32 '(16 12 8 7)))
          (when wide
-           ,@(loop for i below 8 collect `(setf (aref out ,(+ i 8)) (logxor (aref cv ,i) ,(nth (+ i 8) v)))))
-         ,@(loop for i below 8 collect `(setf (aref out ,i) (logxor ,(nth i v) ,(nth (+ i 8) v)))))
+           ,@(loop for i below +cv-words+ collect `(setf (aref out ,(+ i 8)) (logxor (aref cv ,i) ,(nth (+ i 8) v)))))
+         ,@(loop for i below +cv-words+ collect `(setf (aref out ,i) (logxor ,(nth i v) ,(nth (+ i 8) v)))))
        (values))))
 (define-blake3-compressor)
 
-(defun new-cv () (make-array 8 :element-type '(unsigned-byte 32)))
+(defun new-cv () (make-array +cv-words+ :element-type '(unsigned-byte 32)))
 
 (defun serialize-words (words dst offset count)
   (declare #.clempo.base:*hot* (type (simple-array (unsigned-byte 32) (*)) words)
@@ -125,9 +163,9 @@
 (defun key-words (data)
   (assert (= (length data) 32))
   (let ((w (new-cv)))
-    (dotimes (i 8 w) (setf (aref w i) (clempo.blake2f::load-le data (* i 4) 32)))))
+    (dotimes (i +cv-words+ w) (setf (aref w i) (clempo.blake2f::load-le data (* i 4) 32)))))
 
-(defparameter *iv* (make-array 8 :element-type '(unsigned-byte 32)
+(defparameter *iv* (make-array +cv-words+ :element-type '(unsigned-byte 32)
                                :initial-contents clempo.blake2f::*iv32*))
 
 (defun hash-tree (data key flags length)
@@ -135,7 +173,7 @@
   (check-type length (integer 0 #.array-dimension-limit))
   (let* ((n (length data)) (chunks (max 1 (ceiling n 1024)))
          (stack (make-array (integer-length chunks) :initial-element nil)) (depth 0)
-         (cv (new-cv)) (scratch (make-octets 64)) (root-words (make-array 16 :element-type '(unsigned-byte 32)))
+         (cv (new-cv)) (scratch (make-octets 64)) (root-words (make-array +work-words+ :element-type '(unsigned-byte 32)))
          (last-data data) (last-start 0) (last-size 0) (last-flags 0) (last-key cv))
     (labels ((parent (left)
                (serialize-words left scratch 0 32)

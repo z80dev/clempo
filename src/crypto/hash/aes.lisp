@@ -11,6 +11,17 @@ FEAT_AES the blocks run on AESE/AESMC instead (clempo.aes-arm64), also constant-
 (deftype u64 () '(unsigned-byte 64))
 (deftype planes () '(simple-array (unsigned-byte 64) (*)))
 
+(defbound +planes+ 8
+  "Bit planes of the bitsliced state: one per bit of a byte of
+GF(2^8) = GF(2)[x]/(x^8+x^4+x^3+x+1)."
+  (= (1- (integer-length #x11b)) +planes+))
+
+(defbound +word-octets+ 4
+  "Octets in a 32-bit key-schedule word, one column of the state: four such columns make a
+16-octet block."
+  (= (* 8 +word-octets+) 32)
+  (= (* +word-octets+ +word-octets+) 16))
+
 (eval-when (:compile-toplevel :load-toplevel :execute)
   (defun reduced-power (d)
     "x^D modulo the AES polynomial x^8+x^4+x^3+x+1, as a byte."
@@ -40,7 +51,7 @@ FEAT_AES the blocks run on AESE/AESMC instead (clempo.aes-arm64), also constant-
                  (x15 :mul x12 x3) (x30 :square x15) (x60 :square x30) (x120 :square x60)
                  (x240 :square x120) (x252 :mul x240 x12) (x254 :mul x252 x2))))
     (flet ((v (name) (or (gethash name vars)
-                         (setf (gethash name vars) (loop repeat 8 collect (gensym (string name)))))))
+                         (setf (gethash name vars) (loop repeat +planes+ collect (gensym (string name)))))))
       (let ((x (v 'x)) (temps (loop for (name) in steps append (v name))) (y (v 'x254)))
         `(defun sbox-planes! (planes)
            "SubBytes on the eight bit PLANES, in place. The planes stay in a word vector:
@@ -54,9 +65,9 @@ returned as eight values they would be boxed, allocating for some data and not o
                      (gf-square-forms (v name) (v a))
                      (gf-mul-forms (v name) (v a) (v b))))
              ;; s_i = b_i + b_(i+4) + b_(i+5) + b_(i+6) + b_(i+7) + bit i of #x63.
-             ,@(loop for i below 8 collect
+             ,@(loop for i below +planes+ collect
                  `(setf (aref planes ,i)
-                        (logxor ,@(loop for k in '(0 4 5 6 7) collect (nth (mod (+ i k) 8) y))
+                        (logxor ,@(loop for k in '(0 4 5 6 7) collect (nth (mod (+ i k) +planes+) y))
                                 ,(if (logbitp i #x63) #xffffffffffffffff 0))))
              planes))))))
 (define-sbox)
@@ -90,7 +101,7 @@ returned as eight values they would be boxed, allocating for some data and not o
         (s4 (aref state 4)) (s5 (aref state 5)) (s6 (aref state 6)) (s7 (aref state 7)))
     (declare (type u64 s0 s1 s2 s3 s4 s5 s6 s7))
     (macrolet ((add-key (round)
-                 `(let ((base (* 8 ,round)))
+                 `(let ((base (* +planes+ ,round)))
                     ,@(loop for s in '(s0 s1 s2 s3 s4 s5 s6 s7) for i from 0
                             collect `(setf ,s (logxor ,s (aref keys (+ base ,i)))))))
                (sub-shift ()
@@ -104,8 +115,8 @@ returned as eight values they would be boxed, allocating for some data and not o
                (mix-columns ()
                  ;; out = 2(a + rot1 a) + rot1 a + rot2 a + rot3 a, per plane except xtime.
                  (let ((ss '(s0 s1 s2 s3 s4 s5 s6 s7))
-                       (ts (loop repeat 8 collect (gensym "T")))
-                       (us (loop repeat 8 collect (gensym "U"))))
+                       (ts (loop repeat +planes+ collect (gensym "T")))
+                       (us (loop repeat +planes+ collect (gensym "U"))))
                    `(let (,@(loop for s in ss for u in us
                                   collect `(,u (logxor (rotate-rows ,s 1) (rotate-rows ,s 2) (rotate-rows ,s 3))))
                           ,@(loop for s in ss for tt in ts collect `(,tt (logxor ,s (rotate-rows ,s 1)))))
@@ -130,7 +141,7 @@ returned as eight values they would be boxed, allocating for some data and not o
   (fill state 0)
   (dotimes (b (* 16 count) state)
     (let ((v (aref octets (+ start b))))
-      (dotimes (k 8)
+      (dotimes (k +planes+)
         (setf (aref state k) (logior (aref state k) (ash (ldb (byte 1 k) v) b)))))))
 
 (defun store-planes! (state octets start count)
@@ -139,7 +150,7 @@ returned as eight values they would be boxed, allocating for some data and not o
   (dotimes (b (* 16 count) octets)
     (let ((v 0))
       (declare (type (unsigned-byte 8) v))
-      (dotimes (k 8)
+      (dotimes (k +planes+)
         (setf v (logior v (ash (ldb (byte 1 b) (aref state k)) k))))
       (setf (aref octets (+ start b)) v))))
 
@@ -147,16 +158,16 @@ returned as eight values they would be boxed, allocating for some data and not o
   "SubWord on a 32-bit key-schedule word (byte 0 most significant). Planes stay in a
 word vector: boxing them could allocate bignums for some key bits and not others."
   (declare #.clempo.base:*hot* (type (unsigned-byte 32) word))
-  (let ((planes (make-array 8 :element-type 'u64 :initial-element 0)) (out 0))
+  (let ((planes (make-array +planes+ :element-type 'u64 :initial-element 0)) (out 0))
     (declare (dynamic-extent planes) (type (unsigned-byte 32) out))
-    (dotimes (b 4)
-      (dotimes (k 8)
+    (dotimes (b +word-octets+)
+      (dotimes (k +planes+)
         (setf (aref planes k) (logior (aref planes k)
-                                      (ash (ldb (byte 1 (+ k (* 8 (- 3 b)))) word) b)))))
+                                      (ash (ldb (byte 1 (+ k (* 8 (- (1- +word-octets+) b)))) word) b)))))
     (sbox-planes! planes)
-    (dotimes (b 4 out)
-      (dotimes (k 8)
-        (setf out (logior out (ash (ldb (byte 1 b) (aref planes k)) (+ k (* 8 (- 3 b))))))))))
+    (dotimes (b +word-octets+ out)
+      (dotimes (k +planes+)
+        (setf out (logior out (ash (ldb (byte 1 b) (aref planes k)) (+ k (* 8 (- (1- +word-octets+) b))))))))))
 
 (defstruct (aes (:constructor %make-aes (keys bytes rounds)))
   (keys (make-array 0 :element-type 'u64) :type planes :read-only t)
@@ -171,8 +182,8 @@ word vector: boxing them could allocate bignums for some key bits and not others
            (total (* 4 (1+ rounds)))
            (w (make-array total :element-type '(unsigned-byte 32)))
            (bytes (make-octets (* 4 total)))
-           (keys (make-array (* 8 (1+ rounds)) :element-type 'u64 :initial-element 0))
-           (state (make-array 8 :element-type 'u64 :initial-element 0))
+           (keys (make-array (* +planes+ (1+ rounds)) :element-type 'u64 :initial-element 0))
+           (state (make-array +planes+ :element-type 'u64 :initial-element 0))
            (rcon 1))
       ;; Typed, so the words assemble inline: generic ASH returns early for a zero byte.
       (dotimes (i nk)
@@ -194,9 +205,9 @@ word vector: boxing them could allocate bignums for some key bits and not others
       ;; multiply here would allocate a bignum for some key bits).
       (dotimes (round (1+ rounds))
         (load-planes! state bytes (* 16 round) 1)
-        (dotimes (k 8)
+        (dotimes (k +planes+)
           (let ((lane (ldb (byte 16 0) (aref state k))))
-            (setf (aref keys (+ (* 8 round) k))
+            (setf (aref keys (+ (* +planes+ round) k))
                   (logior lane (ash lane 16) (ash lane 32) (ash lane 48))))))
       (%make-aes keys bytes rounds))))
 
@@ -213,7 +224,7 @@ word vector: boxing them could allocate bignums for some key bits and not others
         (clempo.aes-arm64:encrypt-block (aes-bytes cipher) (aes-rounds cipher)
                                         input (+ in-start (* 16 b)) output (+ out-start (* 16 b))))
       (return-from aes-encrypt-blocks output))
-    (let ((state (make-array 8 :element-type 'u64 :initial-element 0)))
+    (let ((state (make-array +planes+ :element-type 'u64 :initial-element 0)))
       (declare (dynamic-extent state))
       (load-planes! state input in-start count)
       (encrypt-planes (aes-keys cipher) (aes-rounds cipher) state)

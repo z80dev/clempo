@@ -17,12 +17,22 @@
                       (ldb (byte 64 0) lo)) into constants
           when (= (length constants) count) return constants)))
 
+(defbound +state-words+ 8
+  "Words of the SHA-2 state: a SHA-256 or SHA-512 digest of eight words."
+  (= (* 32 +state-words+) 256)
+  (= (* 64 +state-words+) 512))
+
+(defbound +block-words+ 16
+  "Words of a message block (64 or 128 octets); the schedule's first words are these."
+  (= (* 4 +block-words+) 64)
+  (= (* 8 +block-words+) 128))
+
 (defmacro define-sha (make update final hash compress context width rounds length-size
                       big0 big1 small0 small1)
   "The portable compression is COMPRESS-PORTABLE on every host (tests run it directly);
 for SHA-256 on an arm64 core with FEAT_SHA256, COMPRESS runs clempo.sha256-arm64 instead."
-  (let* ((word `(unsigned-byte ,width)) (bytes (/ width 8)) (block (* 16 bytes))
-         (init (mapcar (lambda (n) (ash n (- width 64))) (root-constants 8 2)))
+  (let* ((word `(unsigned-byte ,width)) (bytes (/ width 8)) (block (* +block-words+ bytes))
+         (init (mapcar (lambda (n) (ash n (- width 64))) (root-constants +state-words+ 2)))
          (ks (mapcar (lambda (n) (ash n (- width 64))) (root-constants rounds 3)))
          (st (intern (format nil "~A-STATE" context)))
          (buf (intern (format nil "~A-BUFFER" context)))
@@ -31,8 +41,8 @@ for SHA-256 on an arm64 core with FEAT_SHA256, COMPRESS runs clempo.sha256-arm64
          (constructor (intern (format nil "%~A" make)))
          (final-size (intern (format nil "%~A" final)))
          (portable (intern (format nil "~A-PORTABLE" compress)))
-         (regs (loop repeat 8 collect (gensym)))
-         (ws (loop repeat 16 collect (gensym))))
+         (regs (loop repeat +state-words+ collect (gensym)))
+         (ws (loop repeat +block-words+ collect (gensym))))
     (labels ((add (&rest args) `(ldb (byte ,width 0) (+ ,@args)))
              (sigma (x shifts shift-p)
                `(logxor ,@(loop for n in shifts for i from 1
@@ -41,7 +51,7 @@ for SHA-256 on an arm64 core with FEAT_SHA256, COMPRESS runs clempo.sha256-arm64
                                                      (ldb (byte ,width 0) (ash ,x ,(- width n)))))))))
       `(progn
          (defstruct (,context (:constructor ,constructor (&optional state)))
-           (state (make-array 8 :element-type ',word :initial-contents ',init)
+           (state (make-array +state-words+ :element-type ',word :initial-contents ',init)
                   :type (simple-array ,word (8)))
            (buffer (make-octets ,block) :type octets)
            (total 0 :type (integer 0))
@@ -83,7 +93,7 @@ for SHA-256 on an arm64 core with FEAT_SHA256, COMPRESS runs clempo.sha256-arm64
                      (clempo.sha256-arm64:compress
                       state data offset
                       (load-time-value
-                       (make-array 64 :element-type '(unsigned-byte 32) :initial-contents ',ks) t))
+                       (make-array ,rounds :element-type '(unsigned-byte 32) :initial-contents ',ks) t))
                      (,portable state data offset))
                 #-arm64
                 `(,portable state data offset)

@@ -3,8 +3,26 @@
   (:export #:chacha20-xor #:aead-encrypt #:aead-decrypt))
 (in-package #:clempo.chacha20poly1305)
 
+(defbound +word-octets+ 4
+  "Octets in a 32-bit ChaCha20 word."
+  (= (* 8 +word-octets+) 32))
+
+(defbound +state-words+ 16
+  "Words of the ChaCha20 state: four constants, eight key words, a counter and three
+nonce words."
+  (= +state-words+ (+ 4 (/ 32 +word-octets+) 1 (/ 12 +word-octets+))))
+
+(defbound +block-octets+ 64
+  "Keystream octets of one ChaCha20 block: the state words, serialized."
+  (= +block-octets+ (* +state-words+ +word-octets+)))
+
+(defbound +double-rounds+ 10
+  "Column-and-diagonal round pairs: ChaCha20 runs 20 rounds."
+  (= (* 2 +double-rounds+) 20))
+
 (defmacro define-chacha-block ()
-  (let ((initial (loop repeat 16 collect (gensym))) (state (loop repeat 16 collect (gensym))))
+  (let ((initial (loop repeat +state-words+ collect (gensym)))
+        (state (loop repeat +state-words+ collect (gensym))))
     (flet ((quarter (a b c d)
              (loop for x in (list a c a c) for y in (list b d b d)
                    for z in (list d b d b) for shift in '(16 12 8 7) append
@@ -14,17 +32,18 @@
       `(defun block-into (words counter out)
          (declare #.clempo.base:*hot* (type (simple-array (unsigned-byte 32) (16)) words)
                   (type (unsigned-byte 32) counter) (type octets out))
-         (let* (,@(loop for x in initial for i below 16 collect `(,x ,(if (= i 12) 'counter `(aref words ,i))))
+         (let* (,@(loop for x in initial for i below +state-words+
+                        collect `(,x ,(if (= i 12) 'counter `(aref words ,i))))
                 ,@(loop for x in state for y in initial collect `(,x ,y)))
            (declare (type (unsigned-byte 32) ,@initial ,@state))
-           (dotimes (round 10)
+           (dotimes (round +double-rounds+)
              ,@(loop for indices in '((0 4 8 12) (1 5 9 13) (2 6 10 14) (3 7 11 15)
                                       (0 5 10 15) (1 6 11 12) (2 7 8 13) (3 4 9 14))
                      append (apply #'quarter (mapcar (lambda (i) (nth i state)) indices))))
-           ,@(loop for x in state for y in initial for i below 16 collect
+           ,@(loop for x in state for y in initial for i below +state-words+ collect
                    `(let ((sum (ldb (byte 32 0) (+ ,x ,y))))
-                      ,@(loop for j below 4 collect
-                              `(setf (aref out ,(+ (* 4 i) j)) (ldb (byte 8 ,(* j 8)) sum))))))
+                      ,@(loop for j below +word-octets+ collect
+                              `(setf (aref out ,(+ (* +word-octets+ i) j)) (ldb (byte 8 ,(* j 8)) sum))))))
          (values)))))
 (define-chacha-block)
 
@@ -33,7 +52,7 @@
   (check-type nonce octets)
   (assert (= (length key) 32))
   (assert (= (length nonce) 12))
-  (let ((words (make-array 16 :element-type '(unsigned-byte 32))))
+  (let ((words (make-array +state-words+ :element-type '(unsigned-byte 32))))
     (setf (aref words 0) #x61707865 (aref words 1) #x3320646e
           (aref words 2) #x79622d32 (aref words 3) #x6b206574)
     (dotimes (i 8) (setf (aref words (+ 4 i)) (clempo.blake2f::load-le key (* 4 i) 32)))
@@ -43,32 +62,45 @@
 (defun xor-into (words counter data length out scratch)
   (declare #.clempo.base:*hot* (type (simple-array (unsigned-byte 32) (16)) words)
            (type octets data out scratch) (type fixnum length) (type (unsigned-byte 32) counter))
-  (loop for offset of-type fixnum from 0 below length by 64
+  (loop for offset of-type fixnum from 0 below length by +block-octets+
         for c of-type (unsigned-byte 64) from counter do
     (block-into words (ldb (byte 32 0) c) scratch)
-    (dotimes (i (min 64 (- length offset)))
+    (dotimes (i (min +block-octets+ (- length offset)))
       (setf (aref out (+ offset i)) (logxor (aref scratch i) (aref data (+ offset i)))))))
 
 (defun chacha20-xor (key nonce data &key (counter 0))
   (clempo.ct:with-data-independent-timing
     (check-type data octets)
     (check-type counter (unsigned-byte 32))
-    (assert (<= (+ counter (ceiling (length data) 64)) (ash 1 32)))
+    (assert (<= (+ counter (ceiling (length data) +block-octets+)) (ash 1 32)))
     (let ((out (make-octets (length data))))
-      (xor-into (make-words key nonce) counter data (length data) out (make-octets 64))
+      (xor-into (make-words key nonce) counter data (length data) out (make-octets +block-octets+))
       out)))
+
+(defbound +poly-limbs+ 5
+  "Radix 2^26 limbs of a Poly1305 accumulator modulo 2^130 - 5."
+  (= (* +poly-limbs+ 26) 130)
+  ;; A product coefficient sums +POLY-LIMBS+ terms of a 28-bit h limb times a 26-bit r
+  ;; limb, scaled by 5 when it wraps: inside the (UNSIGNED-BYTE 60) accumulators, fixnums.
+  (< (* +poly-limbs+ (ash 1 28) 5 (ash 1 26)) (ash 1 60))
+  (typep (1- (ash 1 60)) 'fixnum))
+
+(defbound +tag-octets+ 16
+  "Octets of a Poly1305 tag: the low 128 bits of h + s, two little-endian words."
+  (= (* 8 +tag-octets+) 128)
+  (= (* 8 (floor +tag-octets+ 2)) 64))
 
 (defmacro define-poly1305 ()
   ;; Radix 2^26: 2^130 = 5 in the field. All products and carries fit fixnums.
-  (let ((r (loop repeat 5 collect (gensym))) (h (loop repeat 5 collect (gensym)))
-        (d (loop repeat 5 collect (gensym))))
+  (let ((r (loop repeat +poly-limbs+ collect (gensym))) (h (loop repeat +poly-limbs+ collect (gensym)))
+        (d (loop repeat +poly-limbs+ collect (gensym))))
     `(defun auth-tag (secret aad data length out offset)
        (declare #.clempo.base:*hot* (type octets secret aad data out) (type fixnum length offset))
        (let* ((r-low (logand #x0ffffffc0fffffff (clempo.blake2f::load-le secret 0 64)))
               (r-high (logand #x0ffffffc0ffffffc (clempo.blake2f::load-le secret 8 64)))
               ;; Limbs straight from the two key words: an integer r would be a
               ;; bignum whose arithmetic takes value-dependent paths.
-              ,@(loop for x in r for i below 5 for bit = (* i 26) collect
+              ,@(loop for x in r for i below +poly-limbs+ for bit = (* i 26) collect
                   `(,x ,(cond ((<= (+ bit 26) 64) `(ldb (byte 26 ,bit) r-low))
                               ((>= bit 64) `(ldb (byte 26 ,(- bit 64)) r-high))
                               (t `(logior (ash r-low ,(- bit))
@@ -78,17 +110,17 @@
          (declare (type (unsigned-byte 26) ,@r) (type (unsigned-byte 28) ,@h))
          (labels ((fold (lo hi)
                     (declare (type (unsigned-byte 64) lo hi))
-                    ,@(loop for x in h for i below 5 for bit = (* i 26) collect
+                    ,@(loop for x in h for i below +poly-limbs+ for bit = (* i 26) collect
                             `(incf ,x ,(cond ((<= (+ bit 26) 64) `(ldb (byte 26 ,bit) lo))
                                              ((>= bit 64) `(ldb (byte ,(min 26 (- 128 bit)) ,(- bit 64)) hi))
                                              (t `(logior (ash lo ,(- bit))
                                                          (ash (ldb (byte ,(- (+ bit 26) 64) 0) hi) ,(- 64 bit)))))))
                     (incf ,(nth 4 h) (ash 1 24))
-                    (let (,@(loop for x in d for i below 5 collect
-                                  `(,x (+ ,@(loop for j below 5 for k = (- i j) collect
-                                                  `(* ,(nth j h) ,(if (minusp k) `(* 5 ,(nth (+ 5 k) r)) (nth k r))))))))
+                    (let (,@(loop for x in d for i below +poly-limbs+ collect
+                                  `(,x (+ ,@(loop for j below +poly-limbs+ for k = (- i j) collect
+                                                  `(* ,(nth j h) ,(if (minusp k) `(* 5 ,(nth (+ +poly-limbs+ k) r)) (nth k r))))))))
                       (declare (type (unsigned-byte 60) ,@d))
-                      ,@(loop for x in h for y in d for i below 5 append
+                      ,@(loop for x in h for y in d for i below +poly-limbs+ append
                               `((setf ,x (ldb (byte 26 0) ,y))
                                 ,@(when (< i 4) `((incf ,(nth (1+ i) d) (ash ,y -26))))))
                       (let ((carry (+ ,(first h) (* 5 (ash ,(fifth d) -26)))))
@@ -133,9 +165,9 @@
                      (multiple-value-setq (lo carry)
                        (clempo.ec.word:add-with-carry lo (clempo.blake2f::load-le secret 16 64) 0))
                      (setf hi (clempo.ec.word:add-with-carry hi (clempo.blake2f::load-le secret 24 64) carry))
-                     (dotimes (i 8)
+                     (dotimes (i (floor +tag-octets+ 2))
                        (setf (aref out (+ offset i)) (ldb (byte 8 (* i 8)) lo)
-                             (aref out (+ offset 8 i)) (ldb (byte 8 (* i 8)) hi)))))))))
+                             (aref out (+ offset (floor +tag-octets+ 2) i)) (ldb (byte 8 (* i 8)) hi)))))))))
        (values)))))
 (define-poly1305)
 
@@ -146,8 +178,8 @@
     (check-type plaintext octets)
     (check-type aad octets)
     (let* ((length (length plaintext)) (words (make-words key nonce))
-           (scratch (make-octets 64)) (out (make-octets (+ length 16))))
-      (assert (< (ceiling length 64) (ash 1 32)))
+           (scratch (make-octets +block-octets+)) (out (make-octets (+ length +tag-octets+))))
+      (assert (< (ceiling length +block-octets+) (ash 1 32)))
       (xor-into words 1 plaintext length out scratch)
       (block-into words 0 scratch)
       (auth-tag scratch aad out length out length)
@@ -157,13 +189,13 @@
   (clempo.ct:with-data-independent-timing
     (check-type ciphertext octets)
     (check-type aad octets)
-    (let ((length (- (length ciphertext) 16)))
-      (when (and (>= length 0) (< (ceiling length 64) (ash 1 32)))
-        (let ((words (make-words key nonce)) (scratch (make-octets 64))
-              (tag (make-octets 16)) (difference 0))
+    (let ((length (- (length ciphertext) +tag-octets+)))
+      (when (and (>= length 0) (< (ceiling length +block-octets+) (ash 1 32)))
+        (let ((words (make-words key nonce)) (scratch (make-octets +block-octets+))
+              (tag (make-octets +tag-octets+)) (difference 0))
           (block-into words 0 scratch)
           (auth-tag scratch aad ciphertext length tag 0)
-          (dotimes (i 16)
+          (dotimes (i +tag-octets+)
             (setf difference (logior difference (logxor (aref tag i) (aref ciphertext (+ length i))))))
           (when (zerop difference)
             (let ((out (make-octets length)))
