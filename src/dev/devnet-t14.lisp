@@ -2,21 +2,7 @@
 
 ;;; T14/T15 transactions sent to a reference devnet (scripts/devnet, --hardfork t15), so the
 ;;; Rust node accepts, executes and seals them; devnet-replay then runs its blocks in clempo.
-;;; Accounts are xtask's localnet mnemonic ("test ... junk"), funded with pathUSD in genesis.
-
-(defparameter *devnet-keys*
-  (mapcar #'hex->octets
-          '("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-            "59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
-            "5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a"
-            "7c852118294e51e653712a81e05800f419141751be58f605c371e15141b007a6"
-            "47e179ec197488593b187f80a00eb0da91f1b9d0b13f8733639f19c30a34926a"))
-  "The localnet mnemonic's first five secp256k1 private keys (public test keys).")
-
-(defconstant +owner-1+ #x1111)
-(defconstant +owner-2+ #x2222)
-(defconstant +path-usd+ #x20c0000000000000000000000000000000000000)
-(defconstant +configurable-account+ #xAACC000000000000000000000000000000000000)
+;;; Accounts are xtask's localnet mnemonic, *DEVNET-KEYS* (shared.lisp).
 
 (defun key-address (key) (clempo.secp256k1:pubkey->address (clempo.secp256k1:private->public key)))
 

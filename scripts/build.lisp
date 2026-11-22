@@ -47,11 +47,13 @@
 
 (defun call-strictly (strict thunk)
   "Run THUNK; with STRICT, warnings fail the build, and so do undefined functions and
-variables, which SBCL reports only as style warnings at the end of a compilation unit."
+variables. SBCL reports those when the compilation unit ends, after ASDF has judged each
+file (an undefined function as a style warning, an undefined variable as a warning), so
+they are collected here."
   (let ((asdf:*compile-file-warnings-behaviour* (if strict :error :warn))
         (asdf:*compile-file-failure-behaviour* (if strict :error :warn))
         (undefined '()))
-    (handler-bind ((style-warning
+    (handler-bind ((warning
                      (lambda (w)
                        (let ((text (princ-to-string w)))
                          (when (search "undefined" text) (push text undefined))))))

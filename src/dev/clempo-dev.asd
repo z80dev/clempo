@@ -1,5 +1,6 @@
-;;; Every .lisp file in this directory is a component, main.lisp and score.lisp first, the
-;;; rest in alphabetical order, so command files can be added without editing this file.
+;;; Every .lisp file in this directory is a component: main.lisp, score.lisp and shared.lisp
+;;; (definitions several commands read) first, the rest in alphabetical order, so command
+;;; files can be added without editing this file.
 ;;; The system depends on every layer listed in layers.sexp that has a system, so new
 ;;; layers are picked up without editing this file either.
 
@@ -20,8 +21,8 @@
                        (names (sort (mapcar #'pathname-name (directory (merge-pathnames "*.lisp" here)))
                                     #'string<)))
                   (mapcar (lambda (n) (list :file n))
-                          (list* "main" "score"
-                                 (remove-if (lambda (n) (member n '("main" "score") :test #'string=))
+                          (list* "main" "score" "shared"
+                                 (remove-if (lambda (n) (member n '("main" "score" "shared") :test #'string=))
                                             names)))))
 
 (defsystem "clempo-dev/tests"

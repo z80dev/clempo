@@ -136,12 +136,6 @@ archive chunk holding it (immutable: CHUNK-BLOCK may read it from any thread)."
 
 (defun json-height (x) (or x :null))
 
-(defparameter *replay-sync* '(:every-ms 1000)
-  "The block log's sync policy for replay and bench datadirs: a replay acknowledges no block
-to anyone, so it syncs its log at most once a second (and at each flush and on close)
-instead of after each block; a crash resumes from the last synced block
-\(CLEMPO.STORE:STORE-DURABLE-NUMBER).")
-
 (defun store-cache-arg (args)
   "Cache limits for a datadir's state database from -cache-accounts, -cache-slots,
 -cache-trie-nodes, -cache-code-mb and -cache-dirty; the store's defaults otherwise."
