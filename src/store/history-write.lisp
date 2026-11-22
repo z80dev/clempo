@@ -133,10 +133,14 @@ the encoded versions."
 (defun history-start-writer (history job db)
   "Make HISTORY's tail writable for build job JOB, continuing from DB (the state after the
 last block already in the history, or the state a full segment is about to record)."
-  (setf (history-job history) job
-        (history-tail history) (make-tail (1+ (store:db-number db)))
-        (history-code-out history) (open-code-output history job)
-        (history-last-accounts history) (make-hash-table :size 4096))
+  (let ((tail (make-tail (1+ (store:db-number db))))
+        (out (open-code-output history job))
+        (last (make-hash-table :size 4096)))
+    (clempo.lock:with-lock ((history-lock history))
+      (setf (history-job history) job
+            (history-tail history) tail
+            (history-code-out history) out
+            (history-last-accounts history) last)))
   history)
 
 (defconstant +last-accounts-limit+ (ash 1 20)
@@ -233,7 +237,9 @@ segments when a tier is full. Starts a new tail after it."
       ;; block's versions in the tail, the segment list, or both (HISTORY-STATE's barrier).
       (history-refresh history)
       (sb-thread:barrier (:write))
-      (setf (history-tail history) (make-tail (1+ (tail-to tail))))
+      (let ((next (make-tail (1+ (tail-to tail)))))
+        (clempo.lock:with-lock ((history-lock history))
+          (setf (history-tail history) next)))
       (merge-tiers history job))
     history))
 
@@ -339,5 +345,6 @@ segment) after deleting the job's segments written past it, or NIL for a job not
         (dolist (s (job-segments history job))
           (when (> (segment-to s) (store:db-number db))
             (delete-file (segment-path s))
-            (setf (history-segments history) (remove s (history-segments history)))))
+            (clempo.lock:with-lock ((history-lock history))
+              (setf (history-segments history) (remove s (history-segments history))))))
         db))))

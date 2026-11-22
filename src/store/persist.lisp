@@ -291,26 +291,36 @@ bad record with valid ones after it signals STORE-CORRUPT-LOG."
 
 ;;; The store
 
-(defstruct (store (:constructor %make-store (dir kv db interval sync-policy)))
-  dir kv db
-  (interval 0 :type integer)          ; blocks between flushes; 0 = only on the cache limit
-  (sync-policy :block)                ; :BLOCK, (:GROUP n) or (:EVERY-MS t)
-  wal-stream wal-sink
-  (logged-number -1 :type integer)    ; last block appended to the log
-  (durable -1 :type integer)          ; last block a crash cannot lose (under SYNC-LOCK)
-  (unsynced 0 :type fixnum)
-  (synced-at 0 :type integer)         ; monotonic ticks of the last sync request
-  (lock-fd nil)
-  ;; The background syncer (policies other than :BLOCK): the writer flushes the log's
-  ;; buffer and posts the block it ends with; the syncer syncs the file and then, only then,
-  ;; raises DURABLE-NUMBER. Under SYNC-LOCK.
-  (syncer nil)
-  (sync-lock (sb-thread:make-mutex :name "store sync"))
-  (sync-cv (sb-thread:make-waitqueue :name "store sync"))
-  (sync-request nil)                  ; block number to make durable, or NIL
-  (sync-busy nil)
-  (sync-stop nil)
-  (sync-error nil))
+(clempo.guard:define-shared-struct (store (:constructor %make-store (dir kv db interval sync-policy)))
+  "An open datadir. Its owner, the thread using it (opening it, committing blocks, flushing,
+closing; one thread at a time), writes the log; under a policy other than :BLOCK a syncer
+thread syncs it, sharing with the owner what SYNC-LOCK guards."
+  (dir nil :guard :immutable)
+  (kv nil :guard :immutable)
+  (db nil :guard :immutable)
+  (interval 0 :type integer :guard :immutable) ; blocks between flushes; 0 = only on the cache limit
+  (sync-policy :block :guard :immutable)       ; :BLOCK, (:GROUP n) or (:EVERY-MS t)
+  ;; The log: replaced (a new log, the close) under SYNC-LOCK, read by the syncer under it
+  ;; and by the owner without it.
+  (wal-stream nil :guard (:lock-writes sync-lock))
+  (wal-sink nil :guard (:lock-writes sync-lock))
+  (logged-number -1 :type integer             ; last block appended to the log
+   :guard (:unchecked "the store's owner thread's; the syncer never touches it"))
+  (durable -1 :type integer :guard (:lock sync-lock)) ; last block a crash cannot lose
+  (unsynced 0 :type fixnum :guard (:unchecked "the store's owner thread's; the syncer never touches it"))
+  (synced-at 0 :type integer                  ; monotonic ticks of the last sync request
+   :guard (:unchecked "the store's owner thread's; the syncer never touches it"))
+  (lock-fd nil :guard (:unchecked "the store's owner thread's: set by OPEN-STORE, taken by CLOSE-STORE"))
+  ;; The background syncer (policies other than :BLOCK): the owner flushes the log's buffer
+  ;; and posts the block it ends with; the syncer syncs the file and then, only then, raises
+  ;; DURABLE-NUMBER.
+  (syncer nil :guard (:unchecked "the store's owner thread's: started by OPEN-STORE, joined by CLOSE-STORE; the syncer never reads it"))
+  (sync-lock (sb-thread:make-mutex :name "store sync") :guard :immutable)
+  (sync-cv (sb-thread:make-waitqueue :name "store sync") :guard :immutable)
+  (sync-request nil :guard (:lock sync-lock))  ; block number to make durable, or NIL
+  (sync-busy nil :guard (:lock sync-lock))
+  (sync-stop nil :guard (:lock sync-lock))
+  (sync-error nil :guard (:lock sync-lock)))
 
 (defun store-durable-number (store)
   "The last committed block on stable storage (in the log or the KV store)."
@@ -395,10 +405,12 @@ bad record with valid ones after it signals STORE-CORRUPT-LOG."
                  (* (second policy) (/ internal-time-units-per-second 1000)))))))
 
 (defun open-wal (store path)
-  (let ((stream (open path :element-type '(unsigned-byte 8) :direction :output
-                           :if-exists :append :if-does-not-exist :create)))
-    (setf (store-wal-stream store) stream
-          (store-wal-sink store) (make-sink stream))))
+  (let* ((stream (open path :element-type '(unsigned-byte 8) :direction :output
+                            :if-exists :append :if-does-not-exist :create))
+         (sink (make-sink stream)))
+    (clempo.lock:with-lock ((store-sync-lock store))
+      (setf (store-wal-stream store) stream
+            (store-wal-sink store) sink))))
 
 (defun start-wal (store)
   "Start a new, empty log after the flushed head. Returns the older logs, which the caller
@@ -485,8 +497,9 @@ its RAM and never reach DIR."
            (funcall genesis db)
            (invariant (zerop (db-number db)) "genesis must commit block 0")
            (flush-db store)))
-    (setf (store-logged-number store) (db-number db)
-          (store-durable store) (db-number db))
+    (setf (store-logged-number store) (db-number db))
+    (clempo.lock:with-lock ((store-sync-lock store))
+      (setf (store-durable store) (db-number db)))
     (unless (store-wal-stream store) (start-wal store))
     store))
 
@@ -583,7 +596,7 @@ the interval or the cache limit says so."
              (store-sync store))
          (stop-syncer store)
          (close (store-wal-stream store))
-         (setf (store-wal-stream store) nil)
+         (clempo.lock:with-lock ((store-sync-lock store)) (setf (store-wal-stream store) nil))
          (kv-close (store-kv store)))
     (stop-syncer store)
     (unlock-datadir (shiftf (store-lock-fd store) nil)))
@@ -657,10 +670,10 @@ the interval or the cache limit says so."
   "Import the format 1 datadir DIR (checkpoint N and its log) into a KV store."
   (funcall log "store: importing format 1 checkpoint ~D of ~A" n dir)
   (dolist (p (directory (dir-file dir "seg-*.kv"))) (delete-file p))
-  (let ((kv (%make-kv dir)))
-    (setf (kv-background kv) nil)
+  (let ((kv (%make-kv dir :background nil)))
     (import-checkpoint kv (checkpoint-path dir n) log)
-    (write-kv-manifest kv (mapcar #'kseg-name (kv-segments kv)))
+    (clempo.lock:with-lock ((kv-lock kv))
+      (write-kv-manifest kv (mapcar #'kseg-name (kv-segments kv))))
     (kv-merge-tiers kv))
   ;; the old log, replayed on the imported state and flushed
   (let* ((kv (open-kv dir :prefetch 0))

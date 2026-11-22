@@ -534,18 +534,22 @@ SEGMENT-FLOOR bounded to START..END."
 
 ;;; The history
 
-(defstruct (history (:constructor %make-history (dir)))
-  dir
-  (segments '() :type list)              ; newest (largest TO) first
-  (wipes (make-hash-table :synchronized t) :type hash-table) ; address -> sorted simple-vector of blocks
-  (codes (make-hash-table :synchronized t) :type hash-table) ; hash integer -> (path . offset) or octets
-  (code-files (make-hash-table :test 'equal :synchronized t) :type hash-table) ; path -> bytes scanned
-  (lock (sb-thread:make-mutex :name "history"))
-  (cache (make-array +cache-size+ :initial-element nil) :type simple-vector) ; HITs by key hash
-  (tail nil)                             ; writer only
-  (job nil)
-  (last-accounts nil)                    ; writer: address -> AVER, the latest version
-  (code-out nil))                        ; writer: stream of codes-<job>.dat
+(clempo.guard:define-shared-struct (history (:constructor %make-history (dir)))
+  "An open history directory. Views read it on any thread without the lock; LOCK serializes
+the refreshes and writer changes that replace SEGMENTS and the writer's slots whole."
+  (dir nil :guard :immutable)
+  (segments '() :type list :guard (:lock-writes lock)) ; newest (largest TO) first
+  (wipes (make-hash-table :synchronized t) :type hash-table :guard :immutable) ; address -> sorted simple-vector of blocks
+  (codes (make-hash-table :synchronized t) :type hash-table :guard :immutable) ; hash integer -> (path . offset) or octets
+  (code-files (make-hash-table :test 'equal :synchronized t) :type hash-table :guard :immutable) ; path -> bytes scanned
+  (lock (sb-thread:make-mutex :name "history") :guard :immutable)
+  ;; HITs by key hash, each replaced whole without a lock (the probe cache)
+  (cache (make-array +cache-size+ :initial-element nil) :type simple-vector :guard :immutable)
+  ;; The writer's (HISTORY-START-WRITER): the tail views read too, published after a barrier
+  (tail nil :guard (:lock-writes lock))
+  (job nil :guard (:lock-writes lock))
+  (last-accounts nil :guard (:lock-writes lock)) ; address -> AVER, the latest version
+  (code-out nil :guard (:lock-writes lock)))     ; stream of codes-<job>.dat
 
 (defun dir-path (dir name) (merge-pathnames name dir))
 

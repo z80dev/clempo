@@ -438,23 +438,27 @@ version of each key winning; tombstones are skipped unless KEEP-TOMBSTONES."
 
 ;;; The store
 
-(defstruct (kv (:constructor %make-kv (dir)))
-  dir
-  (segments '() :type list)             ; newest first; replaced whole, read without a lock
-  (seq 0 :type integer)
-  (merges 0 :type integer)
-  ;; Merges run on a background thread, one at a time. The lock orders every change of
-  ;; SEGMENTS (a flush adds one at the front, a merge replaces a run) with its MANIFEST.
-  (lock (sb-thread:make-mutex :name "kv"))
-  (merged (sb-thread:make-waitqueue :name "kv merge done"))
-  (merger nil)                          ; the running merge thread
-  (merge-error nil)                     ; a merge's or batch write's failure, for the next writer
-  (background t)                        ; NIL: merge on the writer's thread
+(clempo.guard:define-shared-struct (kv (:constructor %make-kv (dir &key (seq 0) (segments '()) (background t)
+                                                                   prefetcher)))
+  "An open KV store. Merges and batch writes run on background threads, one of each at a
+time; LOCK orders every change of SEGMENTS (a flush adds one at the front, a merge replaces
+a run) with its MANIFEST."
+  (dir nil :guard :immutable)
+  ;; newest first; replaced whole under LOCK, read without it
+  (segments '() :type list :guard (:lock-writes lock))
+  (seq 0 :type integer :guard (:lock lock))
+  (merges 0 :type integer :guard (:lock-writes lock)) ; a statistic, read without the lock
+  (lock (sb-thread:make-mutex :name "kv") :guard :immutable)
+  (merged (sb-thread:make-waitqueue :name "kv merge done") :guard :immutable)
+  (merger nil :guard (:lock lock))                    ; the running merge thread
+  (merge-error nil :guard (:lock lock))               ; a merge's or batch write's failure, for the next writer
+  (background t :guard :immutable)                    ; NIL: merge on the writer's thread
   ;; Batches handed to KV-WRITE-ASYNC and not yet installed as segments (newest first), read
-  ;; before the segments; the thread writing the oldest of them.
-  (batches '() :type list)
-  (batch-writer nil)
-  (prefetcher nil))                     ; the read-ahead thread started at open
+  ;; before the segments: replaced whole under LOCK, read without it. The thread writing the
+  ;; oldest of them.
+  (batches '() :type list :guard (:lock-writes lock))
+  (batch-writer nil :guard (:lock lock))
+  (prefetcher nil :guard (:lock lock)))               ; the read-ahead thread started at open
 
 (defun kv-segment-name (n) (format nil "seg-~12,'0D.kv" n))
 
@@ -494,18 +498,17 @@ manifest names and touches nothing, for a reader beside the datadir's owner; a s
 concurrent merge deleted between the manifest read and its open signals FILE-ERROR or
 SB-POSIX:SYSCALL-ERROR (read again). PREFETCH bounds the segment bytes read ahead into the
 page cache (KV-PREFETCH): :AUTO, a byte count, or 0 for none."
-  (let ((kv (%make-kv dir))
-        (names '()))
+  (let ((seq 0) (names '()))
     (when (kv-manifest-p dir)
-      (multiple-value-bind (seq listed) (parse-kv-manifest (clempo.io:read-file-string (dir-file dir "MANIFEST")))
-        (setf (kv-seq kv) seq names listed)))
+      (multiple-value-bind (listed-seq listed) (parse-kv-manifest (clempo.io:read-file-string (dir-file dir "MANIFEST")))
+        (setf seq listed-seq names listed)))
     (unless read-only
       (dolist (p (directory (dir-file dir "seg-*.kv")))
         (unless (member (file-namestring p) names :test #'string=) (delete-file p)))
       (dolist (p (directory (dir-file dir "seg-*.kv-tmp"))) (delete-file p)))
-    (setf (kv-segments kv) (mapcar (lambda (n) (open-kseg (dir-file dir "~A" n))) names))
-    (kv-prefetch kv (if (eq prefetch :auto) (default-prefetch-bytes) prefetch))
-    kv))
+    (let ((segments (mapcar (lambda (n) (open-kseg (dir-file dir "~A" n))) names)))
+      (%make-kv dir :seq seq :segments segments
+                    :prefetcher (kv-prefetch segments (if (eq prefetch :auto) (default-prefetch-bytes) prefetch))))))
 
 ;;; Read-ahead. A lookup reads one block of one segment at a random place; with the page
 ;;; cache cold (after a reboot, or files the cache has not seen, such as an APFS clone) each
@@ -527,28 +530,28 @@ page cache (KV-PREFETCH): :AUTO, a byte count, or 0 for none."
 
 (defconstant +madv-willneed+ 3)
 
-(defun kv-prefetch (kv limit)
-  "Ask the kernel to read up to LIMIT bytes of KV's segments, newest first, on a thread."
+(defun kv-prefetch (segments limit)
+  "Ask the kernel to read up to LIMIT bytes of SEGMENTS, newest first, on a thread; returns
+the thread, or NIL when it reads nothing."
   (let ((segs (loop with left = limit
-                    for s in (kv-segments kv)
+                    for s in segments
                     while (> left 0)
                     collect s do (decf left (kseg-length s)))))
     (when segs
-      (setf (kv-prefetcher kv)
-            (sb-thread:make-thread
-             (lambda ()
-               ;; holding SEGS keeps their mappings alive (their finalizers unmap them)
-               (dolist (s segs)
-                 (let ((sap (car (kseg-box s))))
-                   (when sap
-                     (sb-alien:alien-funcall
-                      (sb-alien:extern-alien "madvise" (function sb-alien:int sb-sys:system-area-pointer
-                                                                 sb-alien:unsigned-long sb-alien:int))
-                      sap (kseg-length s) +madv-willneed+)))))
-             :name "kv prefetch")))))
+      (sb-thread:make-thread
+       (lambda ()
+         ;; holding SEGS keeps their mappings alive (their finalizers unmap them)
+         (dolist (s segs)
+           (let ((sap (car (kseg-box s))))
+             (when sap
+               (sb-alien:alien-funcall
+                (sb-alien:extern-alien "madvise" (function sb-alien:int sb-sys:system-area-pointer
+                                                           sb-alien:unsigned-long sb-alien:int))
+                sap (kseg-length s) +madv-willneed+)))))
+       :name "kv prefetch"))))
 
 (defun kv-wait-prefetch (kv)
-  (let ((thread (shiftf (kv-prefetcher kv) nil)))
+  (let ((thread (clempo.lock:with-lock ((kv-lock kv)) (shiftf (kv-prefetcher kv) nil))))
     (when thread (sb-thread:join-thread thread :default nil))))
 
 (defun kv-get (kv key)
@@ -607,7 +610,7 @@ batch is still being written (batches install in order)."
                          (setf (kv-batches kv) (remove table (kv-batches kv))))))
                    (funcall after)
                    (kv-merge-tiers kv))
-               (error (e) (setf (kv-merge-error kv) e))))
+               (error (e) (clempo.lock:with-lock ((kv-lock kv)) (setf (kv-merge-error kv) e)))))
            :name "kv batch write")))
   kv)
 
@@ -654,7 +657,7 @@ readable through KV but not yet named in MANIFEST (an import publishes them all 
   kv)
 
 (defun kv-check-merge (kv)
-  (let ((e (shiftf (kv-merge-error kv) nil)))
+  (let ((e (clempo.lock:with-lock ((kv-lock kv)) (shiftf (kv-merge-error kv) nil))))
     (when e (error e))))
 
 (defun merge-group (segments)
@@ -680,7 +683,7 @@ in size, or NIL."
                        (handler-case (loop for g = group then (clempo.lock:with-lock ((kv-lock kv))
                                                                 (merge-group (kv-segments kv)))
                                            while g do (kv-merge kv g))
-                         (error (e) (setf (kv-merge-error kv) e)))
+                         (error (e) (clempo.lock:with-lock ((kv-lock kv)) (setf (kv-merge-error kv) e))))
                        (clempo.lock:with-lock ((kv-lock kv))
                          (setf (kv-merger kv) nil)
                          (sb-thread:condition-broadcast (kv-merged kv))))
@@ -728,5 +731,5 @@ adjacent while it merges: flushes only add segments at the front."
 (defun kv-close (kv)
   (kv-wait-prefetch kv)
   (kv-wait-merges kv)
-  (setf (kv-segments kv) '())
+  (clempo.lock:with-lock ((kv-lock kv)) (setf (kv-segments kv) '()))
   kv)

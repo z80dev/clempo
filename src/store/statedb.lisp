@@ -123,51 +123,58 @@ number of writes (accounts, slots and trie nodes) kept in RAM before the store f
   (declare (ignore backed))
   (make-hash-table :size size))
 
-;;; Caches and threads. Only the database's writer (the thread that last opened a block, or
-;;; opened the database) fills its caches; another thread reading a backed database reads
-;;; through to the store without inserting anything. Readers and the writer never run at
-;;; once (the RPC backend's lock), and concurrent readers of tables nobody changes are safe,
-;;; so the hot tables need no locks.
+;;; Caches and threads. One thread at a time changes a database: its writer (the thread that
+;;; last opened a block, or opened the database) or a thread it is lent to whole (the RPC
+;;; trie-state pool), and threads read it only while nobody changes it (the RPC backend's
+;;; read and write gate). Only the writer fills the caches; another thread reading a backed
+;;; database reads through to the store without inserting anything. Concurrent readers of
+;;; tables nobody changes are safe, so the hot tables need no locks. The guard checker cannot
+;;; see that gate: the slots it covers are :UNCHECKED "one changer, no reader meanwhile", and
+;;; the tables held in :IMMUTABLE slots follow it too.
 
-(defstruct (statedb (:constructor %make-statedb
-                        (backing nodes limits
-                         &aux (accounts (make-table backing 4096))
-                              (codes (make-table backing 1024))
-                              (trie (make-secure-trie :store nodes))
-                              (writer sb-thread:*current-thread*)))
-                    (:conc-name db-))
-  (writer nil)                                             ; the thread that fills the caches
-  (backing nil)                                            ; NIL in RAM, else the KV store
-  (nodes nil)                                              ; the tries' node store (backed)
-  (limits nil)
-  (accounts (make-hash-table) :type hash-table)            ; address -> account (backed: or NIL, absent)
-  (codes (make-hash-table) :type hash-table)               ; hash integer -> octets
-  (trie nil)                                               ; account trie
-  (dirty (make-hash-table) :type hash-table)               ; address -> t (account trie stale)
-  (number -1 :type integer)                                ; last committed block
-  (hash nil)
-  (root-hash nil)                                          ; root at NUMBER
-  (recent (make-hash-table) :type hash-table)              ; number -> hash, last 256
+(clempo.guard:define-shared-struct (statedb (:constructor %make-statedb
+                                                (backing nodes limits
+                                                 &aux (accounts (make-table backing 4096))
+                                                      (codes (make-table backing 1024))
+                                                      (trie (make-secure-trie :store nodes))
+                                                      (writer sb-thread:*current-thread*)))
+                                            (:conc-name db-))
+  ;; the thread that fills the caches
+  (writer nil :guard (:unchecked "set by DB-BEGIN-BLOCK on the one changer (Caches and threads); FILLING-P reads it on any thread"))
+  (backing nil :guard :immutable)                          ; NIL in RAM, else the KV store
+  (nodes nil :guard :immutable)                            ; the tries' node store (backed)
+  (limits nil :guard :immutable)
+  (accounts (make-hash-table) :type hash-table :guard :immutable) ; address -> account (backed: or NIL, absent)
+  (codes (make-hash-table) :type hash-table :guard :immutable)    ; hash integer -> octets
+  (trie nil :guard (:unchecked "one changer, no reader meanwhile"))       ; account trie
+  (dirty (make-hash-table) :type hash-table :guard :immutable)    ; address -> t (account trie stale)
+  (number -1 :type integer :guard (:unchecked "one changer, no reader meanwhile")) ; last committed block
+  (hash nil :guard (:unchecked "one changer, no reader meanwhile"))
+  (root-hash nil :guard (:unchecked "one changer, no reader meanwhile"))  ; root at NUMBER
+  (recent (make-hash-table) :type hash-table                               ; number -> hash, last 256
+   :guard (:unchecked "one changer, no reader meanwhile"))
   ;; the open block
-  (open-p nil)
-  (touched (make-hash-table) :type hash-table)             ; address -> touch
-  (saved-trie nil)
-  (new-codes '() :type list)
+  (open-p nil :guard (:unchecked "one changer, no reader meanwhile"))
+  (touched (make-hash-table) :type hash-table                              ; address -> touch
+   :guard (:unchecked "one changer, no reader meanwhile"))
+  (saved-trie nil :guard (:thread (db) (db-writer db)))    ; the opener's, from open to close
+  (new-codes '() :type list :guard (:unchecked "one changer, no reader meanwhile"))
   ;; speculation: committed blocks that WITH-SPECULATIVE-BLOCKS will undo, newest first
-  (speculation-depth 0 :type fixnum)
-  (speculative '() :type list)
+  (speculation-depth 0 :type fixnum :guard (:unchecked "one changer, no reader meanwhile"))
+  (speculative '() :type list :guard (:unchecked "one changer, no reader meanwhile"))
   ;; serializes proof readers' lazy storage-trie builds (DB-STORAGE-PROOF)
-  (proof-lock (sb-thread:make-mutex :name "statedb proofs"))
-  ;; in RAM: keccak(address) integer -> address, built by DB-ADDRESS-OF-HASH's first call
-  (preimages nil)
+  (proof-lock (sb-thread:make-mutex :name "statedb proofs") :guard :immutable)
+  ;; in RAM: keccak(address) integer -> address, built by DB-ADDRESS-OF-HASH's first call and
+  ;; then kept whole (NOTE-PREIMAGE looks for it without the lock)
+  (preimages nil :guard (:lock-writes proof-lock))
   ;; backed: writes since the last flush, and cache bookkeeping
-  (account-total 0 :type integer)                          ; accounts in the state
-  (flush-accounts (make-hash-table) :type hash-table)      ; address -> flush-mark
-  (flush-codes '() :type list)                             ; code keys new since the flush
-  (flushed-root +empty-trie-root+)                         ; state root in the store
-  (dirty-weight 0 :type fixnum)                            ; writes since the flush
-  (cached-slots 0 :type fixnum)                            ; slot entries cached since eviction
-  (code-bytes 0 :type fixnum))                             ; bytes of cached code
+  (account-total 0 :type integer :guard (:unchecked "one changer, no reader meanwhile")) ; accounts in the state
+  (flush-accounts (make-hash-table) :type hash-table :guard :immutable) ; address -> flush-mark
+  (flush-codes '() :type list :guard (:unchecked "one changer, no reader meanwhile"))  ; code keys new since the flush
+  (flushed-root +empty-trie-root+ :guard (:unchecked "one changer, no reader meanwhile")) ; state root in the store
+  (dirty-weight 0 :type fixnum :guard (:unchecked "one changer, no reader meanwhile"))   ; writes since the flush
+  (cached-slots 0 :type fixnum :guard (:unchecked "one changer, no reader meanwhile"))   ; slot entries cached since eviction
+  (code-bytes 0 :type fixnum :guard (:unchecked "one changer, no reader meanwhile")))    ; bytes of cached code
 
 (declaim (inline filling-p))
 (defun filling-p (db)
