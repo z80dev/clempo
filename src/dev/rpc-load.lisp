@@ -1,15 +1,16 @@
 (defpackage #:clempo.rpc-load
   (:use #:cl #:clempo.base)
   (:local-nicknames (#:io #:clempo.io) (#:json #:clempo.json) (#:jsonrpc #:clempo.jsonrpc))
-  (:documentation "JSON-RPC load and answer diffing between two servers at one height (the
+  (:documentation "JSON-RPC load and answer diffing between two or three servers at one height (the
 `rpc-load` command, docs/BENCH.md). A corpus of requests is drawn, from a seeded
 *ENTROPY*, out of the blocks FROM..TO: balances and TIP-20 balanceOf calls of the
 transactions' senders at TO, full blocks, 10-block log ranges of the tokens they touched,
 call traces of their transactions and account proofs; on request (*TRIE-METHODS*) also the
 calls that need a block's state tries, at a block drawn from the range. Every request is
-first sent to both servers and the answers compared; then each method runs at each
-concurrency on each server in turn, one keep-alive connection per client thread, measuring
-requests per second and latency percentiles.")
+first sent to every server and each answer compared with the reference's (B); then each
+method runs at each concurrency on each server in turn, the first server rotating from step
+to step, one keep-alive connection per client thread, measuring requests per second and
+latency percentiles.")
   (:export #:build-corpus #:diff-corpus #:load-run))
 
 (in-package #:clempo.rpc-load)
@@ -273,9 +274,12 @@ one warm-up request, all released together. Returns a plist."
         while comma))
 
 (defcommand "rpc-load" (args)
-  "RPC load and answer diff of two servers at one height: rpc-load -a URL -b URL -from N -to M [-n 200] [-total 400] [-concurrency 1,16,64] [-methods m,...] [-rounds 3] [-seed S] [-result FILE] [-no-diff] [-no-load]; the method \"trie\" stands for the trie-state calls (debug_intermediateRoots, debug_executionWitness, debug_stateRootWithUpdates, eth_getProof@block)"
+  "RPC load and answer diff of two or three servers at one height: rpc-load -a URL -b URL [-c URL] -from N -to M [-n 200] [-total 400] [-concurrency 1,16,64] [-methods m,...] [-rounds 3] [-seed S] [-result FILE] [-no-diff] [-no-load]; B is the reference the others are diffed against and divided by; the method \"trie\" stands for the trie-state calls (debug_intermediateRoots, debug_executionWitness, debug_stateRootWithUpdates, eth_getProof@block)"
   (let* ((url-a (or (arg args :a) (return-from command (progn (log-line "rpc-load: -a URL required") 2))))
          (url-b (or (arg args :b) (return-from command (progn (log-line "rpc-load: -b URL required") 2))))
+         (url-c (arg args :c))
+         (urls (list* (cons :a url-a) (cons :b url-b) (and url-c (list (cons :c url-c)))))
+         (sides (mapcar #'car urls))
          (from (arg-int args :from)) (to (arg-int args :to))
          (methods (if (arg args :methods)
                       (loop for m in (split-commas (arg args :methods))
@@ -283,7 +287,7 @@ one warm-up request, all released together. Returns a plist."
                       clempo.rpc-load::*methods*))
          (concurrency (mapcar #'parse-integer (split-commas (arg args :concurrency "1,16,64"))))
          (total (arg-int args :total 400))
-         (results '()) (diffs '()))
+         (results '()) (diffs '()) (step 0))
     (unless (and from to) (log-line "rpc-load: -from and -to required") (return-from command 2))
     (multiple-value-bind (corpus blocks txs senders tokens)
         (clempo.rpc-load:build-corpus url-b from to :n (arg-int args :n 200)
@@ -291,19 +295,24 @@ one warm-up request, all released together. Returns a plist."
       (log-line "corpus: blocks ~D..~D: ~D blocks, ~D txs, ~D senders, ~D tokens; ~D requests per method"
                 from to blocks txs senders tokens (arg-int args :n 200))
       (unless (arg-flag args :no-diff)
-        (setf diffs (clempo.rpc-load:diff-corpus corpus url-a url-b methods)))
+        ;; each other server against the reference B: (pair method same differ examples)
+        (setf diffs (loop for (side . url) in urls
+                          unless (eq side :b)
+                            append (mapcar (lambda (d) (cons side d))
+                                           (clempo.rpc-load:diff-corpus corpus url url-b methods)))))
       (unless (arg-flag args :no-load)
         (dotimes (round (arg-int args :rounds 3))
           (dolist (m methods)
             (dolist (c concurrency)
-              ;; alternate which server goes first at each step
-              (dolist (side (if (evenp (length results)) '(:a :b) '(:b :a)))
-                (let ((r (clempo.rpc-load:load-run (if (eq side :a) url-a url-b) m (gethash m corpus) c total)))
-                  (log-line "round ~D ~A ~A c=~D: ~,1F req/s p50 ~,3F ms p99 ~,3F ms errors ~D"
-                            round side m c (getf r :rps) (getf r :p50) (getf r :p99) (getf r :errors))
-                  (push (list* :side side :round round r) results)))))))
+              ;; rotate which server goes first at each step
+              (let ((k (mod step (length sides))))
+                (dolist (side (append (nthcdr k sides) (subseq sides 0 k)))
+                  (let ((r (clempo.rpc-load:load-run (cdr (assoc side urls)) m (gethash m corpus) c total)))
+                    (log-line "round ~D ~A ~A c=~D: ~,1F req/s p50 ~,3F ms p99 ~,3F ms errors ~D"
+                              round side m c (getf r :rps) (getf r :p50) (getf r :p99) (getf r :errors))
+                    (push (list* :side side :round round r) results))))
+              (incf step)))))
       (setf results (nreverse results))
-      (format t "~&Medians over rounds; latency in ms.~%~%| Method | Clients | A req/s | B req/s | A/B | A p50/p99 | B p50/p99 | errors A/B |~%|---|---:|---:|---:|---:|---:|---:|---|~%")
       (flet ((med (side m c key)
                (let ((xs (sort (loop for r in results
                                      when (and (eq (getf r :side) side) (string= (getf r :method) m)
@@ -312,23 +321,30 @@ one warm-up request, all released together. Returns a plist."
                                #'<)))
                  (and xs (if (eq key :errors) (reduce #'+ xs) (nth (floor (length xs) 2) xs)))))
              (rate (x) (if (< x 100) (format nil "~,2F" x) (format nil "~:D" (round x)))))
+        (if url-c
+            (format t "~&Medians over rounds; latency in ms.~%~%| Method | Clients | A req/s | B req/s | C req/s | A/B | C/B | A/C | A p50/p99 | B p50/p99 | C p50/p99 | errors A/B/C |~%|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|~%")
+            (format t "~&Medians over rounds; latency in ms.~%~%| Method | Clients | A req/s | B req/s | A/B | A p50/p99 | B p50/p99 | errors A/B |~%|---|---:|---:|---:|---:|---:|---:|---|~%"))
         (dolist (m methods)
           (dolist (c concurrency)
-            (when (and (med :a m c :rps) (med :b m c :rps))
-              (format t "| `~A` | ~D | ~A | ~A | ~,2F | ~,3F/~,3F | ~,3F/~,3F | ~D/~D |~%"
-                      m c (rate (med :a m c :rps)) (rate (med :b m c :rps))
-                      (/ (med :a m c :rps) (med :b m c :rps))
-                      (med :a m c :p50) (med :a m c :p99) (med :b m c :p50) (med :b m c :p99)
-                      (med :a m c :errors) (med :b m c :errors))))))
+            (when (every (lambda (side) (med side m c :rps)) sides)
+              (flet ((rps (side) (med side m c :rps)))
+                (format t "| `~A` | ~D | ~{~A~^ | ~} | ~{~,2F~^ | ~} | ~{~,3F/~,3F~^ | ~} | ~{~D~^/~} |~%"
+                        m c (mapcar (lambda (s) (rate (rps s))) sides)
+                        (if url-c
+                            (list (/ (rps :a) (rps :b)) (/ (rps :c) (rps :b)) (/ (rps :a) (rps :c)))
+                            (list (/ (rps :a) (rps :b))))
+                        (loop for s in sides collect (med s m c :p50) collect (med s m c :p99))
+                        (mapcar (lambda (s) (med s m c :errors)) sides)))))))
       (when diffs
-        (format t "~&~%| Method | same | differ |~%|---|---:|---:|~%")
-        (loop for (m same differ) in diffs do (format t "| `~A` | ~D | ~D |~%" m same differ)))
+        (format t "~&~%| Pair | Method | same | differ |~%|---|---|---:|---:|~%")
+        (loop for (side m same differ) in diffs
+              do (format t "| ~A/B | `~A` | ~D | ~D |~%" side m same differ)))
       (when (arg args :result)
         (clempo.io:write-file-atomically
          (arg args :result)
          (clempo.json:to-json-octets
           (clempo.json:jobject
-           "a" url-a "b" url-b "from" from "to" to "seed" (arg-int args :seed 1)
+           "a" url-a "b" url-b "c" (or url-c :null) "from" from "to" to "seed" (arg-int args :seed 1)
            "corpus" (clempo.json:jobject "blocks" blocks "txs" txs "senders" senders "tokens" tokens)
            "load" (coerce (loop for r in results
                                 collect (clempo.json:jobject
@@ -339,14 +355,15 @@ one warm-up request, all released together. Returns a plist."
                                          "p50_ms" (getf r :p50) "p90_ms" (getf r :p90)
                                          "p99_ms" (getf r :p99) "max_ms" (getf r :max)))
                           'simple-vector)
-           "diff" (coerce (loop for (m same differ examples) in diffs
+           "diff" (coerce (loop for (side m same differ examples) in diffs
                                 collect (clempo.json:jobject
+                                         "side" (string-downcase (symbol-name side))
                                          "method" m "same" same "differ" differ
                                          "examples" (coerce (loop for (p x y) in examples
                                                                   collect (clempo.json:jobject
                                                                            "params" p
-                                                                           "a" (prin1-to-string x)
+                                                                           "side" (prin1-to-string x)
                                                                            "b" (prin1-to-string y)))
                                                             'simple-vector)))
                           'simple-vector)))))
-      (if (some (lambda (d) (plusp (third d))) diffs) 1 0))))
+      (if (some (lambda (d) (plusp (fourth d))) diffs) 1 0))))

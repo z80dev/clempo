@@ -1148,3 +1148,75 @@ Tests: `tests/rpc/tries-tests.lisp` runs every trie method at 9 blocks of mainne
 4,000 (a genesis checkpoint as the only base). 36 calls from 12 threads on 3 states equal
 the serial answers. With two states held, a third call waits, and it completes once one
 state comes back.
+
+### clempo, goempo and Rust on one host
+
+The goempo figures quoted in the earlier tables of this section are goempo's own published
+numbers (its METRICS: height 49,449,999, its build machine, a Python client). They come from
+a different host, client and corpus, so they cannot be set against clempo's rows. This run
+measures all three servers on the same Mac with the same client and corpus.
+
+- **clempo** `37db9c6`, release `rpc-serve` (archive backend, head 50,049,999), heap 40000 MiB.
+- **Rust** `tempo node` `568b4fb`, on the same APFS-cloned snapshot unwound to 50,049,999
+  and started as in [Reproduce](#reproduce). This is not the live node.
+- **goempo** `92e996c`, `goempo-dev serve -datadir`, as in goempo's own RPC benchmark. Its
+  datadir came from the R7 Recent run (`go-recent-work`, at 49,449,999) and was replayed with
+  `goempo-dev replay` to 50,048,999, checking every root (599,000 blocks in 118.6 s). `serve
+  -state 50049999` then replays the last 1,000 blocks in memory and serves from them. Its
+  chunks for 49,450,000..50,049,999 came from clempo's server through `goempo-dev fetch-range`
+  (`debug_getRawBlock`), and replay checks every root.
+- **Load:** `rpc-load` now takes a third server (`-c`). B is the reference: A and C are each
+  diffed against it, and the server that goes first rotates at every step. Before this
+  change the two-server order never alternated: `results` grows by 2 per step, so its
+  length was always even.
+- **Pinning:** none. macOS has no CPU affinity, so all three servers and the client were
+  unpinned on the same 16-core M-series host. The load average was 5 at the start and 10–29
+  during the runs, from other agents' jobs.
+
+```sh
+goempo-dev fetch-range -rpc http://127.0.0.1:18546 -dir "$go_chunks" -from 49450000 -to 50049999
+goempo-dev replay -dir "$go_chunks" -to 50048999 -datadir "$go_state" -checkpoint 100000 -heal 0 -diagnose off
+goempo-dev serve -addr 127.0.0.1:18547 -datadir "$go_state" -chunks "$go_chunks" -blocks "$empty_dir" -state 50049999 &
+CLEMPO_BUILD=release bin/clempo-dev rpc-load -a http://127.0.0.1:18546 -b http://127.0.0.1:18545 \
+  -c http://127.0.0.1:18547 -from 50049000 -to 50049999 -n 400 -total 100000 -rounds 7 \
+  -methods eth_getBalance,eth_call,eth_getBlockByNumber,eth_getLogs,eth_getProof
+```
+
+All 2,000 answers from clempo and from goempo were identical to Rust's, and no load request
+failed. Medians of 7 rotated rounds of 100,000 requests (`three-2`), in req/s:
+
+| Method | Clients | clempo | goempo | Rust | clempo/goempo | clempo/Rust | goempo/Rust |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `eth_getBalance` | 1 | 46,294 | 46,041 | 44,673 | 1.01 | 1.04 | 1.03 |
+| `eth_getBalance` | 16 | 159,530 | 126,478 | 160,832 | **1.26** | 0.99 | 0.79 |
+| `eth_getBalance` | 64 | 158,726 | 146,344 | 162,460 | **1.08** | 0.98 | 0.90 |
+| `eth_call` | 1 | 24,683 | 24,428 | 17,315 | 1.01 | **1.43** | 1.41 |
+| `eth_call` | 16 | 139,266 | 50,567 | 104,026 | **2.75** | **1.34** | 0.49 |
+| `eth_call` | 64 | 154,053 | 58,615 | 109,812 | **2.63** | **1.40** | 0.53 |
+| `eth_getBlockByNumber` | 1 | 40,339 | 25,196 | 26,600 | **1.60** | **1.52** | 0.95 |
+| `eth_getBlockByNumber` | 16 | 151,704 | 120,759 | 147,072 | **1.26** | 1.03 | 0.82 |
+| `eth_getBlockByNumber` | 64 | 155,283 | 140,506 | 146,576 | **1.11** | 1.06 | 0.96 |
+| `eth_getLogs` | 1 | 31,242 | 25,784 | 10,482 | **1.21** | **2.98** | 2.46 |
+| `eth_getLogs` | 16 | 146,525 | 117,741 | 74,292 | **1.24** | **1.97** | 1.58 |
+| `eth_getLogs` | 64 | 152,519 | 137,029 | 75,233 | **1.11** | **2.03** | 1.82 |
+| `eth_getProof` | 1 | 21,570 | 21,195 | 6,855 | 1.02 | **3.15** | 3.09 |
+| `eth_getProof` | 16 | 132,291 | 68,759 | 34,870 | **1.92** | **3.79** | 1.97 |
+| `eth_getProof` | 64 | 147,341 | 77,632 | 35,056 | **1.90** | **4.20** | 2.21 |
+
+- **clempo against goempo:** clempo is at or above goempo in every cell. At 1 client
+  `eth_getBalance`, `eth_call` and `eth_getProof` are ties (1.01–1.02). From 16 clients on,
+  goempo serialises state reads on one lock, so its `eth_call` and `eth_getProof` stop
+  scaling (0.49–0.53× Rust on `eth_call`).
+- **The client's ceiling:** at 16 and 64 clients, clempo and Rust both sit at about 150–160k
+  req/s on the cheap methods (`eth_getBalance`, `eth_getBlockByNumber`, and clempo's
+  `eth_getLogs`/`eth_call` at 64). That is the SBCL load client's ceiling on this host, as
+  in earlier runs, so clempo/Rust at 0.98–1.06 there is a tie, not a loss or a win.
+- **A shorter run** (`three-1`, 5 rounds of 20,000) gave the same picture. clempo/goempo was
+  1.02–2.64 in every cell, and clempo/Rust was 0.96–0.98 only in the same `eth_getBalance`
+  ceiling cells.
+- **`debug_traceTransaction`:** goempo cannot be measured. Both `goempo-dev serve` and the
+  `goempo` node serve state only at their head, and every trace in the corpus is of a block
+  below it. goempo answered all 400 with `-32000 state at that block is not replayed`. Its
+  published table has no trace row either. clempo against Rust on the same host
+  (`trace-2`, 7 rounds of 20,000, 400/400 identical): **1.81 / 2.22 / 2.34** at 1/16/64.
+
