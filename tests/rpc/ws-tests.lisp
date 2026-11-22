@@ -406,6 +406,17 @@ stream LOG."
 
 (defun strictly-increasing-p (list) (every #'< list (rest list)))
 
+(defun open-connections (server)
+  "SERVER's connections, read under its lock."
+  (clempo.lock:with-lock ((server::server-lock server))
+    (copy-list (server::server-connections server))))
+
+(defun outbox-counts (c)
+  "(values queued skipped): C's heads waiting for its writer and those it skipped, read under
+its outbox lock."
+  (clempo.lock:with-lock ((server::connection-outbox-lock c))
+    (values (server::connection-outbox-length c) (server::connection-skipped c))))
+
 (deftest ws-stalled-client-never-blocks-the-follower ()
   (with-test-server (server backend log)
     (let* ((first 2000) (last 3999)
@@ -415,7 +426,7 @@ stream LOG."
                    ;; Linux send buffer can hold the entire burst. Cap the stalled peer's
                    ;; server-side send buffer before connecting the live peer.
                    (clempo.poll:set-send-buffer
-                    (server::connection-fd (first (server::server-connections server))) 4096)
+                    (server::connection-fd (first (open-connections server))) 4096)
                    (connect (server:server-port server)))))
       (unwind-protect
            (let ((stalled-heads (json:jget (call stalled 1 "eth_subscribe" #("newHeads")) "result"))
@@ -447,9 +458,10 @@ stream LOG."
                  (is (strictly-increasing-p numbers) "the live client's heads are in order")))
              ;; The live client drained its queue; the stalled one's writer is blocked
              ;; on its socket with a full queue.
-             (is= (list server::+outbox-capacity+ 0)
-                  (sort (mapcar #'server::connection-outbox-length (server::server-connections server)) #'>))
-             (is (plusp (reduce #'+ (mapcar #'server::connection-skipped (server::server-connections server)))))
+             (let ((connections (open-connections server)))
+               (is= (list server::+outbox-capacity+ 0)
+                    (sort (mapcar (lambda (c) (nth-value 0 (outbox-counts c))) connections) #'>))
+               (is (plusp (reduce #'+ (mapcar (lambda (c) (nth-value 1 (outbox-counts c))) connections)))))
              (is (search "websocket subscriber lagging behind" (get-output-stream-string log)))
              ;; once STALLED reads again it gets the newest heads, in order, the oldest skipped
              (let ((numbers (head-numbers (loop for m = (receive-json stalled)

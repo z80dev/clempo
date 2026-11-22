@@ -58,35 +58,51 @@ worker merely preempted by the host under load is not taken for a stalled one.")
 
 (defvar *server* nil "The server serving the current request.")
 
-(defvar *after-response* nil
-  "While a websocket request runs: thunks to call, in order, once its response is sent.")
+(clempo.guard:defshared *after-response* nil
+  "While a websocket request runs: thunks to call, in order, once its response is sent."
+  :guard (:unchecked "bound per websocket request by SERVE-WEBSOCKET (and by tests that run a method as on a websocket)"))
 
 (defun after-response (thunk)
   "Call THUNK after the current websocket request's response is written (a subscription
 starts there, so no notification precedes the response that names it)."
   (setf *after-response* (append *after-response* (list thunk))))
 
-(defstruct (server (:constructor %make-server))
-  socket port backend
-  ;; Connections by descriptor (replaced whole when it grows, under LOCK), and as a list.
-  (table (make-array 256 :initial-element nil) :type simple-vector)
-  (connections '()) (count 0 :type fixnum)
-  (consensus-slots 0)
-  (lock (sb-thread:make-mutex :name "rpc server"))
-  (running t) (max-connections 256)
+(clempo.guard:define-shared-struct (server (:constructor %make-server))
+  (socket nil :guard :immutable)
+  (port nil :guard :immutable)
+  (backend nil :guard :immutable)
+  ;; Connections by descriptor (replaced whole when it grows, under LOCK; a poller's thread
+  ;; looks an event's connection up without it), and as a list.
+  (table (make-array 256 :initial-element nil) :type simple-vector :guard (:lock-writes lock))
+  (connections '() :guard (:lock lock))
+  (count 0 :type fixnum :guard (:lock lock))
+  (consensus-slots 0 :guard (:lock lock))
+  (lock (sb-thread:make-mutex :name "rpc server") :guard :immutable)
+  ;; a flag, read without the lock
+  (running t :guard (:lock-writes lock))
+  (max-connections 256 :guard :immutable)
   ;; a poller per worker; each connection is watched by one, and run by one thread at a time
-  (pollers #() :type simple-vector) (next-poller 0 :type fixnum)
-  (listen-fd -1) (wake-read -1) (wake-write -1)
-  ;; CREW: the thread serving each poller (a WORKER, by poller index); SPARES: threads whose
+  (pollers #() :type simple-vector :guard :immutable)
+  (next-poller 0 :type fixnum :guard (:lock lock))
+  (listen-fd -1 :guard :immutable)
+  (wake-read -1 :guard :immutable)
+  (wake-write -1 :guard :immutable)
+  ;; CREW: the thread serving each poller (a WORKER, by poller index; its elements change
+  ;; under CREW-LOCK, by the reaper, which alone reads them without it); SPARES: threads whose
   ;; poller went on while they ran a slow call, waiting for another; THREADS: every one
-  ;; started, for STOP-SERVER. All three under CREW-LOCK.
-  (crew #() :type simple-vector) (spares '()) (threads '()) (extra 0 :type fixnum)
-  (crew-lock (sb-thread:make-mutex :name "rpc crew"))
-  (crew-wait (sb-thread:make-waitqueue))
-  (reaper nil)
-  (reaper-lock (sb-thread:make-mutex :name "rpc reaper"))
-  (reaper-wait (sb-thread:make-waitqueue))
-  (log *error-output*) (log-lock (sb-thread:make-mutex :name "rpc log")))
+  ;; started, for STOP-SERVER.
+  (crew #() :type simple-vector :guard :immutable)
+  (spares '() :guard (:lock crew-lock))
+  (threads '() :guard (:lock crew-lock))
+  (extra 0 :type fixnum :guard (:lock crew-lock))
+  (crew-lock (sb-thread:make-mutex :name "rpc crew") :guard :immutable)
+  (crew-wait (sb-thread:make-waitqueue) :guard :immutable)
+  ;; the reaper's thread, set once it is started
+  (reaper nil :guard :atomic)
+  (reaper-lock (sb-thread:make-mutex :name "rpc reaper") :guard :immutable)
+  (reaper-wait (sb-thread:make-waitqueue) :guard :immutable)
+  (log *error-output* :guard :immutable)
+  (log-lock (sb-thread:make-mutex :name "rpc log") :guard :immutable))
 
 (defconstant +outbox-capacity+ 256
   "New heads a websocket subscriber may fall behind before the oldest is skipped: reth's
@@ -129,32 +145,54 @@ PER_BLOCK_FEED_CAPACITY, the depth of its per-block broadcast feeds.")
         (req-close req) nil (req-upgrade req) nil (req-key req) nil (req-need req) 0
         (req-body req) nil (req-body-end req) 0 (req-total req) 0))
 
-(defstruct (connection (:constructor make-connection (&optional (fd -1))))
-  (fd -1 :type fixnum)
-  (in (make-inbuf)) (request (make-request))
-  poller                                ; the poller watching it
+;;; A connection's state is shared by protocols the guards below name. The run token (RUN,
+;;; taken by compare-and-swap in RUN-CONNECTION) gives one thread at a time the HTTP side;
+;;; once upgraded (PHASE :THREAD) the connection belongs to its websocket thread, which
+;;; shares the subscriptions and the outbox with PUBLISH-HEAD and its writer thread.
+
+(clempo.guard:define-shared-struct (connection (:constructor make-connection (&optional (fd -1) server)))
+  (server nil :guard :immutable)          ; the server it came to (NIL in tests without one)
+  (fd -1 :type fixnum :guard (:held-writes (c) (server-lock (connection-server c))))
+  (in (make-inbuf) :guard :immutable)
+  (request (make-request) :guard :immutable)
+  ;; the poller watching it, chosen as it is published
+  (poller nil :guard (:held-writes (c) (server-lock (connection-server c))))
   ;; 0 idle, 1 a thread is running it, 2 running and to be run once more (RUN-CONNECTION)
-  (run 0)
-  (must-read t)                         ; input may be waiting that no event will announce
-  (hangup nil)                          ; an event said the peer ended its side
-  (phase :idle)                         ; :IDLE, :REQUEST, :BUSY, :WRITING or :THREAD
+  (run 0 :guard :atomic)
+  ;; input may be waiting that no event will announce
+  (must-read t :guard (:unchecked "owned by the thread holding the run token (CONNECTION-RUN CAS)"))
+  ;; an event said the peer ended its side: set by the poller's thread, which may not hold
+  ;; the run token
+  (hangup nil :guard :atomic)
+  ;; :IDLE, :REQUEST, :BUSY, :WRITING or :THREAD
+  (phase :idle :guard (:unchecked "written by the thread holding the run token (CONNECTION-RUN CAS); a poller's thread reads it without the token only to skip a websocket's events, which DRIVE refuses itself, and STOP-SERVER once the workers are joined"))
   ;; When the reaper ends it (monotonic milliseconds), one word so it reads it whole.
-  (deadline most-positive-fixnum :type fixnum)
-  (expired nil)
-  (out nil) (out-start 0 :type fixnum)  ; response bytes the socket has not taken yet
-  (close-after nil)
-  stream
-  (send-lock (sb-thread:make-mutex :name "ws send"))
-  (websocket-p nil)
+  (deadline most-positive-fixnum :type fixnum
+            :guard (:unchecked "written by the thread holding the run token (CONNECTION-RUN CAS), or by ADD-CONNECTION before it publishes the connection; the reaper reads it without the token, one word at a time"))
+  (expired nil :guard (:held-writes (c) (server-lock (connection-server c))))
+  ;; response bytes the socket has not taken yet
+  (out nil :guard (:unchecked "owned by the thread holding the run token (CONNECTION-RUN CAS)"))
+  (out-start 0 :type fixnum :guard (:unchecked "owned by the thread holding the run token (CONNECTION-RUN CAS)"))
+  (close-after nil :guard (:unchecked "owned by the thread holding the run token (CONNECTION-RUN CAS)"))
+  (stream nil :guard (:lock send-lock))
+  (send-lock (sb-thread:make-mutex :name "ws send") :guard :immutable)
+  (websocket-p nil :guard (:lock-writes outbox-lock))
   ;; Replaced whole (never mutated in place) under SUBSCRIPTIONS-LOCK, so the writer thread
   ;; may read the current list without the lock.
-  (subscriptions '()) (reserved 0) (consensus-slots 0)
-  (subscriptions-lock (sb-thread:make-mutex :name "ws subscriptions"))
+  (subscriptions '() :guard (:lock-writes subscriptions-lock))
+  (reserved 0 :guard (:lock subscriptions-lock))
+  (consensus-slots 0 :guard (:held (c) (server-lock (connection-server c))))
+  (subscriptions-lock (sb-thread:make-mutex :name "ws subscriptions") :guard :immutable)
   ;; New heads waiting for the writer thread: (number certificate seen . subscriptions).
-  (outbox '()) (outbox-length 0) (skipped 0)
-  (outbox-lock (sb-thread:make-mutex :name "ws outbox"))
-  (outbox-ready (sb-thread:make-waitqueue))
-  (closed nil) (writer nil) (thread nil))
+  (outbox '() :guard (:lock outbox-lock))
+  (outbox-length 0 :guard (:lock outbox-lock))
+  (skipped 0 :guard (:lock outbox-lock))
+  (outbox-lock (sb-thread:make-mutex :name "ws outbox") :guard :immutable)
+  (outbox-ready (sb-thread:make-waitqueue) :guard :immutable)
+  (closed nil :guard (:lock outbox-lock))
+  (thread nil :guard (:held-writes (c) (server-lock (connection-server c))))
+  ;; the websocket's notification writer, started and joined by its websocket thread
+  (writer nil :guard (:thread (c) (connection-thread c))))
 
 (defgeneric notify-head (backend connection number subscriptions certificate seen)
   (:documentation "Send SUBSCRIPTIONS' notifications for head NUMBER and its optional certificate.")
@@ -163,18 +201,20 @@ PER_BLOCK_FEED_CAPACITY, the depth of its per-block broadcast feeds.")
     nil))
 
 (defun claim-consensus-slot (connection)
-  (clempo.lock:with-lock ((server-lock *server*))
-    (cond ((>= (connection-consensus-slots connection) 4)
-           (rpc:rpc-fail -32006 "too many consensus subscriptions on this connection" 4))
-          ((>= (server-consensus-slots *server*) 256)
-           (rpc:rpc-fail -32009 "consensus subscription limit reached, try again later"))
-          (t (incf (connection-consensus-slots connection))
-             (incf (server-consensus-slots *server*))))))
+  (let ((server (connection-server connection)))
+    (clempo.lock:with-lock ((server-lock server))
+      (cond ((>= (connection-consensus-slots connection) 4)
+             (rpc:rpc-fail -32006 "too many consensus subscriptions on this connection" 4))
+            ((>= (server-consensus-slots server) 256)
+             (rpc:rpc-fail -32009 "consensus subscription limit reached, try again later"))
+            (t (incf (connection-consensus-slots connection))
+               (incf (server-consensus-slots server)))))))
 
 (defun release-consensus-slot (connection)
-  (clempo.lock:with-lock ((server-lock *server*))
-    (decf (connection-consensus-slots connection))
-    (decf (server-consensus-slots *server*))))
+  (let ((server (connection-server connection)))
+    (clempo.lock:with-lock ((server-lock server))
+      (decf (connection-consensus-slots connection))
+      (decf (server-consensus-slots server)))))
 
 ;;; Subscriptions of a connection
 
@@ -466,9 +506,10 @@ first. Signals BAD-REQUEST for a request to refuse."
            (values (inbuf-octets in) (inbuf-start in) (+ (inbuf-start in) (req-need req))))
           (t (values (inbuf-octets in) 0 0)))))
 
-(defvar *text* nil
+(clempo.guard:defshared *text* nil
   "The calling worker's buffer for request text (a base string), or NIL: a body's text lives
-there until the worker reads the next one.")
+there until the worker reads the next one."
+  :guard (:unchecked "bound per worker thread by START-WORKER; BODY-TEXT replaces it only where it is bound (not NIL)"))
 
 (defconstant +text-keep+ (* 1024 1024) "The largest text buffer a worker keeps.")
 
@@ -525,7 +566,8 @@ backend's read lock. A body that is not UTF-8 is a parse error, as the reference
 
 ;;; HTTP responses, rendered into the worker's buffer
 
-(defvar *out* nil "The calling worker's response buffer (octets).")
+(clempo.guard:defshared *out* nil "The calling worker's response buffer (octets)."
+  :guard (:unchecked "bound per request thread by CALL-WITH-RPC-THREAD"))
 
 (defun reason (status)
   (case status (200 "OK") (400 "Bad Request") (405 "Method Not Allowed")
@@ -778,6 +820,9 @@ in C until the socket can take more) or :FAILED."
 (defun drive (server c)
   "Run C on an event from its socket: answer every request its input completes, then return
 to wait for the next event (input, room to write, or the reaper's shutdown), or end it."
+  ;; handed to its websocket thread: an event taken before the hand-over (by a poller's
+  ;; thread that read the phase before it changed) no longer runs it
+  (when (eq (connection-phase c) :thread) (return-from drive))
   ;; the event may announce input: a socket watched by its edges must be read until a read
   ;; leaves nothing behind
   (setf (connection-must-read c) t)
@@ -820,14 +865,14 @@ to wait for the next event (input, room to write, or the reaper's shutdown), or 
 
 (defun add-connection (server fd)
   "Take the accepted socket FD, giving it to the next worker's poller in turn."
-  (let* ((c (make-connection fd))
-         (pollers (server-pollers server))
-         (poller (svref pollers (mod (incf (server-next-poller server)) (length pollers))))
-         (accepted nil))
-    (setf (connection-poller c) poller
-          (connection-deadline c) (ms-after *idle-seconds*))
+  (let ((c (make-connection fd server))
+        (accepted nil))
+    (setf (connection-deadline c) (ms-after *idle-seconds*))
     (clempo.lock:with-lock ((server-lock server))
       (when (and (server-running server) (< (server-count server) (server-max-connections server)))
+        (let ((pollers (server-pollers server)))
+          (setf (connection-poller c)
+                (svref pollers (mod (incf (server-next-poller server)) (length pollers)))))
         (let ((table (server-table server)))
           (when (>= fd (length table))
             (let ((new (make-array (max (1+ fd) (* 2 (length table))) :initial-element nil)))
@@ -839,7 +884,11 @@ to wait for the next event (input, room to write, or the reaper's shutdown), or 
         (setf accepted t)))
     (cond ((not accepted) (poll:fd-close fd))
           ;; input already waiting is reported at once
-          ((not (poll:watch poller fd)) (finish server c)))))
+          ((not (poll:watch (connection-poller c) fd))
+           ;; published: a thread taking over its poller may be running it already, so it
+           ;; ends as the reaper ends one, by the thread holding its run token
+           (clempo.lock:with-lock ((server-lock server)) (setf (connection-expired c) t))
+           (run-connection server c)))))
 
 (defun accept-all (server)
   "Take every pending connection."
@@ -857,8 +906,8 @@ when it is done, so no event is lost and no connection is run by two threads at 
           (t (return-from run-connection))))
   (loop (drive server c)
         (when (eql 1 (sb-ext:compare-and-swap (connection-run c) 1 0)) (return))
-        ;; an event came meanwhile
-        (setf (connection-run c) 1)))
+        ;; an event came meanwhile (2): no other thread changes the token while it is 2
+        (sb-ext:compare-and-swap (connection-run c) 2 1)))
 
 ;;; Workers. A WORKER is a thread serving one poller. Its STATE counts the events it has
 ;;; run, odd while one runs. The reaper looks every *STALL-MS*: a state still odd and
@@ -869,32 +918,40 @@ when it is done, so no event is lost and no connection is run by two threads at 
 ;;; thread had taken but not run (a connection with nothing to do just reads nothing). The
 ;;; stalled thread finishes its call and becomes a spare; it never touches the poller again.
 
-(defstruct (worker (:constructor make-worker (shard &optional poller)))
-  shard
-  poller                                ; the poller it serves; NIL while it is a spare
-  (state 0)                             ; events run (odd while one runs), or :RETIRED
-  (seen nil)                            ; its STATE when the reaper first saw it so
-  (seen-at 0 :type fixnum)              ; and when (monotonic milliseconds)
-  (sweep nil))                          ; run every connection of the poller before waiting
+(clempo.guard:define-shared-struct (worker (:constructor make-worker (server shard &optional poller)))
+  (server nil :guard :immutable)
+  (shard nil :guard :immutable)
+  ;; the poller it serves, NIL while it is a spare; with SWEEP, given to a spare by the
+  ;; reaper and taken by the worker under the crew lock
+  (poller nil :guard (:held (w) (server-crew-lock (worker-server w))))
+  ;; events run (odd while one runs), or :RETIRED
+  (state 0 :guard :atomic)
+  ;; its STATE when the reaper first saw it so, and when (monotonic milliseconds)
+  (seen nil :guard (:thread (w) (server-reaper (worker-server w))))
+  (seen-at 0 :type fixnum :guard (:thread (w) (server-reaper (worker-server w))))
+  ;; run every connection of the poller before waiting
+  (sweep nil :guard (:held (w) (server-crew-lock (worker-server w)))))
 
 (defun run-event (server w c)
   "Run C for one event as W's work. NIL when the reaper gave W's poller on meanwhile."
   (let ((v (worker-state w)))
     (declare (type fixnum v))
-    (setf (worker-state w) (1+ v))
+    ;; the reaper swaps only an odd state, so this one, even, is W's to change; the swap
+    ;; also publishes what W did before the event to the thread it may hand the poller to
+    (sb-ext:compare-and-swap (worker-state w) v (1+ v))
     (run-connection server c)
     (eql (1+ v) (sb-ext:compare-and-swap (worker-state w) (1+ v) (+ v 2)))))
 
 (defun runnable (c poller)
   (and c (eq (connection-poller c) poller) (not (eq (connection-phase c) :thread))))
 
-(defun serve-poller (server w poller)
+(defun serve-poller (server w poller sweep)
   "Wait for events on POLLER and run each one's connection (the first worker's poller also
-watches the listening socket), until the server stops or the reaper gives POLLER on."
+watches the listening socket), until the server stops or the reaper gives POLLER on. SWEEP:
+first run every connection of POLLER once."
   (let ((wake (server-wake-read server))
         (listen (server-listen-fd server)))
-    (when (worker-sweep w)
-      (setf (worker-sweep w) nil)
+    (when sweep
       (dolist (c (clempo.lock:with-lock ((server-lock server)) (copy-list (server-connections server))))
         (when (and (runnable c poller) (not (run-event server w c)))
           (return-from serve-poller))))
@@ -907,21 +964,24 @@ watches the listening socket), until the server stops or the reaper gives POLLER
                                  (c (and (< fd (length table)) (svref table fd))))
                             (when (runnable c poller)
                               (when (poll:poller-event-hangup-p poller i)
-                                (setf (connection-hangup c) t))
+                                (sb-ext:compare-and-swap (connection-hangup c) nil t))
                               ;; given on: the poller's events are another thread's now
                               (unless (run-event server w c) (return-from serve-poller)))))))))))
 
 (defun worker-loop (server w)
   "Serve W's poller; when it is given on, wait as a spare for another, until the server stops."
-  (loop
-    (let ((poller (worker-poller w)))
-      (when poller (serve-poller server w poller)))
-    (clempo.lock:with-lock ((server-crew-lock server))
-      (setf (worker-poller w) nil)
-      (push w (server-spares server))
-      (loop while (and (server-running server) (null (worker-poller w)))
-            do (clempo.lock:condition-wait (server-crew-wait server) (server-crew-lock server)))
-      (unless (and (server-running server) (worker-poller w)) (return)))))
+  (multiple-value-bind (poller sweep)
+      (clempo.lock:with-lock ((server-crew-lock server))
+        (values (worker-poller w) (shiftf (worker-sweep w) nil)))
+    (loop
+      (when poller (serve-poller server w poller sweep))
+      (clempo.lock:with-lock ((server-crew-lock server))
+        (setf (worker-poller w) nil)
+        (push w (server-spares server))
+        (loop while (and (server-running server) (null (worker-poller w)))
+              do (clempo.lock:condition-wait (server-crew-wait server) (server-crew-lock server)))
+        (unless (and (server-running server) (worker-poller w)) (return))
+        (setf poller (worker-poller w) sweep (shiftf (worker-sweep w) nil))))))
 
 (defun call-with-rpc-thread (server function)
   "Call FUNCTION on a thread that runs requests: calls and traces run the EVM there, so it gets
@@ -957,8 +1017,11 @@ spare thread, or a new one while fewer than *EXTRA-WORKERS-MAX* were started."
       (when (or spare (< (server-extra server) *extra-workers-max*))
         (cond ((eql state (sb-ext:compare-and-swap (worker-state w) state :retired))
                (let ((next (or spare
-                               (make-worker (1+ (mod (+ (length (server-crew server)) (server-extra server)) 15))))))
-                 (setf (worker-state next) 0 (worker-seen next) nil (worker-sweep next) t
+                               (make-worker server (1+ (mod (+ (length (server-crew server)) (server-extra server)) 15))))))
+                 ;; a retired spare counts again from 0 (one that left as the server stopped
+                 ;; kept an even count, as good a start)
+                 (sb-ext:compare-and-swap (worker-state next) :retired 0)
+                 (setf (worker-seen next) nil (worker-sweep next) t
                        (worker-poller next) (worker-poller w)
                        (svref (server-crew server) index) next)
                  (if spare
@@ -1047,7 +1110,7 @@ upgrade request first, then the socket's stream."))
                                                          :element-type '(unsigned-byte 8)
                                                          :buffering :full :auto-close nil
                                                          :serve-events nil)))
-    (setf (connection-stream c) stream)
+    (clempo.lock:with-lock ((connection-send-lock c)) (setf (connection-stream c) stream))
     (unwind-protect
          (handler-case (serve-websocket c (req-key (connection-request c)) stream)
            (serious-condition () nil))
@@ -1072,8 +1135,9 @@ upgrade request first, then the socket's stream."))
                 #\Return #\Newline #\Return #\Newline))
        stream)
       (force-output stream))
-    (setf (connection-websocket-p connection) t
-          (connection-writer connection)
+    (clempo.lock:with-lock ((connection-outbox-lock connection))
+      (setf (connection-websocket-p connection) t))
+    (setf (connection-writer connection)
           (let ((server *server*))
             (sb-thread:make-thread (lambda () (write-notifications server connection))
                                    :name "rpc websocket writer")))
@@ -1180,22 +1244,22 @@ started."
                                    :port (nth-value 1 (sb-bsd-sockets:socket-name socket))
                                    :backend backend :max-connections max-connections :log log
                                    :pollers pollers :listen-fd listen-fd
-                                   :wake-read wake-read :wake-write wake-write)))
+                                   :wake-read wake-read :wake-write wake-write
+                                   :crew (make-array (length pollers) :initial-element nil))))
         (loop for p across pollers do (poll:watch-level p wake-read))
         (poll:watch-level (svref pollers 0) listen-fd)
-        (setf (server-crew server)
-              (coerce (loop for p across pollers for i from 0 collect (make-worker (1+ (mod i 15)) p))
-                      'simple-vector))
+        (loop for p across pollers for i from 0
+              do (setf (svref (server-crew server) i) (make-worker server (1+ (mod i 15)) p)))
         (clempo.lock:with-lock ((server-crew-lock server))
           (loop for w across (server-crew server) do (start-worker server w)))
-        (setf (server-reaper server)
-              (sb-thread:make-thread (lambda () (reap-loop server)) :name "rpc reaper"))
+        (sb-ext:compare-and-swap (server-reaper server) nil
+                                 (sb-thread:make-thread (lambda () (reap-loop server)) :name "rpc reaper"))
         server))))
 
 (defun stop-server (server)
   "Stop accepting and serving, close every open connection, and join the workers, the
 reaper and the websocket threads (each joins its notification writer)."
-  (setf (server-running server) nil)
+  (clempo.lock:with-lock ((server-lock server)) (setf (server-running server) nil))
   (poll:wakeup (server-wake-write server))
   (clempo.lock:with-lock ((server-reaper-lock server))
     (sb-thread:condition-broadcast (server-reaper-wait server)))
