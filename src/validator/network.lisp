@@ -65,14 +65,14 @@ private devnets; CALL-WITH-VALIDATOR-NETWORK defaults are Tempo's production val
     (decf (ring-count ring))
     value))
 
-(defstruct (queues (:constructor %make-queues (rings byte-limit rotate)))
-  (rings #() :type simple-vector :read-only t)
-  (byte-limit 0 :type fixnum :read-only t)
-  (rotate nil :read-only t)
-  (bytes 0 :type fixnum)
-  (cursor 1 :type fixnum)
-  (mutex (thr:make-mutex :name "validator queues") :read-only t)
-  (ready (thr:make-waitqueue :name "validator queues") :read-only t))
+(clempo.guard:define-shared-struct (queues (:constructor %make-queues (rings byte-limit rotate)))
+  (rings #() :type simple-vector :guard :immutable) ; the rings' contents change under MUTEX only
+  (byte-limit 0 :type fixnum :guard :immutable)
+  (rotate nil :guard :immutable)
+  (bytes 0 :type fixnum :guard (:lock mutex))
+  (cursor 1 :type fixnum :guard (:lock mutex))
+  (mutex (thr:make-mutex :name "validator queues") :guard :immutable)
+  (ready (thr:make-waitqueue :name "validator queues") :guard :immutable))
 
 (defun make-queues (capacities byte-limit &key rotate)
   (%make-queues (map 'simple-vector #'make-ring capacities) byte-limit rotate))
@@ -87,20 +87,21 @@ private devnets; CALL-WITH-VALIDATOR-NETWORK defaults are Tempo's production val
       t)))
 
 (defun queues-pop-locked (queues)
-  (let* ((rings (queues-rings queues)) (n (length rings)))
-    (flet ((take (ring)
-             (let ((cell (ring-pop ring)))
-               (decf (queues-bytes queues) (car cell))
-               (return-from queues-pop-locked (values (cdr cell) t)))))
-      (when (plusp (ring-count (aref rings 0))) (take (aref rings 0)))
-      (if (queues-rotate queues)
-          (loop repeat (1- n)
-                for index = (queues-cursor queues)
-                do (setf (queues-cursor queues) (if (= index (1- n)) 1 (1+ index)))
-                   (when (plusp (ring-count (aref rings index))) (take (aref rings index))))
-          (loop for index from 1 below n
-                when (plusp (ring-count (aref rings index))) do (take (aref rings index))))
-      (values nil nil))))
+  (clempo.guard:with-held ((queues-mutex queues))
+    (let* ((rings (queues-rings queues)) (n (length rings)))
+      (flet ((take (ring)
+               (let ((cell (ring-pop ring)))
+                 (decf (queues-bytes queues) (car cell))
+                 (return-from queues-pop-locked (values (cdr cell) t)))))
+        (when (plusp (ring-count (aref rings 0))) (take (aref rings 0)))
+        (if (queues-rotate queues)
+            (loop repeat (1- n)
+                  for index = (queues-cursor queues)
+                  do (setf (queues-cursor queues) (if (= index (1- n)) 1 (1+ index)))
+                     (when (plusp (ring-count (aref rings index))) (take (aref rings index))))
+            (loop for index from 1 below n
+                  when (plusp (ring-count (aref rings index))) do (take (aref rings index))))
+        (values nil nil)))))
 
 (defun queues-count (queues)
   (loop for ring across (queues-rings queues) sum (ring-count ring)))
@@ -127,10 +128,14 @@ private devnets; CALL-WITH-VALIDATOR-NETWORK defaults are Tempo's production val
   block-ns handshake-timeout dial-timeout max-concurrent-handshakes cooldown-ns dial-frequency
   ping-ns allow-private-ips bypass-ip-check)
 
-(defstruct (conn (:constructor make-conn (socket)))
+(clempo.guard:define-shared-struct (conn (:constructor make-conn (socket)))
   "A TCP socket and its stream. SHUTDOWN wakes blocked reads/writes from any thread;
 the CLOSED flag keeps a late shutdown from touching a reused descriptor."
-  socket stream (closed nil) (mutex (thr:make-mutex :name "validator conn") :read-only t))
+  (socket nil :guard :immutable)
+  ;; written once by the thread that owns the connection, which alone reads it unlocked
+  (stream nil :guard (:lock-writes mutex))
+  (closed nil :guard (:lock mutex))
+  (mutex (thr:make-mutex :name "validator conn") :guard :immutable))
 
 (defun conn-shutdown (conn)
   (clempo.lock:with-lock ((conn-mutex conn))
@@ -145,10 +150,12 @@ the CLOSED flag keeps a late shutdown from touching a reused descriptor."
           (ignore-errors (sock:socket-close (conn-socket conn)))))))
 
 (defun conn-open-stream (conn)
-  (let ((socket (conn-socket conn)))
-    (setf (sock:sockopt-tcp-nodelay socket) t
-          (conn-stream conn) (sock:socket-make-stream socket :input t :output t :element-type 'octet
-                                                             :buffering :full :timeout nil :auto-close t))))
+  (let* ((socket (conn-socket conn))
+         (stream (progn (setf (sock:sockopt-tcp-nodelay socket) t)
+                        (sock:socket-make-stream socket :input t :output t :element-type 'octet
+                                                        :buffering :full :timeout nil :auto-close t))))
+    (clempo.lock:with-lock ((conn-mutex conn))
+      (setf (conn-stream conn) stream))))
 
 (defstruct (link (:constructor make-link (key session conn)))
   key session conn (killed nil) writer
@@ -158,17 +165,25 @@ the CLOSED flag keeps a late shutdown from touching a reused descriptor."
 (defstruct (peer-record (:conc-name record-) (:constructor make-record (key)))
   key host port egress (sets 0) (status :inert) link stale (next-reservable 0) (next-dial 0))
 
-(defstruct (validator-network (:constructor %make-network))
-  seed key config listener (listen-port 0)
-  (lock (thr:make-mutex :name "validator network") :read-only t)
-  (records (make-hash-table :test #'equalp) :read-only t)
-  (sets nil)                            ; ((id . keys) ...), newest first
-  (blocked (make-hash-table :test #'equalp) :read-only t)
-  (outbound nil)                        ; channel -> keyed GCRA
-  ip-limiter subnet-limiter
-  (handshakes 0) (handshake-conns nil)
-  inbox channel-rings
-  (threads nil) (stopping nil))
+(clempo.guard:define-shared-struct (validator-network (:constructor %make-network))
+  (seed nil :guard :immutable)          ; zeroed in place when the network stops
+  (key nil :guard :immutable)
+  (config nil :guard :immutable)
+  (listener nil :guard (:unchecked "set by CALL-WITH-VALIDATOR-NETWORK before the network's threads start"))
+  (listen-port 0 :guard (:unchecked "set by CALL-WITH-VALIDATOR-NETWORK before the network's threads start"))
+  (lock (thr:make-mutex :name "validator network") :guard :immutable)
+  (records (make-hash-table :test #'equalp) :guard (:lock lock))
+  (sets nil :guard (:lock lock))                       ; ((id . keys) ...), newest first
+  (blocked (make-hash-table :test #'equalp) :guard (:lock lock))
+  (outbound nil :guard :immutable)                     ; channel -> keyed GCRA (keyed state under LOCK)
+  (ip-limiter nil :guard :immutable)                   ; its state is touched under LOCK
+  (subnet-limiter nil :guard :immutable)
+  (handshakes 0 :guard (:lock lock))
+  (handshake-conns nil :guard (:lock lock))
+  (inbox nil :guard :immutable)                        ; QUEUES, locked by its own mutex
+  (channel-rings nil :guard :immutable)
+  (threads nil :guard (:lock lock))
+  (stopping nil :guard (:lock lock)))
 
 (defgeneric network-receive (network &key timeout)
   (:documentation "Dequeue the next :CONNECTED, :DISCONNECTED or :DATA event, or NIL

@@ -101,18 +101,22 @@ or NIL: Rust resolves addresses of players that are no longer active this way."
 
 (defconstant +block-log-retained+ 512 "Records kept decoded in memory.")
 
-(defstruct (block-log (:constructor %make-block-log))
-  path
-  (output nil)                                   ; append fd-stream
-  (offsets (make-array 0 :adjustable t :fill-pointer t)) ; height -> file offset of its frame
-  (hashes (make-hash-table :test #'equalp))      ; block hash -> height
-  (txs (make-hash-table :test #'equalp))         ; tx hash -> (height . index)
-  (recent (make-hash-table))                     ; height -> log-record, the last few
-  (lock (thr:make-mutex :name "block log") :read-only t))
+(clempo.guard:define-shared-struct (block-log (:constructor %make-block-log))
+  (path nil :guard :immutable)
+  (output nil :guard (:lock lock))                                    ; append fd-stream
+  (offsets (make-array 0 :adjustable t :fill-pointer t) :guard (:lock lock)) ; height -> file offset of its frame
+  (hashes (make-hash-table :test #'equalp) :guard (:lock lock))       ; block hash -> height
+  (txs (make-hash-table :test #'equalp) :guard (:lock lock))          ; tx hash -> (height . index)
+  (recent (make-hash-table) :guard (:lock lock))                      ; height -> log-record, the last few
+  (lock (thr:make-mutex :name "block log") :guard :immutable))
+
+(defun logged-head (log)
+  (clempo.guard:with-held ((block-log-lock log))
+    (1- (fill-pointer (block-log-offsets log)))))
 
 (defun block-log-head (log)
   "The highest logged height, or -1."
-  (1- (fill-pointer (block-log-offsets log))))
+  (clempo.lock:with-lock ((block-log-lock log)) (logged-head log)))
 
 (defun frame-record (octets)
   (let ((w (clempo.cwcodec:make-cw-writer (+ 36 (length octets)))))
@@ -122,15 +126,16 @@ or NIL: Rust resolves addresses of players that are no longer active this way."
     (clempo.cwcodec:cw-writer-octets w)))
 
 (defun index-record (log record offset)
-  (let* ((height (log-record-height record))
-         (raw (log-record-block record)))
-    (invariant (= height (fill-pointer (block-log-offsets log))) "block log heights are contiguous")
-    (vector-push-extend offset (block-log-offsets log))
-    (multiple-value-bind (hash tx-hashes) (clempo.rpc.chain:scan-block-hashes raw)
-      (setf (gethash hash (block-log-hashes log)) height)
-      (loop for tx in tx-hashes for i from 0 do (setf (gethash tx (block-log-txs log)) (cons height i))))
-    (setf (gethash height (block-log-recent log)) record)
-    (remhash (- height +block-log-retained+) (block-log-recent log))))
+  (clempo.guard:with-held ((block-log-lock log))
+    (let* ((height (log-record-height record))
+           (raw (log-record-block record)))
+      (invariant (= height (fill-pointer (block-log-offsets log))) "block log heights are contiguous")
+      (vector-push-extend offset (block-log-offsets log))
+      (multiple-value-bind (hash tx-hashes) (clempo.rpc.chain:scan-block-hashes raw)
+        (setf (gethash hash (block-log-hashes log)) height)
+        (loop for tx in tx-hashes for i from 0 do (setf (gethash tx (block-log-txs log)) (cons height i))))
+      (setf (gethash height (block-log-recent log)) record)
+      (remhash (- height +block-log-retained+) (block-log-recent log)))))
 
 (defun read-frame (in)
   "The next record payload, NIL at a clean end, or :TORN for a final frame cut short or not
@@ -156,18 +161,19 @@ of a crash during an append, is cut off; any other damage signals an error."
          (log (%make-block-log :path path))
          (good 0))
     (ensure-directories-exist dir)
-    (with-open-file (in path :element-type 'octet :if-does-not-exist nil)
-      (when in
-        (loop
-          (let* ((offset (file-position in)) (data (read-frame in)))
-            (when (member data '(nil :torn)) (return))
-            (index-record log (clempo.cwcodec:cw-decode 'log-record data) offset)
-            (setf good (file-position in))))))
-    (let ((fd (sb-posix:open (namestring path) (logior sb-posix:o-wronly sb-posix:o-creat) #o600)))
-      (sb-posix:ftruncate fd good)
-      (sb-posix:lseek fd good sb-posix:seek-set)
-      (setf (block-log-output log) (sb-sys:make-fd-stream fd :element-type 'octet :output t
-                                                             :buffering :full :auto-close t)))
+    (clempo.lock:with-lock ((block-log-lock log))
+      (with-open-file (in path :element-type 'octet :if-does-not-exist nil)
+        (when in
+          (loop
+            (let* ((offset (file-position in)) (data (read-frame in)))
+              (when (member data '(nil :torn)) (return))
+              (index-record log (clempo.cwcodec:cw-decode 'log-record data) offset)
+              (setf good (file-position in))))))
+      (let ((fd (sb-posix:open (namestring path) (logior sb-posix:o-wronly sb-posix:o-creat) #o600)))
+        (sb-posix:ftruncate fd good)
+        (sb-posix:lseek fd good sb-posix:seek-set)
+        (setf (block-log-output log) (sb-sys:make-fd-stream fd :element-type 'octet :output t
+                                                               :buffering :full :auto-close t))))
     log))
 
 (defun close-block-log (log)
@@ -190,7 +196,7 @@ of a crash during an append, is cut off; any other damage signals an error."
 (defun block-log-record (log height)
   "HEIGHT's LOG-RECORD, or NIL."
   (clempo.lock:with-lock ((block-log-lock log))
-    (when (and (integerp height) (<= 0 height (block-log-head log)))
+    (when (and (integerp height) (<= 0 height (logged-head log)))
       (or (gethash height (block-log-recent log))
           (with-open-file (in (block-log-path log) :element-type 'octet)
             (file-position in (aref (block-log-offsets log) height))
@@ -238,9 +244,9 @@ of a crash during an append, is cut off; any other damage signals an error."
 ;;; The transaction pool consensus proposes from (clempo.txpool, Tempo's pool rules). JSON-RPC
 ;;; submissions are admitted against the head state; every finalized block revalidates it.
 
-(defstruct (validator-pool (:constructor make-validator-pool ()))
-  (pool (clempo.txpool:make-pool))
-  (lock (thr:make-mutex :name "validator pool") :read-only t))
+(clempo.guard:define-shared-struct (validator-pool (:constructor make-validator-pool ()))
+  (pool (clempo.txpool:make-pool) :guard :immutable) ; its contents are touched under LOCK only
+  (lock (thr:make-mutex :name "validator pool") :guard :immutable))
 
 (defmacro with-validator-pool ((pool) &body body)
   `(clempo.lock:with-lock ((validator-pool-lock ,pool)) ,@body))

@@ -75,10 +75,15 @@ proposal's parent, later views of the epoch re-propose that block as is rather t
 blocks the epoch transition would cut off."
   (eql (digest-height app digest) (epoch-last-height app)))
 
-(defun proposal-pool (app)
-  "The transaction pool proposals draw from, or NIL."
-  (let ((pool (backend-pool-service (validator-app-backend app))))
-    (when pool (validator-pool-pool pool))))
+(defmacro with-proposal-pool ((txpool app) &body body)
+  "Run BODY with TXPOOL bound to the transaction pool proposals draw from (or NIL), holding
+the pool's lock so that RPC submissions cannot change it while a payload is built."
+  (let ((pool (gensym "POOL")) (fn (gensym "BODY")))
+    `(let ((,pool (backend-pool-service (validator-app-backend ,app))))
+       (flet ((,fn (,txpool) ,@body))
+         (if ,pool
+             (with-validator-pool (,pool) (,fn (validator-pool-pool ,pool)))
+             (,fn nil))))))
 
 (defun t15-p (app timestamp)
   (clempo.chainspec:fork-active-p :t15 timestamp (validator-app-chain app)))
@@ -318,18 +323,19 @@ dealers whose logs the blocks carry (NIL entries for blocks without one)."
                    (with-chain-write (app)
                      (clempo.store:with-speculative-blocks (db)
                        (execute-branch app ancestors)
-                       (clempo.builder:build-payload
-                        db header
-                        (clempo.builder:make-payload-attributes
-                         :timestamp seconds :timestamp-millis-part millis
-                         :suggested-fee-recipient (validator-app-fee-recipient app)
-                         :proposer-public-key (validator-app-key app)
-                         :consensus-context (clempo.headers:make-consensus-context
-                                             :epoch (epoch app) :view (clempo.simplex:context-view context)
-                                             :parent-view (car parent) :proposer (validator-app-key app))
-                         :extra-data (proposal-extra-data app ancestors height))
-                        :chain (validator-app-chain app)
-                        :pool (proposal-pool app)))))
+                       (with-proposal-pool (txpool app)
+                         (clempo.builder:build-payload
+                          db header
+                          (clempo.builder:make-payload-attributes
+                           :timestamp seconds :timestamp-millis-part millis
+                           :suggested-fee-recipient (validator-app-fee-recipient app)
+                           :proposer-public-key (validator-app-key app)
+                           :consensus-context (clempo.headers:make-consensus-context
+                                               :epoch (epoch app) :view (clempo.simplex:context-view context)
+                                               :parent-view (car parent) :proposer (validator-app-key app))
+                           :extra-data (proposal-extra-data app ancestors height))
+                          :chain (validator-app-chain app)
+                          :pool txpool)))))
                  (block (clempo.builder:built-payload-block payload))
                  (digest (stash-block app block)))
             (when digest

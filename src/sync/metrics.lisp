@@ -12,10 +12,10 @@ series' CELL once and counts into it without the registry lock.")
 
 (in-package #:clempo.metrics)
 
-(defstruct (registry (:constructor make-registry ()))
-  (lock (sb-thread:make-mutex :name "metrics"))
-  (metrics (make-hash-table :test 'equal))
-  (order '()))
+(clempo.guard:define-shared-struct (registry (:constructor make-registry ()))
+  (lock (sb-thread:make-mutex :name "metrics") :guard :immutable)
+  (metrics (make-hash-table :test 'equal) :guard (:lock lock))
+  (order '() :guard (:lock lock)))
 
 (defvar *registry* (make-registry) "The process's metrics.")
 

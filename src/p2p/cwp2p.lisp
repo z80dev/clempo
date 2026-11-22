@@ -149,16 +149,17 @@ Only apply this to muxed channels (Tempo 0,1,2,5), not broadcast/marshal (3,4)."
   (multiple-value-bind (subchannel position) (get-varint payload start end 64)
     (values subchannel position end)))
 
-(defstruct (session (:constructor %make-session)
-                    (:conc-name session-))
-  connection
-  (max-message-size (* 16 1024 1024) :type (unsigned-byte 32) :read-only t)
-  (channels (make-hash-table :test #'eql) :read-only t)
-  (closed-p nil :type boolean)
-  (ping-interval-ms 30000 :type (integer 1 *) :read-only t)
-  (next-ping-ms 0 :type integer)
-  (send-lock (sb-thread:make-mutex :name "commonware send") :read-only t)
-  (receive-lock (sb-thread:make-mutex :name "commonware receive") :read-only t))
+(clempo.guard:define-shared-struct (session (:constructor %make-session)
+                                            (:conc-name session-))
+  (connection nil :guard (:unchecked "set by WRAP-CONNECTION, DIAL or ACCEPT before the session is returned to any other thread"))
+  (max-message-size (* 16 1024 1024) :type (unsigned-byte 32) :guard :immutable)
+  ;; the table is configured before concurrent I/O starts (REGISTER-CHANNEL, SETF CHANNEL-HANDLER)
+  (channels (make-hash-table :test #'eql) :guard :immutable)
+  (closed-p nil :guard :atomic)
+  (ping-interval-ms 30000 :type (integer 1 *) :guard :immutable)
+  (next-ping-ms 0 :type integer :guard (:lock send-lock))
+  (send-lock (sb-thread:make-mutex :name "commonware send") :guard :immutable)
+  (receive-lock (sb-thread:make-mutex :name "commonware receive") :guard :immutable))
 
 (defun session-peer (session)
   "The authenticated Ed25519 identity, not a claimed message field. Do not mutate."
@@ -216,8 +217,8 @@ MAX-MESSAGE-SIZE+16. CLOSE-SESSION owns it from successful return onward."
 
 (defun close-session (session)
   "Close the owned stream, including after malformed or unauthenticated input."
-  (unless (session-closed-p session)
-    (setf (session-closed-p session) t)
+  ;; the sender and the receiver may both fail at once: only the CAS winner closes
+  (when (null (sb-ext:compare-and-swap (session-closed-p session) nil t))
     (when (session-connection session)
       (clempo.cw-stream:close-connection (session-connection session))))
   t)

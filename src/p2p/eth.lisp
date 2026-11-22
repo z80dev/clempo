@@ -96,7 +96,8 @@
                   (unless (= start stop) (protocol-error "trailing RLP fields")))))
        stop))))
 
-(defvar *messages* (make-hash-table))
+(clempo.guard:defshared *messages* (make-hash-table) "Wire message name -> (code . schema)."
+  :guard (:unchecked "filled at load time by DEFMESSAGE"))
 
 (defmacro defmessage (name code &rest fields)
   `(setf (gethash ,name *messages*) (cons ,code '(:tuple ,@fields))))
@@ -153,7 +154,8 @@
                          unless (zerop next) do (setf crc (crc32-update crc (integer->octets next 8))))))
     (%make-eth-chain network genesis schedule)))
 
-(defvar *tempo-mainnet* nil)
+(clempo.guard:defshared *tempo-mainnet* nil "The cached mainnet devp2p profile, published once."
+  :guard :atomic)
 
 (defun from-chainspec (chain)
   (make-eth-chain (spec:chain-id chain) (spec:genesis-block-hash chain)
@@ -165,7 +167,9 @@
 (defun tempo-eth-chain (&optional (chain :mainnet))
   "Derive the devp2p profile from the Tempo chainspec. Cache the default mainnet profile."
   (if (eq chain :mainnet)
-      (or *tempo-mainnet* (setf *tempo-mainnet* (from-chainspec (spec:load-chainspec chain))))
+      (or *tempo-mainnet*
+          (let ((profile (from-chainspec (spec:load-chainspec chain))))
+            (or (sb-ext:compare-and-swap (symbol-value '*tempo-mainnet*) nil profile) profile)))
       (from-chainspec (spec:load-chainspec chain))))
 
 (defun current-fork (chain timestamp)
@@ -497,7 +501,10 @@ Only a bounded batch is retained; capped responses are continued from their last
 
 ;;; The acceptor owns the bounded set of worker threads. It shuts down their
 ;;; sockets, then joins them before its caller can release the backing store.
-(defstruct inbound socket thread)
+(clempo.guard:define-shared-struct (inbound (:constructor make-inbound (lock socket)))
+  (lock nil :guard :immutable)             ; the listener's "eth inbound sockets" mutex
+  (socket nil :guard (:lock lock))        ; NIL once the worker has closed it
+  (thread nil :guard (:unchecked "written and read by the acceptor thread; the caller reads it only after joining the acceptor")))
 
 (defun run-inbound-eth (socket stream peer status earliest latest head)
   (let* ((link (eth-rlpx peer))
@@ -551,7 +558,7 @@ Every connection and worker is closed and joined before this function returns."
          (stopping nil) (acceptor nil) (workers nil))
     (labels ((stopping-p () (clempo.lock:with-lock (lock) stopping))
              (worker (entry bound-port)
-               (let ((socket (inbound-socket entry)) (stream nil))
+               (let ((socket (clempo.lock:with-lock (lock) (inbound-socket entry))) (stream nil))
                  (unwind-protect
                       (handler-case
                           (progn
@@ -589,7 +596,7 @@ Every connection and worker is closed and joined before this function returns."
                        (when socket
                          (if (>= (length workers) max-peers)
                              (sock:socket-close socket)
-                             (let ((entry (make-inbound :socket socket)))
+                             (let ((entry (make-inbound lock socket)))
                                (handler-case
                                    (progn
                                      (setf (inbound-thread entry)

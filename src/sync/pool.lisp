@@ -14,13 +14,13 @@ mined, stale, replaced, expired and no longer payable transactions. All calls ar
 
 (defconstant +validator-window+ 10)
 
-(defstruct (pool-service (:constructor %make-pool-service (pool chain)))
-  (pool nil :read-only t)
-  (chain :mainnet :read-only t)
-  (lock (sb-thread:make-mutex :name "transaction pool"))
-  (tokens '())          ; validator fee tokens of the last ten heads, newest first
-  (env nil)             ; block-env of the canonical head
-  (removed 0 :type integer))
+(clempo.guard:define-shared-struct (pool-service (:constructor %make-pool-service (pool chain)))
+  (pool nil :guard :immutable)          ; its contents are touched under LOCK only
+  (chain :mainnet :guard :immutable)
+  (lock (sb-thread:make-mutex :name "transaction pool") :guard :immutable)
+  (tokens '() :guard (:lock lock))      ; validator fee tokens of the last ten heads, newest first
+  (env nil :guard (:lock lock))         ; block-env of the canonical head
+  (removed 0 :type integer :guard (:lock lock)))
 
 (defun make-pool-service (&rest pool-options &key (chain :mainnet) &allow-other-keys)
   "A locked pool for CHAIN. The other POOL-OPTIONS go to CLEMPO.TXPOOL:MAKE-POOL."
@@ -28,8 +28,9 @@ mined, stale, replaced, expired and no longer payable transactions. All calls ar
     (%make-pool-service (apply #'pool:make-pool options) chain)))
 
 (defun reader (service db)
-  (pool:make-state-reader db (pool-service-env service)
-                          :recent-validator-tokens (pool-service-tokens service)))
+  (clempo.guard:with-held ((pool-service-lock service))
+    (pool:make-state-reader db (pool-service-env service)
+                            :recent-validator-tokens (pool-service-tokens service))))
 
 (defun pool-service-block (service db header)
   "Note the committed head HEADER whose post-state is DB. Returns the removals (hash . reason)."
