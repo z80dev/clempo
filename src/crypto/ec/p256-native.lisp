@@ -4,10 +4,52 @@
 (in-package #:clempo.p256)
 
 (deftype p256-arena () '(simple-array (unsigned-byte 64) (*)))
+(clempo.base:defbound +p256-limbs+ 4
+  "UB64 words in a P256 field element or scalar."
+  (>= (* +p256-limbs+ 64) (integer-length +p256-p+))
+  (>= (* +p256-limbs+ 64) (integer-length +p256-n+))
+  (> +p256-n+ (ash 1 (* (1- +p256-limbs+) 64)))
+  ;; R = 2^(64*limbs) is a Montgomery radix for both odd moduli.
+  (oddp +p256-p+)
+  (oddp +p256-n+))
+(clempo.base:defbound +p256-limb-bytes+ 8
+  "Big-endian octets per limb in a 32-byte digest or scalar."
+  (= (* +p256-limb-bytes+ 8) 64)
+  (= (* +p256-limbs+ +p256-limb-bytes+) 32))
+(clempo.base:defbound +p256-redc-words+ (1+ (* 2 +p256-limbs+))
+  "Words of a REDC accumulator: the double-width product and one carry word."
+  ;; a*b plus the m*modulus terms stays below 2^(64*words) for canonical inputs; both
+  ;; moduli are close enough to R that the double width alone would not do.
+  (< (* (+ +p256-p+ (ash 1 (* 64 +p256-limbs+))) +p256-p+) (ash 1 (* 64 +p256-redc-words+)))
+  (< (* (+ +p256-n+ (ash 1 (* 64 +p256-limbs+))) +p256-n+) (ash 1 (* 64 +p256-redc-words+)))
+  (>= (* (+ +p256-p+ (ash 1 (* 64 +p256-limbs+))) +p256-p+) (ash 1 (* 128 +p256-limbs+))))
+(clempo.base:defbound +p256-jacobian-words+ (* 3 +p256-limbs+)
+  "Words of a Jacobian point: X, Y and Z field elements at offsets 0, 4 and 8."
+  (= (+ 8 +p256-limbs+) +p256-jacobian-words+))
+(clempo.base:defbound +p256-window-bits+ 4
+  "Scalar bits per radix-16 digit of P256-JOINT!; one doubling each."
+  ;; Digits never straddle a limb; P256-JOINT! indexes sixteen per word.
+  (zerop (mod 64 +p256-window-bits+))
+  (= (floor 64 +p256-window-bits+) 16))
+(clempo.base:defbound +p256-windows+ (floor (* 64 +p256-limbs+) +p256-window-bits+)
+  "Digits of a scalar in P256-JOINT!, high to low."
+  (= (* +p256-windows+ +p256-window-bits+) (* 64 +p256-limbs+))
+  (>= (* +p256-windows+ +p256-window-bits+) (integer-length +p256-n+)))
+(clempo.base:defbound +p256-table-points+ (ash 1 +p256-window-bits+)
+  "Entries 0..15 Q of a joint-multiplication table, one per digit value."
+  (= +p256-table-points+ (ash 1 +p256-window-bits+))
+  ;; P256-TABLE!'s 112 scratch words: the prefix products end at 64, where the
+  ;; inversion and the 44 words of mixed addition begin.
+  (= (* +p256-table-points+ +p256-limbs+) 64)
+  (<= (+ (* +p256-table-points+ +p256-limbs+) 44) 112)
+  ;; P256-VERIFY's arena: the table at 44 ends where the 112 scratch words begin,
+  ;; and those end inside the 352-word arena.
+  (= (+ 44 (* +p256-table-points+ +p256-jacobian-words+)) 236)
+  (<= (+ 236 112) 352))
 
 (defmacro define-p256-residue (prefix modulus)
   (let* ((p (symbol-value modulus))
-         (ps (loop for i below 4 collect (ldb (byte 64 (* i 64)) p)))
+         (ps (loop for i below +p256-limbs+ collect (ldb (byte 64 (* i 64)) p)))
          (factor (mod (- (clempo.ec:invert (first ps) (ash 1 64))) (ash 1 64))))
     (labels ((name (suffix) (intern (format nil "~A-~A" prefix suffix)))
              (ge (words i)
@@ -20,16 +62,16 @@
                         (clempo.ec.word:subtract-with-borrow ,word ,pword ,carry)))))
       `(progn
          (defparameter ,(name "R2")
-           (make-array 4 :element-type '(unsigned-byte 64)
-                       :initial-contents ',(loop for i below 4 collect
+           (make-array +p256-limbs+ :element-type '(unsigned-byte 64)
+                       :initial-contents ',(loop for i below +p256-limbs+ collect
                                              (ldb (byte 64 (* i 64)) (mod (ash 1 512) p)))))
          (defun ,(name "ONE!") (out o)
            (declare #.clempo.base:*hot* (type p256-arena out) (type fixnum o))
-           ,@(loop for i below 4 collect
+           ,@(loop for i below +p256-limbs+ collect
                `(setf (aref out (+ o ,i)) ,(ldb (byte 64 (* i 64)) (mod (ash 1 256) p))))
            (values))
          ,@(loop for addp in '(t nil) collect
-             (let ((words (loop repeat 4 collect (gensym "W"))))
+             (let ((words (loop repeat +p256-limbs+ collect (gensym "W"))))
                `(defun ,(name (if addp "ADD!" "SUB!")) (out o a ao b bo)
                   (declare #.clempo.base:*hot* (type p256-arena out a b)
                            (type fixnum o ao bo))
@@ -48,9 +90,9 @@
                                        (clempo.ec.word:add-with-carry ,word ,pword carry)))))
                     ,@(loop for word in words for i from 0 collect `(setf (aref out (+ o ,i)) ,word)))
                   (values))))
-         ,(let ((as (loop repeat 4 collect (gensym "A")))
-                (bs (loop repeat 4 collect (gensym "B")))
-                (rs (loop repeat 9 collect (gensym "R"))))
+         ,(let ((as (loop repeat +p256-limbs+ collect (gensym "A")))
+                (bs (loop repeat +p256-limbs+ collect (gensym "B")))
+                (rs (loop repeat +p256-redc-words+ collect (gensym "R"))))
             `(defun ,(name "MUL!") (out o a ao b bo)
                (declare #.clempo.base:*hot* (type p256-arena out a b)
                         (type fixnum o ao bo))
@@ -65,14 +107,14 @@
                                   (clempo.secp256k1::mul-add-word ,a ,b ,(nth (+ i j) rs) carry)))
                        (setf ,(nth (+ i 4) rs) carry)))
                  ;; REDC with an explicit ninth word: both moduli are close to R.
-                 ,@(loop for i below 4 append
+                 ,@(loop for i below +p256-limbs+ append
                      `((setf m (ldb (byte 64 0) (* ,(nth i rs) ,factor)) carry 0)
                        ,@(loop for pword in ps for j from 0 collect
                            `(setf (values carry ,(nth (+ i j) rs))
                                   (clempo.secp256k1::mul-add-word m ,pword ,(nth (+ i j) rs) carry)))
                        (setf (values ,(nth (+ i 4) rs) bit)
                              (clempo.ec.word:add-with-carry ,(nth (+ i 4) rs) carry 0))
-                       ,@(loop for j from (+ i 5) below 9 collect
+                       ,@(loop for j from (+ i 5) below +p256-redc-words+ collect
                            `(setf (values ,(nth j rs) bit)
                                   (clempo.ec.word:add-with-carry ,(nth j rs) 0 bit)))))
                  (when (or (plusp ,(nth 8 rs)) ,(ge (subseq rs 4 8) 3))
@@ -86,7 +128,7 @@
            "Import a canonical integer without constructing shifted bignums."
            (declare #.clempo.base:*hot* (type p256-arena out) (type fixnum o)
                     (type (integer 0 ,(1- p)) n))
-           ,@(loop for i below 4 collect
+           ,@(loop for i below +p256-limbs+ collect
                `(setf (aref out (+ o ,i)) (clempo.secp256k1::integer-limb n ,i)))
            (,(name "MUL!") out o out o ,(name "R2") 0))
          (defun ,(name "INV!") (out o a ao work wo)
@@ -94,7 +136,7 @@
            (declare #.clempo.base:*hot* (type p256-arena out a work) (type fixnum o ao wo))
            (p256-copy! work wo a ao)
            (,(name "ONE!") work (+ wo 4))
-           (loop for bit of-type fixnum downfrom 255 to 0 do
+           (loop for bit of-type fixnum downfrom (1- (* 64 +p256-limbs+)) to 0 do
              (,(name "SQUARE!") work (+ wo 4) work (+ wo 4))
              (when (logbitp bit ,(- p 2))
                (,(name "MUL!") work (+ wo 4) work (+ wo 4) work wo)))
@@ -102,29 +144,29 @@
 
 (defun p256-zero! (out o)
   (declare #.clempo.base:*hot* (type p256-arena out) (type fixnum o))
-  (dotimes (i 4) (setf (aref out (+ o i)) 0)) (values))
+  (dotimes (i +p256-limbs+) (setf (aref out (+ o i)) 0)) (values))
 (defun p256-copy! (out o a ao)
   (declare #.clempo.base:*hot* (type p256-arena out a) (type fixnum o ao))
-  (dotimes (i 4) (setf (aref out (+ o i)) (aref a (+ ao i)))) (values))
+  (dotimes (i +p256-limbs+) (setf (aref out (+ o i)) (aref a (+ ao i)))) (values))
 (defun p256-zero-p (a ao)
   (declare #.clempo.base:*hot* (type p256-arena a) (type fixnum ao))
   (zerop (logior (aref a ao) (aref a (+ ao 1)) (aref a (+ ao 2)) (aref a (+ ao 3)))))
 (defun p256-equal-p (a ao b bo)
   (declare #.clempo.base:*hot* (type p256-arena a b) (type fixnum ao bo))
-  (dotimes (i 4 t) (unless (= (aref a (+ ao i)) (aref b (+ bo i))) (return nil))))
+  (dotimes (i +p256-limbs+ t) (unless (= (aref a (+ ao i)) (aref b (+ bo i))) (return nil))))
 
 (define-p256-residue pf +p256-p+)
 (define-p256-residue ps +p256-n+)
 
 (defparameter *p256-integer-one*
-  (make-array 4 :element-type '(unsigned-byte 64) :initial-contents '(1 0 0 0)))
+  (make-array +p256-limbs+ :element-type '(unsigned-byte 64) :initial-contents '(1 0 0 0)))
 
 (defun p256-jzero! (out o)
   (declare #.clempo.base:*hot* (type p256-arena out) (type fixnum o))
   (p256-zero! out o) (pf-one! out (+ o 4)) (p256-zero! out (+ o 8)))
 (defun p256-jcopy! (out o p po)
   (declare #.clempo.base:*hot* (type p256-arena out p) (type fixnum o po))
-  (dotimes (i 12) (setf (aref out (+ o i)) (aref p (+ po i)))) (values))
+  (dotimes (i +p256-jacobian-words+) (setf (aref out (+ o i)) (aref p (+ po i)))) (values))
 
 (defun p256-jdouble! (out o p po work wo)
   "Jacobian doubling for a=-3; 32 disjoint scratch words."
@@ -184,13 +226,13 @@
 Q is a nonzero affine prime-order point and must be disjoint from TABLE."
   (declare #.clempo.base:*hot* (type p256-arena table q work) (type fixnum to qo wo))
   (p256-jzero! table to) (p256-jcopy! table (+ to 12) q qo)
-  (loop for i of-type fixnum from 2 below 16 do
+  (loop for i of-type fixnum from 2 below +p256-table-points+ do
     (p256-jadd-affine! table (+ to (* i 12)) table (+ to (* (1- i) 12)) q qo work (+ wo 64)))
   (pf-one! work wo)
-  (loop for i of-type fixnum from 1 below 16 do
+  (loop for i of-type fixnum from 1 below +p256-table-points+ do
     (pf-mul! work (+ wo (* i 4)) work (+ wo (* (1- i) 4)) table (+ to (* i 12) 8)))
   (pf-inv! work (+ wo 64) work (+ wo 60) work (+ wo 68))
-  (loop for i of-type fixnum downfrom 15 to 1
+  (loop for i of-type fixnum downfrom (1- +p256-table-points+) to 1
         for p of-type fixnum = (+ to (* i 12)) do
     (pf-mul! work (+ wo 68) work (+ wo 64) work (+ wo (* (1- i) 4)))
     (pf-mul! work (+ wo 64) work (+ wo 64) table (+ p 8))
@@ -210,7 +252,8 @@ Q is a nonzero affine prime-order point and must be disjoint from TABLE."
     (pf-from-integer! a 16 +p256-n+)
     a))
 (defparameter *p256-generator-table*
-  (let ((table (make-array 192 :element-type '(unsigned-byte 64) :initial-element 0))
+  (let ((table (make-array (* +p256-table-points+ +p256-jacobian-words+)
+                           :element-type '(unsigned-byte 64) :initial-element 0))
         (work (make-array 112 :element-type '(unsigned-byte 64) :initial-element 0)))
     (p256-table! table 0 *p256-constants* 0 work 0) table))
 
@@ -227,8 +270,8 @@ Q is a nonzero affine prime-order point and must be disjoint from TABLE."
   (declare #.clempo.base:*hot* (type p256-arena out u v table work)
            (type fixnum o uo vo to wo))
   (p256-jzero! out o)
-  (loop for i of-type fixnum downfrom 63 to 0 do
-    (dotimes (j 4) (p256-jdouble! out o out o work wo))
+  (loop for i of-type fixnum downfrom (1- +p256-windows+) to 0 do
+    (dotimes (j +p256-window-bits+) (p256-jdouble! out o out o work wo))
     (let ((a (ldb (byte 4 (* 4 (logand i 15))) (aref u (+ uo (ash i -4)))))
           (b (ldb (byte 4 (* 4 (logand i 15))) (aref v (+ vo (ash i -4))))))
       (declare (type fixnum a b))

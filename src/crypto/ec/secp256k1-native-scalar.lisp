@@ -3,10 +3,10 @@
 (defun sw-constant (integer count)
   (let ((out (make-array count :element-type '(unsigned-byte 64) :initial-element 0)))
     (dotimes (i count out) (setf (aref out i) (ldb (byte 64 (* i 64)) integer)))))
-(defparameter *sc-order* (sw-constant +secp256k1-n+ 4))
-(defparameter *sf-prime* (sw-constant +secp256k1-p+ 4))
-(defparameter *sf-seven* (sw-constant 7 4))
-(defparameter *sc-r-squared* (sw-constant (mod (ash 1 512) +secp256k1-n+) 4))
+(defparameter *sc-order* (sw-constant +secp256k1-n+ +secp-limbs+))
+(defparameter *sf-prime* (sw-constant +secp256k1-p+ +secp-limbs+))
+(defparameter *sf-seven* (sw-constant 7 +secp-limbs+))
+(defparameter *sc-r-squared* (sw-constant (mod (ash 1 512) +secp256k1-n+) +secp-limbs+))
 (defconstant +sc-montgomery-factor+
   (mod (- (clempo.ec:invert (ldb (byte 64 0) +secp256k1-n+) (ash 1 64))) (ash 1 64)))
 
@@ -80,13 +80,21 @@
           (progn (sw-sub! work u work u work v) (sc-sub! work x work x work y))
           (progn (sw-sub! work v work v work u) (sc-sub! work y work y work x))))
     (sf-copy! out o work (if (sw-one-p work u) x y))) (values))
-
+(defbound +sc-montgomery-words+ (+ +secp-limbs+ 2)
+  "Accumulator words of the word-serial Montgomery product over scalar limbs."
+  ;; R = 2^(64*limbs) exceeds n and is invertible modulo the odd n.
+  (> (ash 1 (* 64 +secp-limbs+)) +secp256k1-n+)
+  (oddp +secp256k1-n+)
+  ;; A running sum below 2n plus a(i)*b and m*n (each below 2^64 n) fits every word,
+  ;; and after the one-word shift it fits the words below the top.
+  (< (* (+ 2 (ash 2 64)) +secp256k1-n+) (ash 1 (* 64 +sc-montgomery-words+)))
+  (< (* 2 +secp256k1-n+) (ash 1 (* 64 (1- +sc-montgomery-words+)))))
 (defmacro define-sc-montgomery ()
-  (let ((as (loop repeat 4 collect (gensym "A")))
-        (bs (loop repeat 4 collect (gensym "B")))
-        (ts (loop repeat 6 collect (gensym "T")))
+  (let ((as (loop repeat +secp-limbs+ collect (gensym "A")))
+        (bs (loop repeat +secp-limbs+ collect (gensym "B")))
+        (ts (loop repeat +sc-montgomery-words+ collect (gensym "T")))
         (carry (gensym "C")) (bit (gensym "BIT")) (m (gensym "M"))
-        (ns (loop for i below 4 collect (ldb (byte 64 (* 64 i)) +secp256k1-n+))))
+        (ns (loop for i below +secp-limbs+ collect (ldb (byte 64 (* 64 i)) +secp256k1-n+))))
     `(defun sc-montgomery! (out o a ao b bo)
        (declare #.clempo.base:*hot* (type secp-words out a b) (type fixnum o ao bo))
        (let (,@(loop for x in as for i from 0 collect `(,x (aref a (+ ao ,i))))
@@ -108,7 +116,7 @@
               (list `(setf (values ,(nth 4 ts) ,bit)
                             (clempo.ec.word:add-with-carry ,(nth 4 ts) ,carry 0)
                            ,(nth 5 ts) (+ ,(nth 5 ts) ,bit)))
-              (loop for j below 5 collect `(setf ,(nth j ts) ,(nth (1+ j) ts)))
+              (loop for j below (1- +sc-montgomery-words+) collect `(setf ,(nth j ts) ,(nth (1+ j) ts)))
               (list `(setf ,(nth 5 ts) 0))))
          (when (or (plusp ,(nth 4 ts))
                    ,(labels ((comparison (i)
@@ -120,7 +128,7 @@
            ,@(loop for n in ns for j from 0 collect
                `(setf (values ,(nth j ts) ,bit)
                       (clempo.ec.word:subtract-with-borrow ,(nth j ts) ,n ,bit))))
-         ,@(loop for j below 4 collect `(setf (aref out (+ o ,j)) ,(nth j ts))) (values)))))
+         ,@(loop for j below +secp-limbs+ collect `(setf (aref out (+ o ,j)) ,(nth j ts))) (values)))))
 (define-sc-montgomery)
 (defun sc-mul! (out o a ao b bo work wo)
   (declare #.clempo.base:*hot* (type secp-words out a b work) (type fixnum o ao bo wo))
@@ -154,13 +162,18 @@
 (defconstant +sg-a1+ #x3086d221a7d46bcde86c90e49284eb15)
 (defconstant +sg-b1+ #xe4437ed6010e88286f547fa90abfe4c3)
 (defconstant +sg-a2+ #x114ca50f7a8e2f3f657c1108d9d44cfd8)
+(defbound +sg-component-words+ (1+ +secp-limbs+)
+  "Signed words of a GLV intermediate: a scalar less two coefficient-lattice products."
+  ;; The widest product, a two-word coefficient times A2, leaves the sign bit free.
+  (< (* (ash 1 128) +sg-a2+) (ash 1 (1- (* 64 +sg-component-words+))))
+  (< +secp256k1-n+ (ash 1 (1- (* 64 +sg-component-words+)))))
 (defparameter *sg-a1* (sw-constant +sg-a1+ 2))
 (defparameter *sg-b1* (sw-constant +sg-b1+ 2))
 (defparameter *sg-a2* (sw-constant +sg-a2+ 3))
 (defparameter *sg-g1*
-  (sw-constant (floor (+ (ash +sg-a1+ 384) (ash +secp256k1-n+ -1)) +secp256k1-n+) 4))
+  (sw-constant (floor (+ (ash +sg-a1+ 384) (ash +secp256k1-n+ -1)) +secp256k1-n+) +secp-limbs+))
 (defparameter *sg-g2*
-  (sw-constant (floor (+ (ash +sg-b1+ 384) (ash +secp256k1-n+ -1)) +secp256k1-n+) 4))
+  (sw-constant (floor (+ (ash +sg-b1+ 384) (ash +secp256k1-n+ -1)) +secp256k1-n+) +secp-limbs+))
 
 (defun sg-coefficient! (work product coefficient)
   (declare #.clempo.base:*hot* (type secp-words work) (type fixnum product coefficient))
@@ -175,7 +188,7 @@
   (if (logbitp 63 (aref work (+ component 4)))
       (let ((carry 1))
         (declare (type bit carry))
-        (dotimes (i 5)
+        (dotimes (i +sg-component-words+)
           (setf (values (aref work (+ component i)) carry)
                 (clempo.ec.word:add-with-carry
                  (ldb (byte 64 0) (lognot (aref work (+ component i)))) 0 carry))) -1)
@@ -197,13 +210,13 @@
               (progn
                 (setf (values (aref work component) carry)
                       (clempo.ec.word:subtract-with-borrow (aref work component) digit 1))
-                (loop for i of-type fixnum from 1 below 4 do
+                (loop for i of-type fixnum from 1 below +secp-limbs+ do
                   (setf (values (aref work (+ component i)) carry)
                         (clempo.ec.word:subtract-with-borrow (aref work (+ component i)) 0 carry))))
               (progn
                 (setf (values (aref work component) carry)
                       (clempo.ec.word:add-with-carry (aref work component) (- digit) 0))
-                (loop for i of-type fixnum from 1 below 4 do
+                (loop for i of-type fixnum from 1 below +secp-limbs+ do
                   (setf (values (aref work (+ component i)) carry)
                         (clempo.ec.word:add-with-carry (aref work (+ component i)) 0 carry)))))))
       (sw-shift-right1! work component) (incf length)) length))

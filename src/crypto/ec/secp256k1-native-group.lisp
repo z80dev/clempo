@@ -17,6 +17,9 @@
   #x483ada7726a3c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b8)
 (defconstant +sn-beta+
   #x7ae96a2b657c07106e64479eac3434e99cf0497512f58995c1396c28719501ee)
+(defbound +sn-jacobian-words+ (* 3 +secp-limbs+)
+  "Words of a Jacobian point: X, Y and Z field elements at offsets 0, 4 and 8."
+  (= (+ 8 +secp-limbs+) +sn-jacobian-words+))
 
 (declaim (type sn-arena *sn-beta-words* *sn-odd-g*))
 
@@ -30,7 +33,7 @@
 
 (defun sn-jcopy! (arena out p)
   (declare #.clempo.base:*hot* (type sn-arena arena) (type fixnum out p))
-  (dotimes (i 12) (setf (aref arena (+ out i)) (aref arena (+ p i))))
+  (dotimes (i +sn-jacobian-words+) (setf (aref arena (+ out i)) (aref arena (+ p i))))
   (values))
 
 (defun sn-jdouble! (arena out p work)
@@ -181,7 +184,7 @@
 ;; No legacy integer group operation or generator binding is needed at load.
 (defparameter *sn-beta-words*
   (load-time-value
-   (let ((a (make-array 4 :element-type '(unsigned-byte 64) :initial-element 0)))
+   (let ((a (make-array +secp-limbs+ :element-type '(unsigned-byte 64) :initial-element 0)))
      (sf-from-integer! a 0 +sn-beta+)
      a)
    t))
@@ -189,10 +192,30 @@
 (defconstant +sn-generator-window+ 8)
 (defconstant +sn-odd-g-count+ (ash 1 (- +sn-generator-window+ 2)))
 (defconstant +sn-odd-g-half-words+ (* 8 +sn-odd-g-count+))
+(defbound +sn-streams+ 4
+  "Signed wNAF digit streams of a joint multiplication: G, phi(G), R and phi(R)."
+  ;; SN-DIGITS holds the 130 digits of a 129-bit GLV component for every stream.
+  (subtypep 'sn-digits (list 'simple-array '(signed-byte 8) (list (* +sn-streams+ 130)))))
+(defbound +sn-g-streams+ 2
+  "Leading streams over the fixed generator, each with its half of *SN-ODD-G*."
+  (< +sn-g-streams+ +sn-streams+)
+  ;; Every generator digit fits a signed octet and selects an entry of its half.
+  (<= (1- (ash 1 (1- +sn-generator-window+))) 127)
+  (= (ash (- (ash 1 (1- +sn-generator-window+)) 2) -1) (1- +sn-odd-g-count+)))
+(defbound +sn-odd-r-count+ (ash 1 (- 5 2))
+  "Odd multiples R, 3R, ..., 15R that width-5 R digits select."
+  ;; SN-JOINT!'s scratch: the Jacobian multiples end at TWICE (96), their prefix
+  ;; products at SUFFIX (140), the affine and phi tables at 220 and SELECTED (284),
+  ;; and mixed addition's scratch after them stays inside the joint workspace.
+  (<= (* +sn-odd-r-count+ +sn-jacobian-words+) 96)
+  (= (+ 108 (* +sn-odd-r-count+ +secp-limbs+)) 140)
+  (= (+ 156 (* +sn-odd-r-count+ 2 +secp-limbs+)) 220)
+  (= (+ 220 (* +sn-odd-r-count+ 2 +secp-limbs+)) 284)
+  (<= (+ 292 +sn-jwork-words+) +sn-joint-work-words+))
 
 (defparameter *sn-odd-g*
   (load-time-value
-   (let* ((base (* 2 +sn-odd-g-half-words+))
+   (let* ((base (* +sn-g-streams+ +sn-odd-g-half-words+))
           (a (make-array (+ base 80) :element-type '(unsigned-byte 64) :initial-element 0))
           (table (make-array base :element-type '(unsigned-byte 64) :initial-element 0)))
      (sf-from-integer! a base +sn-generator-x+)
@@ -231,7 +254,7 @@ Return an original-curve Jacobian without inversion, including when all streams 
       (sn-jzero! arena out12)
       (loop for bit of-type fixnum downfrom (1- length) to 0 do
         (sn-jdouble! arena out12 out12 scratch)
-        (dotimes (stream 2)
+        (dotimes (stream +sn-g-streams+)
           (let ((digit (aref digits (+ (* stream 130) bit))))
             (declare (type (signed-byte 8) digit))
             (unless (zerop digit)
@@ -252,19 +275,19 @@ Return an original-curve Jacobian without inversion, including when all streams 
     (sf-copy! arena (+ work 4) arena (+ r8 4))
     (sf-one! arena (+ work 8))
     (sn-jdouble! arena twice work scratch)
-    (loop for i of-type fixnum from 1 below 8 do
+    (loop for i of-type fixnum from 1 below +sn-odd-r-count+ do
       (sn-jadd! arena (+ work (* i 12)) (+ work (* (1- i) 12)) twice scratch))
     ;; Prefix/suffix products compute D/Z_i without dividing by any Z_i.
     ;; Each transformed odd point has affine coordinates (x_i D²,y_i D³)
     ;; on y²=x³+7D⁶. Keep D for undoing the isomorphism at the very end.
     (sf-one! arena denominator)
-    (dotimes (i 8)
+    (dotimes (i +sn-odd-r-count+)
       (sf-copy! arena (+ prefix (* i 4)) arena denominator)
       (sf-mul! arena denominator arena denominator arena (+ work (* i 12) 8)))
     (sf-square! arena d2 arena denominator)
     (sf-mul! arena d3 arena d2 arena denominator)
     (sf-one! arena suffix)
-    (loop for i of-type fixnum downfrom 7 to 0 do
+    (loop for i of-type fixnum downfrom (1- +sn-odd-r-count+) to 0 do
       (let ((point (+ work (* i 12))) (affine (+ odd-r (* i 8)))
             (phi (+ phi-r (* i 8))))
         (declare (type fixnum point affine phi))
@@ -279,7 +302,7 @@ Return an original-curve Jacobian without inversion, including when all streams 
     (sn-jzero! arena out12)
     (loop for bit of-type fixnum downfrom (1- length) to 0 do
       (sn-jdouble! arena out12 out12 scratch)
-      (dotimes (stream 4)
+      (dotimes (stream +sn-streams+)
         (let ((digit (aref digits (+ (* stream 130) bit))))
           (declare (type (signed-byte 8) digit))
           (unless (zerop digit)
@@ -287,7 +310,7 @@ Return an original-curve Jacobian without inversion, including when all streams 
                    (index (ash (1- (abs digit)) -1))
                    (affine (+ (if (= stream 2) odd-r phi-r) (* index 8))))
               (declare (type fixnum index affine))
-              (when (< stream 2)
+              (when (< stream +sn-g-streams+)
                 ;; Only selected G points are scaled. phi commutes with scaling.
                 (let ((source (+ (* stream +sn-odd-g-half-words+) (* index 8))))
                   (declare (type fixnum source))
