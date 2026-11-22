@@ -292,10 +292,16 @@ cache-free path: exact percentiles, and no rows at all for empty percentiles."
 
 ;;; Installed filters (eth_newFilter and friends), kept in the server process.
 
-(defstruct installed kind filter last-block last-poll)
-
-(defvar *filters* (make-hash-table :test 'equal) "filter id -> installed, under *FILTERS-LOCK*")
 (defvar *filters-lock* (sb-thread:make-mutex :name "installed filters"))
+
+(clempo.guard:define-shared-struct installed
+  (kind nil :guard :immutable)
+  (filter nil :guard :immutable)
+  (last-block nil :guard (:held (i) *filters-lock*))
+  (last-poll nil :guard (:held (i) *filters-lock*)))
+
+(clempo.guard:defshared *filters* (make-hash-table :test 'equal) "filter id -> installed"
+  :guard (:lock *filters-lock*))
 
 (defparameter *stale-filter-seconds* 300
   "reth DEFAULT_STALE_FILTER_TTL: a filter not polled for this long is removed.")
@@ -307,11 +313,12 @@ cache-free path: exact percentiles, and no rows at all for empty percentiles."
 (defun evict-stale-filters (now)
   "Remove every filter whose last poll (or install) is *STALE-FILTER-SECONDS* old, as reth's
 clear_stale_filters does; called with *FILTERS-LOCK* held."
-  (let ((ttl (* 1000 *stale-filter-seconds*)))
-    (loop for id being the hash-keys of *filters* using (hash-value it)
-          when (>= (- now (installed-last-poll it)) ttl)
-            collect id into stale
-          finally (mapc (lambda (id) (remhash id *filters*)) stale))))
+  (clempo.guard:with-held (*filters-lock*)
+    (let ((ttl (* 1000 *stale-filter-seconds*)))
+      (loop for id being the hash-keys of *filters* using (hash-value it)
+            when (>= (- now (installed-last-poll it)) ttl)
+              collect id into stale
+            finally (mapc (lambda (id) (remhash id *filters*)) stale)))))
 
 (defparam filter-id (src) "reth FilterId: untagged Num(u64) or Str(String)"
   ;; an untagged enum buffers the value first (numbers converted), then tries each variant

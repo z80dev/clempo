@@ -11,7 +11,7 @@ WITH-BACKEND-WRITE.
 ARCHIVE-BACKEND serves the raw block archive (clempo.archive) with the hash index built by
 BUILD-INDEX and a receipts store filled from an upstream node's debug_getRawReceipts,
 each block's receipts checked against its header's receipts root before they are stored.")
-  (:export #:backend #:backend-head #:backend-block-raw #:backend-block-number
+  (:export #:backend #:backend-lock #:backend-head #:backend-block-raw #:backend-block-number
            #:no-transaction-pool #:backend-submit-raw-transaction #:backend-pool-transactions
            #:backend-clear-pool
            #:backend-tx-location #:backend-receipts-raw #:backend-chain-id #:backend-chain
@@ -28,7 +28,9 @@ each block's receipts checked against its header's receipts root before they are
 (in-package #:clempo.rpc.chain)
 
 (defvar *backend* nil "The backend serving the current request.")
-(defvar *head* nil "The head block number snapshotted at the start of the current request.")
+(clempo.guard:defshared *head* nil
+  "The head block number snapshotted at the start of the current request."
+  :guard (:unchecked "bound per request by WITH-BACKEND-READ; CALL-OUTSIDE-BACKEND-READ snapshots it anew within that binding"))
 
 (defclass backend ()
   ((lock :initform (sb-thread:make-mutex :name "backend") :reader backend-lock)
@@ -40,11 +42,19 @@ each block's receipts checked against its header's receipts root before they are
    (queue :initform (sb-thread:make-waitqueue) :reader backend-queue)
    ;; Decoded blocks by number (clempo.rpc.render's CHAIN-BLOCK).
    (block-cache :initform (make-hash-table :synchronized t) :reader backend-block-cache)
-   ;; The chain spec served: genesis, fork schedule, chain id (anything LOAD-CHAINSPEC takes).
-   (chain :initarg :chain :initform :mainnet)))
+   ;; The chain spec served: genesis, fork schedule, chain id, loaded from the :CHAIN
+   ;; initarg (anything LOAD-CHAINSPEC takes, :MAINNET by default).
+   (chain :initarg chain-spec)))
 
-(defmethod initialize-instance :after ((b backend) &key)
-  (setf (slot-value b 'chain) (clempo.chainspec:load-chainspec (slot-value b 'chain))))
+(clempo.guard:define-slot-guards backend
+  (lock :immutable)
+  (gate :immutable)                     ; its words change by atomic updates only
+  (queue :immutable)
+  (block-cache :immutable)              ; a synchronized table
+  (chain :immutable))
+
+(defmethod initialize-instance :around ((b backend) &rest initargs &key (chain :mainnet))
+  (apply #'call-next-method b 'chain-spec (clempo.chainspec:load-chainspec chain) initargs))
 
 (defun backend-chain (backend)
   "BACKEND's chain spec; requests execute under it (CLEMPO.EXECUTOR:*CHAIN*)."
@@ -399,8 +409,11 @@ NIL). Both are sorted by key, so a linear merge hands WRITE-INDEX already-sorted
 (defun receipts-dir (&optional (chain "mainnet"))
   (format nil "~A/cache/clempo/receipts/~A/" (io:getenv "HOME") chain))
 
-(defstruct rstore dir (lock (sb-thread:make-mutex :name "receipts store"))
-  (offsets (make-hash-table :synchronized t)))   ; chunk-first -> hash number -> (offset . length); filled lazily by RPC threads
+(clempo.guard:define-shared-struct rstore
+  (dir nil :guard :immutable)
+  (lock (sb-thread:make-mutex :name "receipts store") :guard :immutable)
+  ;; chunk-first -> hash number -> (offset . length); filled lazily by RPC threads
+  (offsets (make-hash-table :synchronized t) :guard (:lock lock)))
 
 (defun rstore-path (store first) (format nil "~Areceipts-~10,'0D.dat" (rstore-dir store) first))
 
@@ -458,15 +471,37 @@ NIL). Both are sorted by key, so a linear merge hands WRITE-INDEX already-sorted
    (chunk-lock :initform (sb-thread:make-mutex :name "chunks") :reader chunk-lock)
    (blocks-index :initarg :blocks-index :reader blocks-index)
    (txs-index :initarg :txs-index :reader txs-index)
-   (tail :initform nil :accessor archive-backend-tail)            ; (blocks-table . txs-table) above the index
+   (tail :initform nil :accessor archive-backend-tail)            ; (head blocks-table . txs-table) above the index
+   (tail-lock :initform (sb-thread:make-mutex :name "archive backend tail") :reader tail-lock)
    (receipts :initarg :receipts :reader archive-backend-receipts)
    (upstream :initarg :upstream :initform nil :reader archive-backend-upstream)
-   (history :initarg :history :initform :unopened)                ; clempo.history, NIL or :unopened
+   (history :initarg :history :initform :unopened                ; clempo.history, NIL or :unopened
+            :accessor archive-backend-history)
    (history-dir :initarg :history-dir :initform nil)              ; NIL: HISTORY-DIR of the chain
    (finalization-dir :initarg :finalization-dir :initform nil     ; NIL: the chain's certificate archive
                      :reader archive-backend-finalization-dir)
    (history-lock :initform (sb-thread:make-mutex :name "archive backend history") :reader history-lock)
    (history-checked :initform 0 :accessor history-checked)))     ; last refresh, clempo.io:now-ms
+
+(clempo.guard:define-slot-guards archive-backend
+  (archive-dir :immutable)
+  ;; Written by a follower inside WITH-BACKEND-WRITE (which holds the backend's lock), read
+  ;; by requests under their read hold, which keeps writers out.
+  (head (:lock-writes lock))
+  ;; Replaced whole under CHUNK-LOCK; a hit reads the published list without it.
+  (chunks (:lock-writes chunk-lock))
+  (chunk-lock :immutable)
+  (blocks-index :immutable)
+  (txs-index :immutable)
+  (tail (:lock tail-lock))
+  (tail-lock :immutable)
+  (receipts :immutable)
+  (upstream :immutable)
+  (history (:lock history-lock))
+  (history-dir :immutable)
+  (finalization-dir :immutable)
+  (history-lock :immutable)
+  (history-checked (:lock history-lock)))
 
 (defun make-archive-backend (&rest initargs &key (class 'archive-backend) (archive-dir (archive:archive-dir))
                                                  (index-dir (index-dir)) head (upstream nil)
@@ -499,9 +534,9 @@ ARCHIVE-BACKEND) is instantiated with the remaining INITARGS as well."
 (defun backend-history (b)
   "B's history, opened on first use (NIL when the directory does not exist)."
   (clempo.lock:with-lock ((history-lock b))
-    (let ((h (slot-value b 'history)))
+    (let ((h (archive-backend-history b)))
       (if (eq h :unopened)
-          (setf (slot-value b 'history)
+          (setf (archive-backend-history b)
                 (let ((dir (or (slot-value b 'history-dir)
                                (history-dir (if (eql (backend-chain-id b) 4217) "mainnet" (backend-chain-id b))))))
                   (when (probe-file dir) (clempo.history:open-history dir))))
@@ -551,26 +586,26 @@ in a list that is replaced whole, so a hit takes no lock."
   (let ((i (blocks-index b))) (if i (hindex-covered i) -1)))
 
 (defun tail-tables (b)
-  "Hash tables for blocks above the index, built on first use."
+  "Hash tables (blocks . txs) of the blocks above the index up to the head, built whole for
+each head before any caller sees them."
   (let ((head (archive-backend-head b)))
-    (clempo.lock:with-lock ((chunk-lock b))
+    (clempo.lock:with-lock ((tail-lock b))
       (let ((tail (archive-backend-tail b)))
         (if (and tail (= (car tail) head))
             (cdr tail)
-            (let ((blocks (make-hash-table :test 'equalp :synchronized t))
-                  (txs (make-hash-table :test 'equalp :synchronized t)))
-              (setf (archive-backend-tail b) (list* head blocks txs))
-              (cons blocks txs)))))))
+            (let ((tables (cons (make-hash-table :test 'equalp :synchronized t)
+                                (make-hash-table :test 'equalp :synchronized t))))
+              (fill-tail b head tables)
+              (setf (archive-backend-tail b) (cons head tables))
+              tables))))))
 
-(defun fill-tail (b tables)
-  (let ((covered (backend-index-covered b)))
-    (when (zerop (hash-table-count (car tables)))
-      (loop for n from (1+ covered) to (archive-backend-head b)
-            for raw = (backend-block-raw b n)
-            while raw
-            do (multiple-value-bind (bh ths) (scan-block-hashes raw)
-                 (setf (gethash bh (car tables)) n)
-                 (loop for th in ths for j from 0 do (setf (gethash th (cdr tables)) (cons n j))))))))
+(defun fill-tail (b head tables)
+  (loop for n from (1+ (backend-index-covered b)) to head
+        for raw = (backend-block-raw b n)
+        while raw
+        do (multiple-value-bind (bh ths) (scan-block-hashes raw)
+             (setf (gethash bh (car tables)) n)
+             (loop for th in ths for j from 0 do (setf (gethash th (cdr tables)) (cons n j))))))
 
 (defmethod backend-block-number ((b archive-backend) hash)
   (or (and (blocks-index b)
@@ -578,9 +613,7 @@ in a list that is replaced whole, so a hit takes no lock."
                  when (and (<= n (archive-backend-head b))
                            (octets= hash (block-hash-of-raw (backend-block-raw b n))))
                    return n))
-      (let ((tables (tail-tables b)))
-        (fill-tail b tables)
-        (gethash hash (car tables)))))
+      (gethash hash (car (tail-tables b)))))
 
 (defmethod backend-tx-location ((b archive-backend) hash)
   (let ((loc (or (and (txs-index b)
@@ -591,9 +624,7 @@ in a list that is replaced whole, so a hit takes no lock."
                                              (tx (nth j (nth-value 2 (block-parts raw)))))
                                         (and tx (octets= hash (clempo.keccak:keccak256 raw :start (car tx) :end (cdr tx))))))
                               return (cons n j)))
-                 (let ((tables (tail-tables b)))
-                   (fill-tail b tables)
-                   (gethash hash (cdr tables))))))
+                 (gethash hash (cdr (tail-tables b))))))
     (when loc (values (car loc) (cdr loc)))))
 
 (defun fetch-receipts (url n)

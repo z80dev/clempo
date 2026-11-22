@@ -29,10 +29,25 @@ senders and receipts, which are filled in on first use.")
 
 ;;; Decoded blocks, cached per backend
 
-(defstruct cblock number raw hash header txs tx-hashes tx-bounds (senders nil) (receipt-cache nil) size
-  (rendered (make-array 2 :initial-element nil))   ; BLOCK-JSON as JSON-RAW: full, hashes only
-  (log-texts nil)                                  ; each log of the block as a JSON-RAW
-  (lock (sb-thread:make-mutex :name "cblock")))
+(clempo.guard:define-shared-struct cblock
+  (number nil :guard :immutable)
+  (raw nil :guard :immutable)
+  (hash nil :guard :immutable)
+  (header nil :guard :immutable)
+  (txs nil :guard :immutable)
+  (tx-hashes nil :guard :immutable)
+  (tx-bounds nil :guard :immutable)
+  ;; per transaction, (sender key-id) once recovered: each element set once under LOCK
+  (senders nil :guard :immutable)
+  ;; the decoded receipts, set once under LOCK and read without it after
+  (receipt-cache nil :guard (:lock-writes lock))
+  (size nil :guard :immutable)
+  ;; BLOCK-JSON as JSON-RAW (full, hashes only): elements written racily, with the same text
+  (rendered (make-array 2 :initial-element nil) :guard :immutable)
+  ;; each log of the block as a JSON-RAW: the vector set once under LOCK, its elements
+  ;; written racily, with the same text
+  (log-texts nil :guard (:lock-writes lock))
+  (lock (sb-thread:make-mutex :name "cblock") :guard :immutable))
 
 (defparameter *cache-limit* 4096)
 
@@ -398,9 +413,11 @@ sender and effective gas price (a legacy or EIP-2930 gasPrice is the transaction
   "LOG-JSON of the LOG-INDEXth log of cached block B (in transaction TX-INDEX) as a JSON-RAW,
 written once."
   (let ((v (or (cblock-log-texts b)
-               (setf (cblock-log-texts b)
-                     (make-array (loop for rc across (cblock-receipts b) sum (length (r:receipt-logs rc)))
-                                 :initial-element nil)))))
+               (clempo.lock:with-recursive-lock ((cblock-lock b))
+                 (or (cblock-log-texts b)
+                     (setf (cblock-log-texts b)
+                           (make-array (loop for rc across (cblock-receipts b) sum (length (r:receipt-logs rc)))
+                                       :initial-element nil)))))))
     (or (svref v log-index)
         (setf (svref v log-index) (json:raw-json (log-json b tx-index log-index tx-index log))))))
 

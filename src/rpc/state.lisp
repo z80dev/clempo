@@ -72,9 +72,10 @@ above the head are returned as they are."
 (defparameter *replay-history-limit* 1024
   "Blocks up to this number may be rebuilt from genesis when the backend keeps no state.")
 
-(defvar *replayed-states* (make-hash-table :test 'eq :weakness :key :synchronized t)
-  "backend -> recently rebuilt (number . statedb), newest first; the databases are read-only.")
 (defvar *replay-lock* (sb-thread:make-mutex :name "replayed states"))
+(clempo.guard:defshared *replayed-states* (make-hash-table :test 'eq :weakness :key :synchronized t)
+  "backend -> recently rebuilt (number . statedb), newest first; the databases are read-only."
+  :guard (:lock *replay-lock*))
 
 (defun replay-chain ()
   "The executor chain whose genesis the current backend starts from, or NIL."
@@ -110,11 +111,12 @@ fallback for 0 up to it), or NIL when it cannot rebuild any."
   (let ((chain (and (<= n *replay-history-limit*) (replay-chain))))
     (when chain
       (clempo.lock:with-lock (*replay-lock*)
-        (let ((recent (gethash chain:*backend* *replayed-states*)))
+        (let* ((backend chain:*backend*)
+               (recent (gethash backend *replayed-states*)))
           (or (cdr (assoc n recent))
               (let ((db (rebuild-state n chain)))
                 (when db
-                  (setf (gethash chain:*backend* *replayed-states*)
+                  (setf (gethash backend *replayed-states*)
                         (subseq (cons (cons n db) recent) 0 (min 8 (1+ (length recent))))))
                 db)))))))
 
@@ -382,8 +384,9 @@ state root) and held for the call."
 ;;; made for the process (as reth makes one for a datadir without a key file); the RPC server
 ;;; runs no devp2p listener, so it reports loopback with ports 0.
 
-(defvar *node-key* nil "This process's devp2p secret key, made on first use.")
 (defvar *node-key-lock* (sb-thread:make-mutex :name "node key"))
+(clempo.guard:defshared *node-key* nil "This process's devp2p secret key, made on first use."
+  :guard (:lock *node-key-lock*))
 
 (defun node-key ()
   (clempo.lock:with-lock (*node-key-lock*)

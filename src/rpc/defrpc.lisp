@@ -44,7 +44,8 @@ envelope errors).")
 
 ;;; Parameter readers
 
-(defvar *param-readers* (make-hash-table :test 'eq))
+(clempo.guard:defshared *param-readers* (make-hash-table :test 'eq) "type -> its reader"
+  :guard (:unchecked "filled at load time by DEFPARAM"))
 
 (defmacro defparam (name (src) doc &body body)
   "Define the reader for parameter type NAME: BODY reads one value from SRC and returns it."
@@ -64,7 +65,8 @@ envelope errors).")
 (defstruct rpc-method name params doc function
   (cells nil))   ; its metric cells (ok, error, latency), each made on first use
 
-(defvar *methods* (make-hash-table :test 'equal) "name -> rpc-method")
+(clempo.guard:defshared *methods* (make-hash-table :test 'equal) "name -> rpc-method"
+  :guard (:unchecked "filled at load time by DEFRPC, DEFPUBSUB and the stubs' table"))
 
 (defun find-method* (name) (gethash name *methods*))
 (defun method-names () (sort (loop for k being the hash-keys of *methods* collect k) #'string<))

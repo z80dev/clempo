@@ -314,31 +314,32 @@ jsonrpsee does without serde's limit.")
 buffers a value (a Value or a flattened struct's Content), so one beyond the double range
 fails where it ends; without, they are only scanned (serde's IgnoredAny). Nesting counts
 toward +RECURSION-LIMIT+ from *DEPTH*. Iterative: no input exhausts the control stack."
-  (prog ((stack '()) (*depth* *depth*))   ; closers (#\] or #\}) of the open containers
-   value
-     (ecase (peek-kind src)
-       (:string (read-string src))
-       (:number (if numbers (read-number src) (skip-number src)))
-       (:true (read-literal src "true"))
-       (:false (read-literal src "false"))
-       (:null (read-literal src "null"))
-       ((:object :array)
-        (let ((closer (if (eq (peek-kind src) :object) #\} #\])))
-          (advance src 1)
-          (setf *depth* (enter-container src))
-          (push closer stack)
-          (unless (eql (peek src) closer)
-            (when (eql closer #\}) (read-string src) (peek src) (advance src 1))
-            (go value))))
-       (:eof (eof-error src))
-       (:invalid (serde-fail-here src "expected value")))
-   after                                ; a value ended: next element, or close
-     (when (null stack) (return))
-     (cond ((eql (peek src) #\,)
+  (let ((*depth* *depth*))
+    (prog ((stack '()))                 ; closers (#\] or #\}) of the open containers
+     value
+       (ecase (peek-kind src)
+         (:string (read-string src))
+         (:number (if numbers (read-number src) (skip-number src)))
+         (:true (read-literal src "true"))
+         (:false (read-literal src "false"))
+         (:null (read-literal src "null"))
+         ((:object :array)
+          (let ((closer (if (eq (peek-kind src) :object) #\} #\])))
             (advance src 1)
-            (when (eql (first stack) #\}) (read-string src) (peek src) (advance src 1))
-            (go value))
-           (t (peek src) (advance src 1) (pop stack) (decf *depth*) (go after)))))
+            (setf *depth* (enter-container src))
+            (push closer stack)
+            (unless (eql (peek src) closer)
+              (when (eql closer #\}) (read-string src) (peek src) (advance src 1))
+              (go value))))
+         (:eof (eof-error src))
+         (:invalid (serde-fail-here src "expected value")))
+     after                              ; a value ended: next element, or close
+       (when (null stack) (return))
+       (cond ((eql (peek src) #\,)
+              (advance src 1)
+              (when (eql (first stack) #\}) (read-string src) (peek src) (advance src 1))
+              (go value))
+             (t (peek src) (advance src 1) (pop stack) (decf *depth*) (go after))))))
 
 (defun read-raw-value (src &optional numbers)
   "The raw text of the next value (NUMBERS as for SKIP-VALUE)."

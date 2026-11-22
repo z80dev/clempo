@@ -176,33 +176,37 @@ Returns (values events transactions)."
 
 ;;; Reading the index
 
-(defstruct (sindex (:conc-name sindex-)) path stream offsets covered date
-  (lock (sb-thread:make-mutex :name "sender index file")))
+(clempo.guard:define-shared-struct (sindex (:conc-name sindex-))
+  (path nil :guard :immutable)
+  (stream nil :guard :immutable)        ; read from and closed under LOCK
+  (offsets nil :guard :immutable)
+  (covered nil :guard :immutable)
+  (date nil :guard :immutable)
+  (lock (sb-thread:make-mutex :name "sender index file") :guard :immutable))
 
-(defvar *indexes* (make-hash-table :test 'equal :synchronized t))
 (defvar *indexes-lock* (sb-thread:make-mutex :name "sender indexes"))
+(clempo.guard:defshared *indexes* (make-hash-table :test 'equal :synchronized t)
+  "path -> the open SINDEX of that file."
+  :guard (:lock *indexes-lock*))
 
 (defun open-sender-index (path)
   "The open index at PATH, reopened when the file was rebuilt, or NIL when there is none."
   (clempo.lock:with-lock (*indexes-lock*)
-    (open-sender-index-locked path)))
-
-(defun open-sender-index-locked (path)
-  (let ((date (and (probe-file path) (file-write-date path)))
-        (old (gethash path *indexes*)))
-    (cond ((null date) nil)
-          ((and old (eql date (sindex-date old))) old)
-          (t (let* ((in (open path :element-type '(unsigned-byte 8)))
-                    (head (make-octets (+ +header+ +table+)))
-                    (offsets (make-array (1+ +buckets+) :element-type '(unsigned-byte 64))))
-               (read-sequence head in)
-               (invariant (string= "CLSN" (octets->string head :start 0 :end 4)) "bad sender index ~A" path)
-               (dotimes (i (1+ +buckets+)) (setf (aref offsets i) (get-u64 head (+ +header+ (* 8 i)))))
-               ;; Readers of the old index hold its lock while they read; one that takes
-               ;; it after this sees the stream closed and moves to the new index.
-               (when old (clempo.lock:with-lock ((sindex-lock old)) (close (sindex-stream old))))
-               (setf (gethash path *indexes*)
-                     (make-sindex :path path :stream in :offsets offsets :covered (get-u64 head 8) :date date)))))))
+    (let ((date (and (probe-file path) (file-write-date path)))
+          (old (gethash path *indexes*)))
+      (cond ((null date) nil)
+            ((and old (eql date (sindex-date old))) old)
+            (t (let* ((in (open path :element-type '(unsigned-byte 8)))
+                      (head (make-octets (+ +header+ +table+)))
+                      (offsets (make-array (1+ +buckets+) :element-type '(unsigned-byte 64))))
+                 (read-sequence head in)
+                 (invariant (string= "CLSN" (octets->string head :start 0 :end 4)) "bad sender index ~A" path)
+                 (dotimes (i (1+ +buckets+)) (setf (aref offsets i) (get-u64 head (+ +header+ (* 8 i)))))
+                 ;; Readers of the old index hold its lock while they read; one that takes
+                 ;; it after this sees the stream closed and moves to the new index.
+                 (when old (clempo.lock:with-lock ((sindex-lock old)) (close (sindex-stream old))))
+                 (setf (gethash path *indexes*)
+                       (make-sindex :path path :stream in :offsets offsets :covered (get-u64 head 8) :date date))))))))
 
 (defun read-events (index from count)
   (let ((buf (make-octets (* 24 count))) (in (sindex-stream index)))
@@ -243,12 +247,23 @@ Returns (values events transactions)."
 (defparameter *max-tail* 200000
   "The most blocks above the index scanned per request; beyond it the index must be rebuilt.")
 
-(defstruct tail (head -1) (table (make-hash-table)) (lock (sb-thread:make-mutex :name "sender tail")))
+(clempo.guard:define-shared-struct tail
+  (head -1 :guard (:lock lock))
+  (table (make-hash-table) :guard (:lock lock))
+  (lock (sb-thread:make-mutex :name "sender tail") :guard :immutable))
 
-(defvar *tails* (make-hash-table :test 'eq :weakness :key :synchronized t))
+(defvar *tails-lock* (sb-thread:make-mutex :name "sender tails"))
+(clempo.guard:defshared *tails* (make-hash-table :test 'eq :weakness :key :synchronized t)
+  "backend -> its TAIL, made once under *TAILS-LOCK* (looked up without it first)."
+  :guard (:lock *tails-lock*))
+
+(defun backend-tail (backend)
+  (or (gethash backend *tails*)
+      (clempo.lock:with-lock (*tails-lock*)
+        (or (gethash backend *tails*) (setf (gethash backend *tails*) (make-tail))))))
 
 (defun tail-events (backend covered head key)
-  (let ((tail (or (gethash backend *tails*) (setf (gethash backend *tails*) (make-tail)))))
+  (let ((tail (backend-tail backend)))
     (clempo.lock:with-lock ((tail-lock tail))
       (when (< (tail-head tail) covered)
         (clrhash (tail-table tail)) (setf (tail-head tail) covered))

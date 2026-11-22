@@ -25,9 +25,10 @@ reference answers one its marshal lacks.")
       (let ((id (chain:backend-chain-id backend)))
         (finalization-dir (if (eql id 4217) "mainnet" id)))))
 
-(defvar *spans* (make-hash-table :test 'equal :synchronized t)
+(clempo.guard:defshared *spans* (make-hash-table :test 'equal :synchronized t)
   "(dir . first) -> vector of certificate hex strings (NIL where a height has none). Files
-are written whole and never change, so a loaded span stays; a missing one is looked for again.")
+are written whole and never change, so a loaded span stays; a missing one is looked for again."
+  :guard (:unchecked "a :SYNCHRONIZED table of spans read whole from files that never change: two threads loading one span store equal vectors"))
 
 (defun span-path (dir first) (format nil "~Afin-~10,'0D.txt" dir first))
 

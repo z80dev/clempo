@@ -54,21 +54,23 @@ loaded), and a full collection needs room to copy everything that lives.")
          (n (and env (plusp (length env)) (parse-integer env :junk-allowed t))))
     (max 1 (or n *trie-cursors*))))
 
-(defstruct (tries (:constructor make-tries ()))
-  (head nil)                                          ; statedb at the backend head, read-only
-  (head-lock (sb-thread:make-mutex :name "head trie state"))
+(clempo.guard:define-shared-struct (tries (:constructor make-tries ()))
+  (head nil :guard (:lock head-lock))                 ; statedb at the backend head, read-only
+  (head-lock (sb-thread:make-mutex :name "head trie state") :guard :immutable)
   ;; The cursor pool: idle states, most recently returned first, and a ticket (n) per state
   ;; lent to a call at block N (being loaded, moved or used); together at most LIMIT, and
   ;; more than one only while the heap is below HEAP-SHARE of its space.
-  (idle '() :type list)
-  (lent '() :type list)
-  (limit (cursor-limit) :type (integer 1))
-  (heap-share *heap-share* :type (real 0 1))
-  (lock (sb-thread:make-mutex :name "trie state cursors"))
-  (returned (sb-thread:make-waitqueue :name "trie state cursor returned")))
+  (idle '() :type list :guard (:lock lock))
+  (lent '() :type list :guard (:lock lock))
+  (limit (cursor-limit) :type (integer 1) :guard :immutable)
+  (heap-share *heap-share* :type (real 0 1) :guard :immutable)
+  (lock (sb-thread:make-mutex :name "trie state cursors") :guard :immutable)
+  (returned (sb-thread:make-waitqueue :name "trie state cursor returned") :guard :immutable))
 
-(defvar *tries* (make-hash-table :test 'eq :weakness :key :synchronized t))
 (defvar *tries-lock* (sb-thread:make-mutex :name "trie states"))
+(clempo.guard:defshared *tries* (make-hash-table :test 'eq :weakness :key :synchronized t)
+  "backend -> its TRIES, made once under *TRIES-LOCK* (looked up without it first)."
+  :guard (:lock *tries-lock*))
 
 (defun backend-tries (backend)
   (or (gethash backend *tries*)
@@ -117,9 +119,10 @@ waited for another's collection looks again first)."
   (let ((manifest (probe-file (merge-pathnames "MANIFEST" dir))))
     (and manifest (eql 0 (search "clempo-kv " (io:read-file-string manifest))))))
 
-(defvar *datadir-heights* (make-hash-table :test 'equal :synchronized t)
+(clempo.guard:defshared *datadir-heights* (make-hash-table :test 'equal :synchronized t)
   "datadir -> (MANIFEST write date . flushed height), so a base list costs no snapshot open
-until the datadir flushes again.")
+until the datadir flushes again."
+  :guard (:unchecked "a :SYNCHRONIZED table of whole cells; a cell another thread replaced meanwhile carries its own MANIFEST date, so a stale one is only recomputed"))
 
 (defun datadir-height (dir)
   (let* ((date (file-write-date (merge-pathnames "MANIFEST" dir)))
