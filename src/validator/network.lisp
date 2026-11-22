@@ -157,13 +157,27 @@ the CLOSED flag keeps a late shutdown from touching a reused descriptor."
     (clempo.lock:with-lock ((conn-mutex conn))
       (setf (conn-stream conn) stream))))
 
-(defstruct (link (:constructor make-link (key session conn)))
-  key session conn (killed nil) writer
+(clempo.guard:define-shared-struct (link (:constructor make-link (key session conn)))
+  (key nil :guard :immutable)
+  (session nil :guard :immutable)
+  (conn nil :guard :immutable)
+  ;; set once, from any thread (KILL-LINK); the link's reader and writer poll it
+  (killed nil :guard :atomic)
   (outbox (make-queues (list +network-outbox-entries+ +network-outbox-entries+) +network-outbox-limit+)
-          :read-only t))
+          :guard :immutable))
 
-(defstruct (peer-record (:conc-name record-) (:constructor make-record (key)))
-  key host port egress (sets 0) (status :inert) link stale (next-reservable 0) (next-dial 0))
+(clempo.guard:define-shared-struct (peer-record (:conc-name record-) (:constructor make-record (key lock)))
+  (key nil :guard :immutable)
+  (lock nil :guard :immutable)          ; the network's "validator network" mutex
+  (host nil :guard (:lock lock))
+  (port nil :guard (:lock lock))
+  (egress nil :guard (:lock lock))
+  (sets 0 :guard (:lock lock))
+  (status :inert :guard (:lock lock))
+  (link nil :guard (:lock lock))
+  (stale nil :guard (:lock lock))
+  (next-reservable 0 :guard (:lock lock))
+  (next-dial 0 :guard (:lock lock)))
 
 (clempo.guard:define-shared-struct (validator-network (:constructor %make-network))
   (seed nil :guard :immutable)          ; zeroed in place when the network stops
@@ -294,7 +308,7 @@ Inbound connections from tracked peers are accepted regardless (Rust always dial
 (defun kill-link (link)
   "Ask LINK's threads to stop (the writer polls the flag at least every 0.1 s and
 the shutdown wakes blocked I/O); its reader releases the peer. Safe from any thread."
-  (setf (link-killed link) t)
+  (sb-ext:compare-and-swap (link-killed link) nil t)
   (conn-shutdown (link-conn link)))
 
 (defun teardown-if-needed (network record)
@@ -373,7 +387,8 @@ the shutdown wakes blocked I/O); its reader releases the peer. Safe from any thr
         (loop for (key host port egress) in entries
               unless (octets= key self)
                 do (let ((record (or (gethash key records)
-                                     (setf (gethash key records) (make-record key)))))
+                                     (setf (gethash key records)
+                                           (make-record key (validator-network-lock network))))))
                      (unless (and (equal host (record-host record)) (eql port (record-port record))
                                   (equalp egress (record-egress record)))
                        (when (record-host record) (setf (record-stale record) t))
@@ -455,26 +470,26 @@ the shutdown wakes blocked I/O); its reader releases the peer. Safe from any thr
                                    (length frame))))))))
 
 (defun run-link (network link record)
-  (unwind-protect
-       (handler-case
-           (progn
-             (let ((writer (with-network-lock (network)
-                             (spawn-locked network "validator peer writer"
-                                           (lambda ()
-                                             (handler-case (run-writer network link)
-                                               (serious-condition () nil)))))))
-               (setf (link-writer link) writer)
-               (when writer (run-reader network link))))
-         (serious-condition (condition)
-           (unless (or (link-killed link) (network-stopping-p network))
-             (note-network "peer ~A disconnected: ~A" (octets->hex (link-key link)) condition))))
-    (kill-link link)
-    (when (link-writer link) (thr:join-thread (link-writer link) :default nil))
-    (ignore-errors (cw:close-session (link-session link)))
-    (conn-close (link-conn link))
-    (with-network-lock (network)
-      (when (eq link (record-link record)) (release network record)))
-    (queues-put (validator-network-inbox network) 0 (event :disconnected (link-key link)) 0)))
+  (let ((writer nil))
+    (unwind-protect
+         (handler-case
+             (progn
+               (setf writer (with-network-lock (network)
+                              (spawn-locked network "validator peer writer"
+                                            (lambda ()
+                                              (handler-case (run-writer network link)
+                                                (serious-condition () nil))))))
+               (when writer (run-reader network link)))
+           (serious-condition (condition)
+             (unless (or (link-killed link) (network-stopping-p network))
+               (note-network "peer ~A disconnected: ~A" (octets->hex (link-key link)) condition))))
+      (kill-link link)
+      (when writer (thr:join-thread writer :default nil))
+      (ignore-errors (cw:close-session (link-session link)))
+      (conn-close (link-conn link))
+      (with-network-lock (network)
+        (when (eq link (record-link record)) (release network record)))
+      (queues-put (validator-network-inbox network) 0 (event :disconnected (link-key link)) 0))))
 
 (defun connect-link (network record session conn)
   "Promote a reserved RECORD to an active connection, or release it. Lock held."
@@ -580,17 +595,19 @@ the shutdown wakes blocked I/O); its reader releases the peer. Safe from any thr
          (handler-case
              (let ((session
                      (sb-ext:with-timeout (cfg-dial-timeout config)
-                       (let ((ip (resolve-ipv4 (record-host record))))
-                         (unless (or (cfg-allow-private-ips config) (global-ipv4-p ip))
-                           (error "Refusing to dial private address ~A" (record-host record)))
-                         (setf conn (make-conn (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
-                         (with-network-lock (network)
-                           (when (validator-network-stopping network) (error "Network stopping"))
-                           (push conn (validator-network-handshake-conns network)))
-                         (sock:socket-connect (conn-socket conn) ip (record-port record))
-                         (conn-open-stream conn)
-                         (apply #'cw:dial (conn-stream conn) (validator-network-seed network) (record-key record)
-                                (session-options network))))))
+                       (multiple-value-bind (host port)
+                           (with-network-lock (network) (values (record-host record) (record-port record)))
+                         (let ((ip (resolve-ipv4 host)))
+                           (unless (or (cfg-allow-private-ips config) (global-ipv4-p ip))
+                             (error "Refusing to dial private address ~A" host))
+                           (setf conn (make-conn (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+                           (with-network-lock (network)
+                             (when (validator-network-stopping network) (error "Network stopping"))
+                             (push conn (validator-network-handshake-conns network)))
+                           (sock:socket-connect (conn-socket conn) ip port)
+                           (conn-open-stream conn)
+                           (apply #'cw:dial (conn-stream conn) (validator-network-seed network) (record-key record)
+                                  (session-options network)))))))
                (with-network-lock (network)
                  (setf released t connected (connect-link network record session conn))))
            (serious-condition () nil))
