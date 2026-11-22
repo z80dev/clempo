@@ -124,7 +124,7 @@ fresh pubkeys are never claimed to allocate zero bytes.
 
 ### Paired Busy replay
 
-ExecSpeedAgent ran two alternating, sequential pairs on the same pipelined
+Two alternating, sequential pairs ran on the same pipelined
 replay baseline: A=`d3aace8`, B=`53adb01` (A plus `217b0c1`). The four replay
 JSON/log artifacts were inspected under `logs/busy/es/`:
 

@@ -1,0 +1,34 @@
+{
+  "score": "yes",
+  "node": {
+    "chain": "mainnet",
+    "anchor": 50049999,
+    "head": 50138830,
+    "hash": "0xf69a103968233f256837e5b4eda0903c07536da6b2d390ffc81df78c284fbf7b",
+    "stateRoot": "0xc1a3c843a889dd144d5e189b98102cbf8876e2d849430a42ac7076492727130d",
+    "executed": 88831,
+    "certified": 88831,
+    "uncertified": 0,
+    "archivedChunks": 8,
+    "stopped": false,
+    "liveSeconds": 3840,
+    "liveBlocks": 8569,
+    "maxLagAfterCatchup": 0
+  },
+  "rpc": {
+    "samples": 765,
+    "attempts": 767,
+    "incorrect": 0,
+    "sampledSeconds": 3820.055020844564,
+    "maxGapSeconds": 5.000097916461527,
+    "catchupHead": 50131719,
+    "lastSampledHead": 50138823,
+    "maxObservedLag": 1,
+    "endObservedLag": 0,
+    "zeroLagSamples": 487,
+    "p95ObservedLag": 1,
+    "blocksAfterCatchup": 7111
+  },
+  "revision": "d56182052d61beecce49fe69243db85a786aaa81",
+  "command": "$RUN/clempo --datadir $RUN/state --upstream http://127.0.0.1:18646 --archive $RUN/archive --rpc-port 38545 --bind 127.0.0.1 --certify --cert-rpc https://rpc.tempo.xyz --seconds 3840"
+}

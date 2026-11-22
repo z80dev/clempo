@@ -209,7 +209,7 @@ checkpoint counters and elapsed processing time exclude uncommitted trailing wor
          (directory (concatenate 'string (string-right-trim "/" directory) "/"))
          (tip (clempo.archive:archive-contiguous-height directory))
          (result (or (arg args :result)
-                     (format nil "~A/scratch/clempo/r1-archive/~D.json"
+                     (format nil "~A/cache/clempo/r1-archive/~D.json"
                              (clempo.io:getenv "HOME") (clempo.io:now-seconds))))
          (checkpoint (when (arg-flag args :resume)
                        (invariant (arg args :result) "-resume requires an explicit -result path")

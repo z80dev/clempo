@@ -4,14 +4,14 @@ These measurements are revision-specific. Paths under `logs/` describe local art
 
 | Rung | Score | Commit | Date |
 |---|---|---|---|
-| R0 Gate | yes: `scripts/verify.sh` (cold strict compile of every layer, ~540 tests incl. the precompile oracle, layer and determinism check, spec/ drift check) | `6bff662` | 2026-11-21 |
+| R0 Gate | yes: `scripts/verify.sh` (cold strict compile of every layer, 825 tests passed, 0 failed, 0 skipped, incl. the precompile oracle; fixed-seed fuzzing of every target; layer and determinism check; spec/ drift check) | `37db9c6` + path/label cleanup | 2026-11-21 |
 | R1 Decode | mainnet 640/640 (T0..T13), moderato 33/33; full archive 50,050,000/50,050,000 blocks (35,979,413 txs) re-encoded and checked against eth_getBlockByNumber, 0 failures | 1edd52f, 4e28f4d | 2026-11-21 |
 | R2 Genesis | yes: matching state roots and block hashes on mainnet and Moderato | `ec20b6b` | 2026-11-21 |
 | R3 Replay | **50,049,999** (the archive tip; goempo's frontier 49,399,999): every mainnet block executed from genesis matches gas used, receipts root, logs bloom and state root. The disk-backed Linux replay reached the same height with no heals or skips. | `6354034` (disk-backed), `d1d277e` (earlier replay), `0fad06f` | 2026-11-21 |
 | R3e EVM | 61,903/61,903 (100%; Istanbul..Osaka, Osaka 19,517/19,517) | `750c66b` | 2026-11-21 |
 | R3p Precompiles | 4,986/4,992 (goempo's frontier; every Tempo precompile T0..T14; the 6 differences are T14 keychain grants where clempo follows tempo c8b89f9, newer than the corpus: +2,600 gas root-retirement probe) | `fd2d4cf` | 2026-11-21 |
-| R4 Follow | **Yes:** 88,831 mainnet blocks executed and certified through 50,138,830; 3,820.1 s independently sampled, peak lag 1 block, p95 1, no incorrect responses. The longest gap between valid samples was 5.0001 s (limit 20 s). | `d561820` | 2026-11-21 |
-| R5 RPC | **14,697/14,697 value-identical cases**, with no reference timeouts left in the corpus and no timeout category. 135/156 methods fully match; the 21 that aren't value-graded are listed below with reasons. 156/156 reference methods served. Shape 108/113 and node 13/15 are reported separately (head-following and node-local answers). | `eebfce9` + timeout-rule deletion | 2026-11-21 |
+| R4 Follow | **Yes:** 88,831 mainnet blocks executed and certified through 50,138,830; 3,820.1 s independently sampled, peak lag 1 block, p95 1, no incorrect responses. The longest gap between valid samples was 5.0001 s (limit 20 s). [evidence](evidence/r4-d561820/) | `d561820` | 2026-11-21 |
+| R5 RPC | **14,697/14,697 value-identical cases**, with no reference timeouts left in the corpus and no timeout category. 135/156 methods fully match, 26 of them only on error answers (19 where the reference only ever errors, 7 whose success would write to the reference); the 21 that aren't value-graded are listed below with reasons. 156/156 reference methods served. Shape 108/113 and node 13/15 are reported separately (head-following and node-local answers). | `eebfce9` + timeout-rule deletion | 2026-11-21 |
 | R6 Validator | Sims: 4, 5 and 7 validators, three epochs each. Mixed devnet: one clempo signer necessary through two reshares, two clempo signers necessary through three. | `b680aaf`, `dbe14d1` | 2026-11-21 |
 | R6a–R6e Validator on the Rust devnet | `bin/clempo validator` with Tempo's flags: a) clempo signers necessary for quorum (1 of 3: 260 heights, 4 reshares; 2 of 3: 480 heights, 7 reshares); b) restart mid-run resumes from its datadir and signs; c) restart ~2,100 blocks / 35 epochs behind catches up by marshal backfill in under 90 s and proposes again; d) a fifth, clempo, validator registered with `clempo keys add-validator --send` joins the next DKG (5 players) and signs; e) clempo proposals with transactions finalized by Rust. Every node's chain matches Rust at every height. | `179e3db` | 2026-11-21 |
 | R7 Speed | Same Mac, whole-command wall seconds (clempo / goempo / Rust): Early **2.66–2.83 / 2.97–2.98 / 58.16–64.91**; Busy **21.08–21.31 / 24.33–24.74 / 32.57–33.09**. Recent read-ahead rerun, wall / CPU seconds (clempo vs goempo): cold proxy 1 **7.75 / 8.10 vs 10.77 / 8.97**, cold proxy 2 **7.42 / 8.27 vs 11.46 / 8.98**; warm 1 **6.52 / 7.95 vs 6.54 / 8.46**, warm 2 **6.55 / 7.96 vs 6.30 / 8.39**. Warm wall times split within run-to-run variation; clempo used less CPU in every pair. No Rust rerun under these cache conditions. [Recent methodology](docs/BENCH.md#recent-with-matched-parent-cache-preparation); [three-client sweep](docs/BENCH.md#matched-prepared-parent-comparison). | clempo `91ab4d2` + `-prepared` (Early/Busy), `c190f13` (Recent); goempo `92e996c`; Rust `568b4fb4258c` | 2026-11-21 |
@@ -267,7 +267,8 @@ The node executed and certified all 88,831 blocks through 50,138,830
 probe matched 765 of 767 attempts across 3,820.055 s and 7,111 upstream
 blocks after catchup; none returned an incorrect value. The longest gap
 between valid samples was 5.0001 s. Measured lag peaked at 1 block, was
-0 for 487 samples, and ended at 0.
+0 for 487 samples, and ended at 0. The run's result, command, node log and probe log
+are in [`evidence/r4-d561820/`](evidence/r4-d561820/).
 
 R4 certificates (bba3dfe): `CLEMPO_RPC=http://127.0.0.1:8545 CLEMPO_BUILD=release bin/clempo-dev certify -from 49995000 -to 50015000 -threads 16`
 verified all 20,001 consecutive mainnet finalization certificates across the epoch 2314/2315
@@ -535,7 +536,7 @@ separate public TCP connections. The observed run used:
 ```sh
 CLEMPO_BUILD=release bin/clempo-dev p2p-follow-proof \
   -upstream http://127.0.0.1:8545 -seconds 1800 \
-  -peers "$HOME/scratch/clempo/public-p2p/reference-peer-enodes"
+  -peers reference-peer-enodes
 ```
 
 All 3,350 consecutive finalized blocks (50,068,595–50,071,944) matched byte
@@ -754,7 +755,7 @@ The pre-check that preceded it (`418a146`, 647 s, 16 threads):
   - `eth_sendRawTransaction` and `eth_sendRawTransactionSync` would broadcast a transaction.
   - `debug_setHead` would rewind the chain.
   - `admin_addPeer`, `admin_addTrustedPeer`, `admin_removePeer` and `admin_removeTrustedPeer` would change its peer set (352 parse-error cases).
-  - `admin_clearTxpool` is the exception: the lead was allowed to call it and recorded 3 success cases.
+  - `admin_clearTxpool` is the exception: the operator was allowed to call it and recorded 3 success cases.
 
 R5 historical run (2026-11-21, `4c2db4d`): `CLEMPO_HEAP=40000 CLEMPO_RPC=http://127.0.0.1:8545 bin/clempo-dev rpcdiff` ran in 880 s with 16 threads and a complete history through block 50,049,999. Its legacy aggregate of 154 labels and 14,287 cases is not a value-match score. Technical observations from the run:
 - State tries (src/rpc/tries.lisp): the archive backend loads clempo.store checkpoints (the history build's job-N.state files at 13,999,999 .. 50,049,999, or `$CLEMPO_TRIE_STATE`) and moves a state database between blocks with clempo.history's changed keys (`history-map-changes`; across the three gap seeds 14M/16M/20M, whose deletions the history does not list, every key is re-read). Every move is checked against the header's state root. Measured: checkpoint load 14 s (356k accounts, 10.7M slots, 1.4 GB heap), moves of 10k/50k/400k blocks 1.3–9.5 s. A pinned head state serves eth_getProof/getAccount/getMultiProof at "latest".

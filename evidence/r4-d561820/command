@@ -1,0 +1,1 @@
+$RUN/clempo --datadir $RUN/state --upstream http://127.0.0.1:18646 --archive $RUN/archive --rpc-port 38545 --bind 127.0.0.1 --certify --cert-rpc https://rpc.tempo.xyz --seconds 3840 

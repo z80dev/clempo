@@ -6,7 +6,7 @@
 ;;;   every run replays it and it must pass. Case inputs depend on the generators in
 ;;;   src/dev/fuzz.lisp: a generator change re-derives these from the old codec.
 (
- ;; JSON and RLP findings fixed in 23fffe0 (SecurityAgent); each case failed on the
+ ;; JSON and RLP findings fixed in 23fffe0; each case failed on the
  ;; codec of eade5dc with the current generators.
  (:replay :target "json" :seed 1 :case 3 :note "CONTROL-STACK-EXHAUSTED: deep nesting killed rpc-serve")
  (:replay :target "json" :seed 1 :case 0 :note "INVALID-UTF8-STARTER-BYTE")

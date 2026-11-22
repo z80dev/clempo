@@ -806,8 +806,8 @@ in-process under 16 clients (`profile-graph.txt`, `profile-trace-block.txt`):
 - No global state lock: reads share the backend's reader count and `eth_getBalance`
   and `eth_getProof` scale to 16 clients.
 
-Results, logs and profiles: `~/scratch/clempo/fuzzload/results/` on the measuring
-host (`rpc-load-{1,2}.{json,txt,log}`, `profile-*.txt`).
+Results, logs and profiles (`rpc-load-{1,2}.{json,txt,log}`, `profile-*.txt`) stayed on
+the measuring host; they are not published in this repository.
 
 ### Reproduce
 
@@ -865,7 +865,7 @@ What changed (direct per-request time inside the server, warm, 1 thread):
 
 Open: `debug_traceTransaction` spends ~40% in per-op tracer hooks (CLOS dispatch,
 `MAKE-PENDING`, `STEP-STOP-AND-COST`) although `callTracer` keeps no steps; a
-no-steps interpreter path would put it well above Rust (EvmJitAgent agreed to the edit
+no-steps interpreter path would put it well above Rust (the EVM owner agreed to the edit
 in `src/evm/tracing.lisp`; not done). At 64 clients thread-per-connection loses to
 Rust's 16 kqueue workers.
 

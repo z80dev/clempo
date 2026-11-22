@@ -61,7 +61,7 @@
     (unless spec (error "Expected -range busy, early or recent, got ~S" range))
     (check-type sender-threads (integer 1 16))
     (destructuring-bind (name from to) spec
-      (let* ((path (expand-home (arg args :result (format nil "~~/scratch/clempo/bench/clempo-~A.json" name))))
+      (let* ((path (expand-home (arg args :result (format nil "~~/cache/clempo/bench/clempo-~A.json" name))))
              (parent-height (1- from))
              (parent-block (clempo.blocks:decode-block (clempo.archive:raw-block parent-height)))
              (root (clempo.headers:header-state-root (clempo.blocks:block-header parent-block)))

@@ -127,7 +127,7 @@
 
 (deftest abi-huge-lengths-are-overruns ()
   ;; A length word whose head words overflow a fixnum once escaped as a TYPE-ERROR from the
-  ;; strict decoder's next-offset slot (found by FuzzLoadAgent: int56 uint160[] bytes).
+  ;; strict decoder's next-offset slot (found by fuzzing: int56 uint160[] bytes).
   (dolist (len (list (expt 2 60) (expt 2 62) (1- (expt 2 64))))
     (let ((data (words "0000000000000000000000000000000000000000000000000000000000000020"
                        (format nil "~64,'0x" len))))

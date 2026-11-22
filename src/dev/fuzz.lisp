@@ -215,7 +215,7 @@ matched by a :known entry, and those that were."
 
 (defun deep-depth () (pick '(16 200 2000 12000 50000)))
 
-(deffuzz "rlp" "SecurityAgent"
+(deffuzz "rlp" "security"
   "encode/decode round trip, canonical re-encoding of anything accepted, deep nesting"
   (case (rnd 4)
     (0 (let* ((item (gen-rlp-item 4))
@@ -299,7 +299,7 @@ with V (only for generated values: a parsed object may repeat a key)."
       (when (and equal (not (json:json-equal back v)))
         (fail "round trip differs: ~A" (input-text text))))))
 
-(deffuzz "json" "SecurityAgent"
+(deffuzz "json" "security"
   "hostile text and octets: only JSON-ERROR, and whatever parses writes back equal"
   (case (rnd 5)
     (0 (let ((v (gen-json 4)))
@@ -378,7 +378,7 @@ with V (only for generated values: a parsed object may repeat a key)."
             (replace v (integer->octets x 32) :start1 w))
           (setf v (mutate v 1))))))
 
-(deffuzz "abi" "SecurityAgent"
+(deffuzz "abi" "security"
   "encode/decode round trip (strict and loose), hostile data: only ABI-ERROR, and a strict
 accept is canonical"
   (let* ((types (loop repeat (1+ (rnd 3)) collect (gen-abi-type 3)))
@@ -505,7 +505,7 @@ cache), so an API change that leaves the JIT off cannot make a differential vacu
       (fail "interpreter ~S~%  JIT ~S" (subseq want 0 3) (subseq got 0 3)))
     want))
 
-(deffuzz "u256" "EvmJitAgent"
+(deffuzz "u256" "evm"
   "every 256-bit arithmetic, comparison, bitwise and shift opcode against a slow reference
 model, interpreted and compiled"
   (let* ((cases (loop repeat 8
@@ -577,7 +577,7 @@ JUMPDEST of the program."
 
 (defun octets-p (x) (typep x 'octets))
 
-(deffuzz "evm-jit" "EvmJitAgent"
+(deffuzz "evm-jit" "evm"
   "random bytecode (two contracts calling each other) interpreted and compiled agree on
 status, gas, output, refund, logs and state"
   (let* ((fork (pick '(:istanbul :berlin :london :shanghai :cancun :prague :osaka :osaka)))
@@ -598,7 +598,7 @@ status, gas, output, refund, logs and state"
                       (setf x (mod (* x x) m)))
              (mod r m)))))
 
-(deffuzz "modexp" "SecurityAgent"
+(deffuzz "modexp" "security"
   "modular exponentiation against right-to-left square-and-multiply, and the precompile on
 hostile length headers"
   (let ((bl (rsize 96)) (el (rsize 64)) (ml (rsize 96)))
@@ -673,7 +673,7 @@ hostile length headers"
                            (incf q len))))))
         (if (= q size) out :error)))))
 
-(deffuzz "snappy" "SecurityAgent"
+(deffuzz "snappy" "security"
   "compress/decompress round trip; hostile blocks decode exactly as a slow reference decoder
 does (or both reject), only P2P-ERROR"
   (let* ((plain (if (chance 1 2)
@@ -723,7 +723,7 @@ does (or both reject), only P2P-ERROR"
                         (t (list x)))))))
     (walk item)))
 
-(deffuzz "tx" "SecurityAgent"
+(deffuzz "tx" "security"
   "mutated mainnet/moderato envelopes of every type: only RLP-ERROR, INVARIANT-VIOLATION or
 SIGNATURE-ERROR; whatever decodes re-encodes byte for byte and its sender is computable
 or rejected"

@@ -232,7 +232,7 @@ end-of-block committee call. Returns the drained changes."
          (sort (run :mainnet) #'<))
     (is= '() (run (clempo.chainspec:load-chainspec (system-fixture "devnet-r6/genesis.json"))))))
 
-;;; The T13-genesis devnet (P2PAgent's devnet-r6): genesis allocates the factory, the T13
+;;; The T13-genesis devnet (devnet-r6): genesis allocates the factory, the T13
 ;;; runtimes and the EIP-2935 contract; every block carries the 2935 call and blocks 59 and
 ;;; 119 the committee call (epoch length 60). Replayed through BEGIN-BLOCK / FINISH-BLOCK,
 ;;; every state root matches.
