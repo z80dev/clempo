@@ -10,6 +10,17 @@
 (define-constant +max+ (1- (ash 1 256)))
 (define-constant +sign-bit+ (ash 1 255))
 
+(defbound +word-bytes+ 32 "Bytes in a word's big-endian encoding."
+  (= (* 8 +word-bytes+) (integer-length +max+)))
+
+(defbound +word-limbs+ 4 "64-bit limbs WRITE-WORD splits a word into."
+  (= (* 64 +word-limbs+) (* 8 +word-bytes+))
+  ;; WRITE-WORD's fixnum path writes a word's low 8 bytes only.
+  (< most-positive-fixnum (ash 1 64)))
+
+;;; U*'s fast path multiplies two (UNSIGNED-BYTE 31) operands as fixnums.
+(static-assert (typep (expt (1- (ash 1 31)) 2) 'fixnum))
+
 (declaim (inline u+ u- u* to-signed from-signed u-lt u-gt s-lt s-gt
                  word-not to-address))
 
@@ -151,7 +162,7 @@
         (loop for i fixnum from (+ start 31) downto (+ start 24)
               for shift fixnum from 0 by 8
               do (setf (aref bytes i) (ldb (byte 8 shift) value))))
-      (loop for limb fixnum from 0 below 4
+      (loop for limb fixnum from 0 below +word-limbs+
             for l of-type (unsigned-byte 64) = (ldb (byte 64 (* 64 limb)) value)
             do (loop for i fixnum from (- (+ start 31) (* 8 limb)) downto (- (+ start 24) (* 8 limb))
                      for shift fixnum from 0 by 8

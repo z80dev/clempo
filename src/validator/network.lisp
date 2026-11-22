@@ -79,7 +79,7 @@ private devnets; CALL-WITH-VALIDATOR-NETWORK defaults are Tempo's production val
 
 (defun queues-put (queues index value size)
   "Append VALUE (SIZE bytes) to ring INDEX; NIL when the ring or byte budget is full."
-  (thr:with-mutex ((queues-mutex queues))
+  (clempo.lock:with-lock ((queues-mutex queues))
     (when (and (<= (+ (queues-bytes queues) size) (queues-byte-limit queues))
                (ring-push (aref (queues-rings queues) index) (cons size value)))
       (incf (queues-bytes queues) size)
@@ -109,13 +109,10 @@ private devnets; CALL-WITH-VALIDATOR-NETWORK defaults are Tempo's production val
   "Remove up to LIMIT values, waiting up to TIMEOUT seconds while all rings are empty."
   (let ((mutex (queues-mutex queues))
         (deadline (+ (io:monotonic-ticks) (ceiling (* timeout internal-time-units-per-second)))))
-    (thr:with-mutex (mutex)
+    (clempo.lock:with-lock (mutex)
       (loop for remaining = (/ (- deadline (io:monotonic-ticks)) internal-time-units-per-second)
             while (and (zerop (queues-count queues)) (plusp remaining))
-            ;; A timed-out CONDITION-WAIT may return without the mutex (SBCL on
-            ;; Linux futexes does); take it back before touching the rings.
-            do (unless (thr:condition-wait (queues-ready queues) mutex :timeout remaining)
-                 (unless (thr:holding-mutex-p mutex) (thr:grab-mutex mutex))))
+            do (clempo.lock:condition-wait (queues-ready queues) mutex :timeout remaining))
       (loop repeat limit
             for (value present) = (multiple-value-list (queues-pop-locked queues))
             while present collect value))))
@@ -136,11 +133,11 @@ the CLOSED flag keeps a late shutdown from touching a reused descriptor."
   socket stream (closed nil) (mutex (thr:make-mutex :name "validator conn") :read-only t))
 
 (defun conn-shutdown (conn)
-  (thr:with-mutex ((conn-mutex conn))
+  (clempo.lock:with-lock ((conn-mutex conn))
     (unless (conn-closed conn) (ignore-errors (sock:socket-shutdown (conn-socket conn) :direction :io)))))
 
 (defun conn-close (conn)
-  (thr:with-mutex ((conn-mutex conn))
+  (clempo.lock:with-lock ((conn-mutex conn))
     (unless (conn-closed conn)
       (setf (conn-closed conn) t)
       (if (conn-stream conn)
@@ -196,7 +193,7 @@ period. Returns T when newly blocked."))
   (:documentation "The bound listener port (useful with :LISTEN-PORT 0)."))
 
 (defmacro with-network-lock ((network) &body body)
-  `(thr:with-mutex ((validator-network-lock ,network)) ,@body))
+  `(clempo.lock:with-lock ((validator-network-lock ,network)) ,@body))
 
 (defun network-stopping-p (network)
   (with-network-lock (network) (validator-network-stopping network)))

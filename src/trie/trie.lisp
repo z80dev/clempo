@@ -17,10 +17,16 @@
 (defparameter *empty-bytes* (make-octets 0))
 (define-constant +empty-code-hash+ (keccak256 (make-octets 0)))
 
+(defbound +branch-width+ 16 "Children of a branch node, one per nibble."
+  (= +branch-width+ (ash 1 4)))
+
 ;;; The largest state branch is a 3-byte list header, sixteen 33-byte child
 ;;; references, and a 1-byte empty value. Larger arbitrary values still work.
+(defbound +node-scratch-bytes+ 544 "Bytes of the workspace a node is encoded into."
+  (>= +node-scratch-bytes+ (+ 3 (* +branch-width+ 33) 1)))
+
 (defstruct hash-workspace
-  (node-bytes (make-octets 544) :type octets)
+  (node-bytes (make-octets +node-scratch-bytes+) :type octets)
   (key-bytes (make-octets 32) :type octets)
   (keccak (make-keccak)))
 
@@ -375,10 +381,10 @@ Short inline nodes and persisted or proof nodes need their own exact arrays."
             (value (or (branch-node-value node) *empty-bytes*))
             (payload (rlp-encoded-length value)))
        (declare (type fixnum payload))
-       (dotimes (i 16) (incf payload (ref-length (node-reference (svref children i) store))))
+       (dotimes (i +branch-width+) (incf payload (ref-length (node-reference (svref children i) store))))
        (multiple-value-bind (out pos end) (rlp-list-buffer payload scratch)
          (declare (type fixnum pos))
-         (dotimes (i 16)
+         (dotimes (i +branch-width+)
            (setf pos (write-ref (node-reference (svref children i) store) out pos)))
          (rlp-encode-into value out pos)
          (values out end))))))
@@ -530,11 +536,11 @@ length, below the first DEPTH nibbles they share."
           (loop while (let ((n (nibble first-key split)))
                         (every (lambda (item) (= n (nibble (car item) split))) (rest items)))
                 do (incf split))
-          (let ((children (make-array 16 :initial-element nil))
-                (buckets (make-array 16 :initial-element nil)))
+          (let ((children (make-array +branch-width+ :initial-element nil))
+                (buckets (make-array +branch-width+ :initial-element nil)))
             (declare (dynamic-extent buckets))
             (dolist (item items) (push item (svref buckets (nibble (car item) split))))
-            (dotimes (i 16)
+            (dotimes (i +branch-width+)
               (when (svref buckets i)
                 (setf (svref children i) (build-subtrie (svref buckets i) (1+ split) owner))))
             (let ((branch (make-branch owner children)))

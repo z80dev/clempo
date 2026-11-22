@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # The gate. A rung counts only on a commit where this passes.
-#   1. a cold compile of every layer from source; warnings are errors
-#   2. every layer's tests
+#   1. a cold compile of every layer from source; warnings are errors, and so is a false
+#      compile-time bound proof (STATIC-ASSERT, DEFBOUND)
+#   2. every layer's tests, each audited for threads it leaves running (*LONG-LIVED-THREADS*
+#      aside) and, in this check build, for lock-order cycles (clempo.lock)
 #   3. fixed-seed fuzzing of every target plus tests/fuzz/cases.sexp (a few seconds)
-#   4. the import-graph and determinism check (layers.sexp)
+#   4. the import-graph and determinism check (layers.sexp), including bound citations in
+#      hot fixed-count loops and lock acquisition through clempo.lock
 #   5. compiled-form specification matches tracked spec/ outputs
 set -euo pipefail
 cd "$(dirname "$0")/.."

@@ -109,7 +109,7 @@ fallback for 0 up to it), or NIL when it cannot rebuild any."
   "The state after block N rebuilt from genesis, or NIL when N is beyond the replay limit."
   (let ((chain (and (<= n *replay-history-limit*) (replay-chain))))
     (when chain
-      (sb-thread:with-mutex (*replay-lock*)
+      (clempo.lock:with-lock (*replay-lock*)
         (let ((recent (gethash chain:*backend* *replayed-states*)))
           (or (cdr (assoc n recent))
               (let ((db (rebuild-state n chain)))
@@ -386,7 +386,7 @@ state root) and held for the call."
 (defvar *node-key-lock* (sb-thread:make-mutex :name "node key"))
 
 (defun node-key ()
-  (sb-thread:with-mutex (*node-key-lock*)
+  (clempo.lock:with-lock (*node-key-lock*)
     (or *node-key*
         (setf *node-key* (clempo.secp256k1:random-private-key)))))
 

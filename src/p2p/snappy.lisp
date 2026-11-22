@@ -16,9 +16,20 @@
     (dotimes (i bytes word)
       (setf word (logior word (ash (aref data (+ pos i)) (* 8 i)))))))
 
-(defconstant +max-expansion-numerator+ 64
+(defbound +max-expansion-numerator+ 64
   "No element yields more than 64 bytes per 3 bytes read (a two-byte-offset copy), so a
-payload of K bytes after the length decodes to at most 64K/3 bytes.")
+payload of K bytes after the length decodes to at most 64K/3 bytes."
+  ;; The longest copy: a 6-bit tag argument plus one.
+  (= +max-expansion-numerator+ (1+ (ash #xff -2)))
+  ;; Read 3 bytes for it, against 2 for an 11-byte one-byte-offset copy, 5 for a 64-byte
+  ;; four-byte-offset copy, and N+1 or more for an N-byte literal.
+  (>= (/ +max-expansion-numerator+ 3) (max (/ 11 2) (/ +max-expansion-numerator+ 5) 1)))
+
+(defbound +length-last-shift+ 28
+  "Shift of the last byte of the preamble, a varint of at most 32 bits."
+  (= +length-last-shift+ (* 7 (floor 32 7)))
+  ;; That byte carries the top 4 bits: DECOMPRESS rejects one above 15.
+  (= (- 32 +length-last-shift+) (integer-length 15)))
 
 (defun decompress (data &key (start 0) (end (length data)) (max-size #xffffff))
   "Decode one raw Snappy block. Bound expansion before allocating the output: the declared
@@ -28,11 +39,11 @@ length must fit MAX-SIZE and what the remaining bytes could possibly produce."
   (unless (<= 0 start end (length data)) (protocol-error "invalid Snappy input range"))
   (let ((p start) (size 0))
     (declare (type fixnum p size))
-    (loop for shift from 0 to 28 by 7
+    (loop for shift from 0 to +length-last-shift+ by 7
           do (when (= p end) (protocol-error "short Snappy length"))
              (let ((b (aref data p)))
                (incf p)
-               (when (and (= shift 28) (> b 15)) (protocol-error "invalid Snappy length"))
+               (when (and (= shift +length-last-shift+) (> b 15)) (protocol-error "invalid Snappy length"))
                (setf size (logior size (ash (logand b 127) shift)))
                (when (< b 128) (return))))
     (when (> size max-size) (protocol-error "Snappy output length ~D exceeds limit" size))

@@ -105,10 +105,15 @@
          (aes (k:keccak256-concat ecdh shared)))
     (values aes (k:keccak256-concat ecdh aes))))
 
+(defbound +mac-bytes+ 16
+  "Bytes of a frame MAC: one AES block, mixed with that many bytes of the running Keccak-256
+MAC digest."
+  (<= +mac-bytes+ 32))
+
 (defstruct (frame-state (:constructor %make-frame-state (ctr mac-aes digest)))
   ctr mac-aes digest
   (scratch (k:make-keccak) :read-only t)
-  (mix-block (make-octets 16) :type (octets 16) :read-only t))
+  (mix-block (make-octets +mac-bytes+) :type (octets #.+mac-bytes+) :read-only t))
 
 (defun make-frame-state (aes-key mac-key seed &optional packet)
   (let ((digest (k:make-keccak)))
@@ -123,9 +128,9 @@
 (defun mix-mac (state data offset digest)
   (declare (type octets data digest) (type fixnum offset) #.*hot*)
   (let ((tmp (frame-state-mix-block state)))
-    (replace tmp digest :end2 16)
+    (replace tmp digest :end2 +mac-bytes+)
     (aes:aes-encrypt-block (frame-state-mac-aes state) tmp tmp)
-    (dotimes (i 16)
+    (dotimes (i +mac-bytes+)
       (setf (aref tmp i) (logxor (aref tmp i) (aref data (+ offset i)))))
     (k:keccak-update (frame-state-digest state) tmp)
     (frame-digest state)))

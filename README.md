@@ -67,6 +67,8 @@ The bet was that a node in Lisp could be smaller and easier to keep in step with
 
 **Context lives in special variables.** The executor, the RPC threads, the tests and the simulator rebind `*world*`, `*spec*`, `*storage*`, `*tracer*`, `*clock*` and `*entropy*`. The simulator is deterministic because the consensus code takes its clock and randomness from `*clock*` and `*entropy*`, and `scripts/check-layers.lisp` forbids any other route in the non-IO layers.
 
+**Limits are proven when compiled; locks and threads are audited when tested.** `defbound` names a fixed limit with the relations that make it safe, checked by the compiler as Go's `const _ = uint(a - b)` is: the EVM's stack, call depth and 4 GiB memory limit (its quadratic cost stays a fixnum), RLP and JSON nesting depths, store key and footer sizes, the HTTP line buffer, and the limb, lane and round counts of the field and hash code. A false proof fails the build, and the gate refuses a fixed-count loop in hot code whose count is not such a limit. Every mutex is taken through `clempo.lock`, which in check builds records the order locks are taken in and signals on a cycle, as Linux's lockdep does; the test harness fails a test that records one, or that leaves a thread running, as goleak does. SBCL has no data-race detector like Go's `-race`: the lock-order checker finds orders that can deadlock, not unsynchronized access.
+
 **One image.** `bin/clempo --repl-port` serves an authenticated loopback REPL into the running node: inspect state, redefine a function, and keep following the tip.
 
 ## Quick start
@@ -75,7 +77,8 @@ Requirements: [SBCL](https://www.sbcl.org) 2.6.8 and `git`. The gate has passed 
 
 ```sh
 git clone https://github.com/z80dev/clempo.git && cd clempo
-scripts/verify.sh            # cold strict compile, tests, layer check and spec drift
+scripts/verify.sh            # cold strict compile with bound proofs, tests with thread-leak and
+                             # lock-order audits, layer check and spec drift
 bin/clempo-dev help          # every tool
 ```
 

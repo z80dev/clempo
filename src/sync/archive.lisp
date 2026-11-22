@@ -120,12 +120,12 @@ head) is not written: chunks are always complete."
          (start (clempo.io:monotonic-ticks)))
     (flet ((worker ()
              (loop
-               (let ((c (sb-thread:with-mutex (lock) (pop queue))))
+               (let ((c (clempo.lock:with-lock (lock) (pop queue))))
                  (unless c (return))
                  (handler-case
                      (progn
                        (fetch-chunk c :url url :dir dir :last to)
-                       (sb-thread:with-mutex (lock)
+                       (clempo.lock:with-lock (lock)
                          (incf done)
                          (when (and log (zerop (mod done 10)))
                            (let ((secs (/ (- (clempo.io:monotonic-ticks) start)
@@ -135,7 +135,7 @@ head) is not written: chunks are always complete."
                                      (/ (* done +chunk-blocks+) (max secs 1/1000)))
                              (force-output *error-output*)))))
                    (error (e)
-                     (sb-thread:with-mutex (lock) (push (cons c (princ-to-string e)) errors))))))))
+                     (clempo.lock:with-lock (lock) (push (cons c (princ-to-string e)) errors))))))))
       (mapc #'sb-thread:join-thread
             (loop repeat (max 1 threads) collect (sb-thread:make-thread #'worker :name "fetch"))))
     (values done (nreverse errors))))

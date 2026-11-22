@@ -323,7 +323,7 @@ clear_stale_filters does; called with *FILTERS-LOCK* held."
 (defun install (kind &optional filter)
   (let ((id (format nil "0x~(~32,'0x~)" (octets->integer (clempo.io:random-octets 16))))
         (now (clempo.io:now-ms)))
-    (sb-thread:with-mutex (*filters-lock*)
+    (clempo.lock:with-lock (*filters-lock*)
       (evict-stale-filters now)
       (when (>= (hash-table-count *filters*) *filters-max*)
         (rpc-fail -32000 "too many installed filters"))
@@ -335,7 +335,7 @@ clear_stale_filters does; called with *FILTERS-LOCK* held."
   "Filter ID as polled now: (values installed previous-last-block). ADVANCE-TO moves its last
 block, atomically, so concurrent polls never answer the same blocks twice."
   (let ((now (clempo.io:now-ms)))
-    (sb-thread:with-mutex (*filters-lock*)
+    (clempo.lock:with-lock (*filters-lock*)
       (evict-stale-filters now)
       (let ((it (or (gethash id *filters*) (rpc-fail -32000 "filter not found"))))
         (setf (installed-last-poll it) now)
@@ -346,7 +346,7 @@ block, atomically, so concurrent polls never answer the same blocks twice."
 (defrpc "eth_newBlockFilter" () "install a new-block filter" (install :blocks))
 (defrpc "eth_newPendingTransactionFilter" () "install a pending-transaction filter" (install :pending))
 (defrpc "eth_uninstallFilter" ((id filter-id)) "remove a filter"
-  (if (sb-thread:with-mutex (*filters-lock*) (remhash id *filters*)) :true :false))
+  (if (clempo.lock:with-lock (*filters-lock*) (remhash id *filters*)) :true :false))
 
 (defrpc "eth_getFilterChanges" ((id filter-id)) "what a filter saw since its last poll"
   (let ((head chain:*head*))

@@ -24,11 +24,24 @@
 ;;; checksum is verified the first time the block is read, so a damaged file signals
 ;;; STORE-FORMAT-ERROR instead of returning wrong bytes.
 
-(defconstant +key-bytes+ 53)
+(defbound +key-bytes+ 53
+  "Bytes of an encoded key: a tag byte above an address and a 256-bit slot or hash."
+  (= (* 8 +key-bytes+) (+ 8 160 256))
+  (<= (integer-length (ash #xff 416)) (* 8 +key-bytes+)) ; KEY-ACCOUNT ... KEY-HEAD's tag byte
+  ;; A record's SHARED and SUFFIX counts are single bytes.
+  (< +key-bytes+ 256))
 (defconstant +block-target+ 4096)
 (define-constant +segment-magic+ (string->octets "CLKVSEG1"))
-(defconstant +segment-footer+ 48)
-(defconstant +bloom-hashes+ 7)
+(defbound +segment-footer+ 48
+  "Bytes of a segment footer, laid out above."
+  (= +segment-footer+ (+ (length +segment-magic+) 8 8 8 4 4 (length +segment-magic+))))
+(defbound +bloom-bits-per-key+ 10 "Bloom filter bits a segment spends per record.")
+(defbound +bloom-hashes+ 7
+  "Bloom filter probes per key: the count that minimizes false positives at
++BLOOM-BITS-PER-KEY+ (about 0.8%)."
+  (= +bloom-hashes+ (round (* +bloom-bits-per-key+ (log 2d0))))
+  ;; The footer stores it in one byte.
+  (< +bloom-hashes+ 256))
 
 ;;; Keys
 
@@ -75,7 +88,7 @@
 (defun write-segment (path next count)
   "Write the records NEXT returns ((values key value), NIL at the end, ascending keys) to
 PATH durably; COUNT bounds their number (it sizes the bloom filter)."
-  (let* ((bits (* 64 (max 1 (ceiling (* 10 count) 64))))
+  (let* ((bits (* 64 (max 1 (ceiling (* +bloom-bits-per-key+ count) 64))))
          (bloom (make-octets (/ bits 8)))
          (records 0))
     (write-durably
@@ -568,14 +581,14 @@ background thread, then call AFTER there. Reads see TABLE at once. Waits while a
 batch is still being written (batches install in order)."
   (kv-wait-batch kv)
   (kv-check-merge kv)
-  (sb-thread:with-mutex ((kv-lock kv))
+  (clempo.lock:with-lock ((kv-lock kv))
     (setf (kv-batches kv) (cons table (kv-batches kv)))
     (setf (kv-batch-writer kv)
           (sb-thread:make-thread
            (lambda ()
              (handler-case
                  (let* ((entries (sorted-entries table))
-                        (seq (sb-thread:with-mutex ((kv-lock kv)) (incf (kv-seq kv))))
+                        (seq (clempo.lock:with-lock ((kv-lock kv)) (incf (kv-seq kv))))
                         (path (dir-file (kv-dir kv) "~A" (kv-segment-name seq)))
                         (i 0))
                    (write-segment path
@@ -586,7 +599,7 @@ batch is still being written (batches install in order)."
                                         (values (car e) (cdr e)))))
                                   (max 1 (length entries)))
                    (let ((seg (open-kseg path)))
-                     (sb-thread:with-mutex ((kv-lock kv))
+                     (clempo.lock:with-lock ((kv-lock kv))
                        (let ((segments (cons seg (kv-segments kv))))
                          (write-kv-manifest kv (mapcar #'kseg-name segments))
                          (setf (kv-segments kv) segments)
@@ -600,7 +613,7 @@ batch is still being written (batches install in order)."
 
 (defun kv-wait-batch (kv)
   "Wait until every handed-over batch is a segment."
-  (let ((thread (sb-thread:with-mutex ((kv-lock kv)) (kv-batch-writer kv))))
+  (let ((thread (clempo.lock:with-lock ((kv-lock kv)) (kv-batch-writer kv))))
     (when thread (sb-thread:join-thread thread :default nil))))
 
 (defun kv-segment-bytes (seg) (kseg-length seg))
@@ -617,7 +630,7 @@ value deletes), as the newest segment, and start a merge if a tier is full. Wait
 readable through KV but not yet named in MANIFEST (an import publishes them all at once)."
   (kv-check-merge kv)
   (when (plusp (length entries))
-    (let* ((seq (sb-thread:with-mutex ((kv-lock kv)) (incf (kv-seq kv))))
+    (let* ((seq (clempo.lock:with-lock ((kv-lock kv)) (incf (kv-seq kv))))
            (name (kv-segment-name seq))
            (path (dir-file (kv-dir kv) "~A" name))
            (i 0))
@@ -629,15 +642,15 @@ readable through KV but not yet named in MANIFEST (an import publishes them all 
                            (values (car e) (cdr e)))))
                      (length entries))
       (let ((seg (open-kseg path)))
-        (sb-thread:with-mutex ((kv-lock kv))
+        (clempo.lock:with-lock ((kv-lock kv))
           (let ((segments (cons seg (kv-segments kv))))
             (when manifest (write-kv-manifest kv (mapcar #'kseg-name segments)))
             (setf (kv-segments kv) segments))))
       (when manifest
         (kv-merge-tiers kv)
-        (sb-thread:with-mutex ((kv-lock kv))
+        (clempo.lock:with-lock ((kv-lock kv))
           (loop while (and (kv-merger kv) (> (length (kv-segments kv)) +segments-max+))
-                do (sb-thread:condition-wait (kv-merged kv) (kv-lock kv)))))))
+                do (clempo.lock:condition-wait (kv-merged kv) (kv-lock kv)))))))
   kv)
 
 (defun kv-check-merge (kv)
@@ -657,18 +670,18 @@ in size, or NIL."
 (defun kv-merge-tiers (kv)
   "Merge full tiers: on a background thread (one at a time), or here without BACKGROUND."
   (if (kv-background kv)
-      (sb-thread:with-mutex ((kv-lock kv))
+      (clempo.lock:with-lock ((kv-lock kv))
         (unless (kv-merger kv)
           (let ((group (merge-group (kv-segments kv))))
             (when group
               (setf (kv-merger kv)
                     (sb-thread:make-thread
                      (lambda ()
-                       (handler-case (loop for g = group then (sb-thread:with-mutex ((kv-lock kv))
+                       (handler-case (loop for g = group then (clempo.lock:with-lock ((kv-lock kv))
                                                                 (merge-group (kv-segments kv)))
                                            while g do (kv-merge kv g))
                          (error (e) (setf (kv-merge-error kv) e)))
-                       (sb-thread:with-mutex ((kv-lock kv))
+                       (clempo.lock:with-lock ((kv-lock kv))
                          (setf (kv-merger kv) nil)
                          (sb-thread:condition-broadcast (kv-merged kv))))
                      :name "kv merge"))))))
@@ -678,15 +691,15 @@ in size, or NIL."
 (defun kv-merge (kv group)
   "Replace GROUP, a run of adjacent segments (newest first), by one segment. The run stays
 adjacent while it merges: flushes only add segments at the front."
-  (let* ((older-p (sb-thread:with-mutex ((kv-lock kv))
+  (let* ((older-p (clempo.lock:with-lock ((kv-lock kv))
                     (rest (member (car (last group)) (kv-segments kv)))))
-         (seq (sb-thread:with-mutex ((kv-lock kv)) (incf (kv-seq kv))))
+         (seq (clempo.lock:with-lock ((kv-lock kv)) (incf (kv-seq kv))))
          (path (dir-file (kv-dir kv) "~A" (kv-segment-name seq)))
          ;; tombstones go only when no older segment holds what they delete
          (next (merged-records group 0 nil :keep-tombstones older-p)))
     (write-segment path next (reduce #'+ group :key #'kseg-records))
     (let ((merged (open-kseg path)))
-      (sb-thread:with-mutex ((kv-lock kv))
+      (clempo.lock:with-lock ((kv-lock kv))
         (let* ((segments (kv-segments kv))
                (at (search group segments)))
           (invariant at "merged segments are no longer adjacent")
@@ -702,7 +715,7 @@ adjacent while it merges: flushes only add segments at the front."
 (defun kv-wait-merges (kv)
   "Wait for the batch being written and the running merge, then signal a failure of either."
   (kv-wait-batch kv)
-  (let ((thread (sb-thread:with-mutex ((kv-lock kv)) (kv-merger kv))))
+  (let ((thread (clempo.lock:with-lock ((kv-lock kv)) (kv-merger kv))))
     (when thread (sb-thread:join-thread thread :default nil)))
   (kv-check-merge kv))
 

@@ -82,9 +82,9 @@ the queue holds thousands of empty blocks but only a few hundred busy ones."
 at WEIGHT per block, at most +PIPELINE-BATCH+ and at least one; NIL once the consumer has
 stopped. Sleeps until at least half the depth is free."
   (loop
-    (let ((claim (sb-thread:with-mutex ((pipeline-lock pipeline))
+    (let ((claim (clempo.lock:with-lock ((pipeline-lock pipeline))
                    (loop until (or (pipeline-stopped pipeline) (pipeline-next pipeline))
-                         do (sb-thread:condition-wait (pipeline-room pipeline) (pipeline-lock pipeline)))
+                         do (clempo.lock:condition-wait (pipeline-room pipeline) (pipeline-lock pipeline)))
                    (let ((free (- +pipeline-depth+ (pipeline-count pipeline))))
                      (cond ((pipeline-stopped pipeline) nil)
                            ;; at least half free: a full producer refills in large batches
@@ -100,7 +100,7 @@ stopped. Sleeps until at least half the depth is free."
   "Append ENTRIES (oldest first) to PIPELINE's queue; returns their total weight."
   (let ((cells (copy-list entries))
         (total (reduce #'+ entries :key #'prefetched-weight)))
-    (sb-thread:with-mutex ((pipeline-lock pipeline))
+    (clempo.lock:with-lock ((pipeline-lock pipeline))
       (if (pipeline-queue pipeline)
           (setf (cdr (pipeline-tail pipeline)) cells)
           (setf (pipeline-queue pipeline) cells))
@@ -195,13 +195,13 @@ consumer moves the whole queue to its own list at once, so most blocks take no l
   (loop
     (let ((head (first (pipeline-taken pipeline))))
       (cond ((null head)
-             (sb-thread:with-mutex ((pipeline-lock pipeline))
+             (clempo.lock:with-lock ((pipeline-lock pipeline))
                (unless (pipeline-next pipeline)
                  (setf (pipeline-next pipeline) n)
                  (sb-thread:condition-broadcast (pipeline-room pipeline)))
                (loop until (or (pipeline-queue pipeline) (pipeline-done pipeline))
                      do (setf (pipeline-consumer-waiting pipeline) t)
-                        (sb-thread:condition-wait (pipeline-ready pipeline) (pipeline-lock pipeline))
+                        (clempo.lock:condition-wait (pipeline-ready pipeline) (pipeline-lock pipeline))
                         (setf (pipeline-consumer-waiting pipeline) nil))
                (unless (pipeline-queue pipeline) (return nil))
                (setf (pipeline-taken pipeline) (shiftf (pipeline-queue pipeline) '())
@@ -258,7 +258,7 @@ calling thread. With 1 thread, blocks are read and senders recovered serially on
              (archive-dir clempo.archive:*archive-dir*)
              ;; the producer and an out-of-order request share SOURCE's chunk cache
              (source (let ((lock (sb-thread:make-mutex :name "block source")))
-                       (lambda (n &optional mode) (sb-thread:with-mutex (lock) (funcall source n mode)))))
+                       (lambda (n &optional mode) (clempo.lock:with-lock (lock) (funcall source n mode)))))
              (producer
                (sb-thread:make-thread
                 (lambda ()
@@ -279,7 +279,7 @@ calling thread. With 1 thread, blocks are read and senders recovered serially on
                                                     mapper threads batches publish)))))
                              :threads threads :name "transaction sender"
                              :worker-context #'call-with-recovery-scratch)))
-                      (sb-thread:with-mutex ((pipeline-lock pipeline))
+                      (clempo.lock:with-lock ((pipeline-lock pipeline))
                         (setf (pipeline-done pipeline) t)
                         (sb-thread:condition-broadcast (pipeline-ready pipeline))))))
                 :name "block prefetch")))
@@ -299,7 +299,7 @@ calling thread. With 1 thread, blocks are read and senders recovered serially on
                                (clempo.blocks:block-transactions block))))))
           (unwind-protect (call-with-recovery-scratch
                            (lambda () (funcall function #'block-fn #'senders-fn)))
-            (sb-thread:with-mutex ((pipeline-lock pipeline))
+            (clempo.lock:with-lock ((pipeline-lock pipeline))
               (setf (pipeline-stopped pipeline) t)
               (sb-thread:condition-broadcast (pipeline-room pipeline)))
             (sb-thread:join-thread producer :default nil))))))

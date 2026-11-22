@@ -320,7 +320,7 @@ empty block per fork, and up to PER-SHAPE transactions of every shape."
         (lock (sb-thread:make-mutex :name "shapes"))
         (chunks (loop for c from 0 to to by clempo.archive:+chunk-blocks+ collect c)))
     (flet ((note (tag n i)
-             (sb-thread:with-mutex (lock)
+             (clempo.lock:with-lock (lock)
                (let ((e (or (gethash tag shapes) (setf (gethash tag shapes) (list 0)))))
                  (incf (car e))
                  (setf (cdr e) (let ((l (merge 'list (list (list n i)) (cdr e)
@@ -328,7 +328,7 @@ empty block per fork, and up to PER-SHAPE transactions of every shape."
                                                                  (and (= (first a) (first b))
                                                                       (< (second a) (second b))))))))
                                  (subseq l 0 (min per (length l))))))))
-           (next-chunk () (sb-thread:with-mutex (lock) (pop chunks))))
+           (next-chunk () (clempo.lock:with-lock (lock) (pop chunks))))
       (mapc #'sb-thread:join-thread
             (loop repeat threads
                   collect (sb-thread:make-thread
@@ -1052,7 +1052,7 @@ methods are slow far behind the head, so they use the samples' recent archive bl
   (let* ((v (coerce items 'simple-vector)) (out (make-array (length v)))
          (next 0) (lock (sb-thread:make-mutex :name "pmap")))
     (flet ((worker ()
-             (loop (let ((i (sb-thread:with-mutex (lock)
+             (loop (let ((i (clempo.lock:with-lock (lock)
                               (when (< next (length v)) (prog1 next (incf next))))))
                      (unless i (return))
                      (setf (svref out i) (funcall fn (svref v i)))))))

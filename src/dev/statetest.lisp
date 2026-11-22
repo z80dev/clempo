@@ -244,13 +244,13 @@ description of the first difference."
              (clempo.evm:with-evm-thread
               (let ((*trace-check* trace-check))
                (loop
-                 (let ((file (sb-thread:with-mutex (lock) (pop queue))))
+                 (let ((file (clempo.lock:with-lock (lock) (pop queue))))
                    (unless file (return))
                    (let ((rs (handler-case (run-state-test-file file :fork-filter fork-filter)
                                (error (e)
                                  (list (make-st-result :name (namestring file) :fork "?" :index 0
                                                        :ok nil :reason (format nil "file error: ~A" e)))))))
-                     (sb-thread:with-mutex (lock)
+                     (clempo.lock:with-lock (lock)
                        (when on-result (funcall on-result file rs))
                        (setf all (nconc rs all))))))))))
       (mapc #'sb-thread:join-thread

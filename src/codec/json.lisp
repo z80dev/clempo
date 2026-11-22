@@ -53,15 +53,24 @@ the writer copies its text.")
 ;;; an explicit stack, so input nesting never reaches the control stack; every malformed
 ;;; input, including invalid UTF-8, signals JSON-ERROR.
 
-(defvar *json-max-depth* 127
-  "The most arrays and objects a parsed value may nest, NIL for no limit. 127 is serde_json's
-recursion limit (remaining_depth 128, failing when it reaches 0), the reference's own
-bound for a typed value.")
+(defbound +json-max-depth+ 127
+  "The default nesting limit: serde_json's recursion limit (remaining_depth 128, failing
+when it reaches 0), the reference's own bound for a typed value."
+  (= (1+ +json-max-depth+) 128))
 
-(defconstant +json-max-integer-digits+ 1000
+(defvar *json-max-depth* +json-max-depth+
+  "The most arrays and objects a parsed value may nest, NIL for no limit.")
+
+(defbound +json-max-integer-digits+ 1000
   "Integer literals up to this many digits parse exactly. A longer one lies beyond the
 double range and reads as a double (an infinity), as serde_json reads an integer that does
-not fit 64 bits, so no literal costs quadratic bignum work.")
+not fit 64 bits, so no literal costs quadratic bignum work."
+  ;; Every longer literal is beyond the double range indeed.
+  (> (expt 10 +json-max-integer-digits+) (rational most-positive-double-float)))
+
+(defbound +json-escape-digits+ 4
+  "Hex digits after \\u: exactly one UTF-16 code unit."
+  (= (expt 16 +json-escape-digits+) (1+ #xFFFF)))
 
 (defun json-text (input)
   (etypecase input
@@ -135,9 +144,9 @@ nest at most MAX-DEPTH deep (NIL: unbounded). Signals JSON-ERROR on any malforme
                  (loop while (and (< pos n) (char<= #\0 (schar s pos) #\9)) do (incf pos))
                  (- pos start)))
              (hex4 ()
-               (when (> (+ pos 4) n) (jfail "short \\u escape at ~D" pos))
+               (when (> (+ pos +json-escape-digits+) n) (jfail "short \\u escape at ~D" pos))
                (let ((code 0))
-                 (dotimes (i 4 code)
+                 (dotimes (i +json-escape-digits+ code)
                    (let* ((c (schar s pos))
                           (d (cond ((char<= #\0 c #\9) (- (char-code c) 48))
                                    ((char<= #\a c #\f) (- (char-code c) 87))
@@ -328,10 +337,10 @@ the values are then NIL and :TOO-MANY, however the rest of the text reads."
                            (loop while (and (< pos n) (char<= #\0 (schar s pos) #\9)) do (incf pos))
                            (- pos start)))
                        (hex4 ()
-                         (when (> (+ pos 4) n) (fail))
+                         (when (> (+ pos +json-escape-digits+) n) (fail))
                          (let ((code 0))
                            (declare (type fixnum code))
-                           (dotimes (i 4 code)
+                           (dotimes (i +json-escape-digits+ code)
                              (let* ((c (schar s pos))
                                     (d (cond ((char<= #\0 c #\9) (- (char-code c) 48))
                                              ((char<= #\a c #\f) (- (char-code c) 87))

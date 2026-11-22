@@ -58,12 +58,12 @@
   (unwind-protect
        (handler-case (serve-client repl client)
          ((or stream-error socket:socket-error sb-ext:timeout sb-sys:interactive-interrupt) () nil))
-    (sb-thread:with-mutex ((repl-lock repl))
+    (clempo.lock:with-lock ((repl-lock repl))
       (setf (repl-clients repl) (remove client (repl-clients repl) :key #'car)))
     (ignore-errors (socket:socket-close client))))
 
 (defun accept-client (repl client)
-  (sb-thread:with-mutex ((repl-lock repl))
+  (clempo.lock:with-lock ((repl-lock repl))
     (cond ((or (repl-stopped repl) (>= (length (repl-clients repl)) *max-clients*))
            (ignore-errors (socket:socket-close client)))
           (t (push (cons client (sb-thread:make-thread (lambda () (client-thread repl client))
@@ -71,7 +71,7 @@
                    (repl-clients repl))))))
 
 (defun stopped-p (repl)
-  (sb-thread:with-mutex ((repl-lock repl)) (repl-stopped repl)))
+  (clempo.lock:with-lock ((repl-lock repl)) (repl-stopped repl)))
 
 (defun run-repl (repl)
   (let ((listener (repl-listener repl)))
@@ -105,7 +105,7 @@ bind developer context. The token grants arbitrary Lisp execution."
 (defun stop-repl (repl)
   "Stop accepting, end every session and join their threads. A session evaluating a form is
 interrupted, so the node's store is never closed under a running REPL form."
-  (let ((clients (sb-thread:with-mutex ((repl-lock repl))
+  (let ((clients (clempo.lock:with-lock ((repl-lock repl))
                    (setf (repl-stopped repl) t)
                    (copy-list (repl-clients repl)))))
     (sb-thread:join-thread (repl-thread repl) :default nil)

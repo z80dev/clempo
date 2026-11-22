@@ -119,7 +119,7 @@ lock and no wakeup (a broadcast is a system call)."
     (sb-ext:atomic-decf (aref gate (shard-index)))
     (fence)
     (when (plusp (aref gate +writers+))
-      (sb-thread:with-mutex ((backend-lock backend)) (wake-writer backend)))))
+      (clempo.lock:with-lock ((backend-lock backend)) (wake-writer backend)))))
 
 (defun take-read (backend)
   "Take one read hold."
@@ -131,7 +131,7 @@ lock and no wakeup (a broadcast is a system call)."
       ;; a writer is waiting or writing: back out, then hold under the lock, which a writer
       ;; keeps while it writes
       (sb-ext:atomic-decf (aref gate i))
-      (sb-thread:with-mutex ((backend-lock backend))
+      (clempo.lock:with-lock ((backend-lock backend))
         (wake-writer backend)
         (sb-ext:atomic-incf (aref gate i))))))
 
@@ -163,13 +163,13 @@ and *HEAD* is snapshotted anew."
   "Wait until no request is running, then run THUNK with new requests held back."
   (let ((lock (backend-lock backend)) (gate (backend-gate backend)))
     (declare (type (simple-array sb-ext:word (*)) gate))
-    (sb-thread:with-mutex (lock)
+    (clempo.lock:with-lock (lock)
       (sb-ext:atomic-incf (aref gate +writers+))
       (fence)
       (unwind-protect
            (progn
              (loop while (readers-held-p gate)
-                   do (sb-thread:condition-wait (backend-queue backend) lock))
+                   do (clempo.lock:condition-wait (backend-queue backend) lock))
              (funcall thunk))
         (sb-ext:atomic-decf (aref gate +writers+))))))
 
@@ -285,7 +285,7 @@ Returns (values header-start header-end tx-bounds) where tx-bounds is a list of 
          (next 0) (lock (sb-thread:make-mutex :name "index")) (done 0))
     (flet ((worker ()
              (loop
-               (let ((i (sb-thread:with-mutex (lock) (when (< next (length firsts)) (prog1 next (incf next))))))
+               (let ((i (clempo.lock:with-lock (lock) (when (< next (length firsts)) (prog1 next (incf next))))))
                  (unless i (return))
                  (let* ((first (nth i firsts))
                         (chunk (archive:read-chunk first archive-dir))
@@ -296,7 +296,7 @@ Returns (values header-start header-end tx-bounds) where tx-bounds is a list of 
                               (loop for th in txs for j from 0
                                     do (push (cons (hash-prefix th) (logior (ash n 20) j)) tk))))
                    (setf (aref results i) (cons bk tk))
-                   (sb-thread:with-mutex (lock)
+                   (clempo.lock:with-lock (lock)
                      (incf done)
                      (when (and log (zerop (mod done 100)))
                        (format *error-output* "~&index: ~D/~D chunks~%" done (length firsts))
@@ -420,7 +420,7 @@ NIL). Both are sorted by key, so a linear merge hands WRITE-INDEX already-sorted
               table))))
 
 (defun receipts-store-get (store n)
-  (sb-thread:with-mutex ((rstore-lock store))
+  (clempo.lock:with-lock ((rstore-lock store))
     (let* ((first (* archive:+chunk-blocks+ (floor n archive:+chunk-blocks+)))
            (entry (gethash n (rstore-chunk-offsets store first))))
       (when entry
@@ -431,7 +431,7 @@ NIL). Both are sorted by key, so a linear merge hands WRITE-INDEX already-sorted
             (rlp:rlp-decode o)))))))
 
 (defun receipts-store-put (store n receipts)
-  (sb-thread:with-mutex ((rstore-lock store))
+  (clempo.lock:with-lock ((rstore-lock store))
     (let* ((first (* archive:+chunk-blocks+ (floor n archive:+chunk-blocks+)))
            (table (rstore-chunk-offsets store first)))
       (unless (gethash n table)
@@ -465,7 +465,7 @@ NIL). Both are sorted by key, so a linear merge hands WRITE-INDEX already-sorted
    (history-dir :initarg :history-dir :initform nil)              ; NIL: HISTORY-DIR of the chain
    (finalization-dir :initarg :finalization-dir :initform nil     ; NIL: the chain's certificate archive
                      :reader archive-backend-finalization-dir)
-   (history-lock :initform (sb-thread:make-mutex :name "history") :reader history-lock)
+   (history-lock :initform (sb-thread:make-mutex :name "archive backend history") :reader history-lock)
    (history-checked :initform 0 :accessor history-checked)))     ; last refresh, clempo.io:now-ms
 
 (defun make-archive-backend (&rest initargs &key (class 'archive-backend) (archive-dir (archive:archive-dir))
@@ -498,7 +498,7 @@ ARCHIVE-BACKEND) is instantiated with the remaining INITARGS as well."
 
 (defun backend-history (b)
   "B's history, opened on first use (NIL when the directory does not exist)."
-  (sb-thread:with-mutex ((history-lock b))
+  (clempo.lock:with-lock ((history-lock b))
     (let ((h (slot-value b 'history)))
       (if (eq h :unopened)
           (setf (slot-value b 'history)
@@ -516,7 +516,7 @@ ARCHIVE-BACKEND) is instantiated with the remaining INITARGS as well."
     (when h
       (or (clempo.history:history-state h number)
           (let ((now (clempo.io:now-ms)))
-            (when (sb-thread:with-mutex ((history-lock b))
+            (when (clempo.lock:with-lock ((history-lock b))
                     (when (> (- now (history-checked b)) (* *history-refresh-seconds* 1000))
                       (setf (history-checked b) now)
                       (clempo.history:history-refresh h)
@@ -529,7 +529,7 @@ in a list that is replaced whole, so a hit takes no lock."
   (let ((hit (assoc first (archive-backend-chunks b))))
     (if hit
         (cdr hit)
-        (sb-thread:with-mutex ((chunk-lock b))
+        (clempo.lock:with-lock ((chunk-lock b))
           (let ((hit (assoc first (archive-backend-chunks b))))
             (if hit
                 (cdr hit)
@@ -553,7 +553,7 @@ in a list that is replaced whole, so a hit takes no lock."
 (defun tail-tables (b)
   "Hash tables for blocks above the index, built on first use."
   (let ((head (archive-backend-head b)))
-    (sb-thread:with-mutex ((chunk-lock b))
+    (clempo.lock:with-lock ((chunk-lock b))
       (let ((tail (archive-backend-tail b)))
         (if (and tail (= (car tail) head))
             (cdr tail)

@@ -118,10 +118,18 @@ Rejects non-canonical headers."
         (when (> (+ start len) end) (rlp-fail "item overruns input at ~D" pos))
         (values start (+ start len) list-p)))))
 
-(defvar *rlp-max-depth* 32
-  "The most lists a decoded item may nest, goempo's DepthMax; Tempo's own structures nest
-far less (tests/types/transactions.lisp measures them). Decoding recurses once per level, so
-this also bounds the control stack on hostile input.")
+(defbound +rlp-deepest-tempo-structure+ 8
+  "Lists nested in the deepest Tempo structure: a keychain-v2 transaction carrying a key
+authorization with call scopes (tests/types/transactions.lisp measures every recorded
+envelope and block body against this).")
+
+(defbound +rlp-max-depth+ 32
+  "The default nesting limit, goempo's DepthMax. Decoding recurses once per level, so it
+also bounds the control stack on hostile input."
+  (> +rlp-max-depth+ +rlp-deepest-tempo-structure+))
+
+(defvar *rlp-max-depth* +rlp-max-depth+
+  "The most lists a decoded item may nest.")
 
 (defun decode-at (data pos end depth)
   (declare (type octets data) (type fixnum pos end depth))

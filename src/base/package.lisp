@@ -7,6 +7,8 @@ octet vectors, hex, 256-bit integer helpers and the test harness.")
    #:*build-mode* #:*hot* #:*checked*
    #:invariant #:invariant-violation #:unreachable
    #:define-constant
+   ;; compile-time bound proofs
+   #:static-assert #:static-assertion-failed #:defbound
    ;; octets
    #:octet #:octets #:make-octets #:octets-of #:octets-concat #:octets=
    #:copy-octets #:octets-slice
@@ -18,4 +20,4 @@ octet vectors, hex, 256-bit integer helpers and the test harness.")
    #:wrap256 #:u256->s256 #:s256->u256
    ;; tests
    #:deftest #:is #:is= #:is-equalp #:signals #:skip-test
-   #:run-tests #:test-failure-count #:*test-verbose*))
+   #:run-tests #:test-failure-count #:*test-verbose* #:*long-lived-threads* #:*test-audits*))

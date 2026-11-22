@@ -43,5 +43,5 @@
 
 (defun system-trust-store ()
   (or *system-trust-store*
-      (sb-thread:with-mutex (*trust-lock*)
+      (clempo.lock:with-lock (*trust-lock*)
         (or *system-trust-store* (setf *system-trust-store* (load-trust-store))))))

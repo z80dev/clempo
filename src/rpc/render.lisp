@@ -72,7 +72,7 @@ senders and receipts, which are filled in on first use.")
   "(values sender key-id) of transaction I, recovered once (B is shared between requests)."
   (let ((cell (svref (cblock-senders b) i)))
     (unless cell
-      (sb-thread:with-recursive-lock ((cblock-lock b))
+      (clempo.lock:with-recursive-lock ((cblock-lock b))
         (setf cell (or (svref (cblock-senders b) i)
                        (setf (svref (cblock-senders b) i)
                              (multiple-value-list (tx:transaction-sender (svref (cblock-txs b) i))))))))
@@ -81,7 +81,7 @@ senders and receipts, which are filled in on first use.")
 (defun cblock-receipts (b)
   "Block B's receipts as clempo.receipts structures, in transaction order, decoded once."
   (or (cblock-receipt-cache b)
-      (sb-thread:with-recursive-lock ((cblock-lock b))
+      (clempo.lock:with-recursive-lock ((cblock-lock b))
         (or (cblock-receipt-cache b)
             (setf (cblock-receipt-cache b)
                   (coerce (mapcar #'r:decode-receipt (chain:backend-receipts-raw chain:*backend* (cblock-number b)))

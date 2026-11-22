@@ -291,7 +291,7 @@ owned transport. Never scans addresses."
   (channel-handler session channel)
   (let ((frame (encode-data channel payload :start start :end end
                             :max-message-size (session-max-message-size session))))
-    (sb-thread:with-mutex ((session-send-lock session))
+    (clempo.lock:with-lock ((session-send-lock session))
       (ensure-open session)
       (with-session-failure (session)
         (clempo.cw-stream:send-message (session-connection session) frame))))
@@ -306,7 +306,7 @@ the session's channels and payload limit before anything is written."
     (multiple-value-bind (kind channel)
         (decode-message frame :max-message-size (session-max-message-size session))
       (when (eq kind :data) (channel-handler session channel))))
-  (sb-thread:with-mutex ((session-send-lock session))
+  (clempo.lock:with-lock ((session-send-lock session))
     (ensure-open session)
     (with-session-failure (session)
       (loop for (frame . more) on frames
@@ -317,7 +317,7 @@ the session's channels and payload limit before anything is written."
 (defun send-ping (session &key if-due (now-ms (clempo.io:now-ms)))
   "Send Ping (no Pong exists). With IF-DUE, send only after the periodic deadline.
 Returns true when sent. The caller schedules this independently of data traffic."
-  (sb-thread:with-mutex ((session-send-lock session))
+  (clempo.lock:with-lock ((session-send-lock session))
     (ensure-open session)
     (when (or (not if-due) (>= now-ms (session-next-ping-ms session)))
       (with-session-failure (session)
@@ -329,7 +329,7 @@ Returns true when sent. The caller schedules this independently of data traffic.
   "Receive one authenticated lookup frame; return KIND, CHANNEL, FRAME, START,
 END. Ping is only a keepalive and causes no response. Invalid input, unknown
 channels, EOF, or transport errors close the connection. FRAME owns the payload."
-  (sb-thread:with-mutex ((session-receive-lock session))
+  (clempo.lock:with-lock ((session-receive-lock session))
     (ensure-open session)
     (with-session-failure (session)
       (let ((frame (clempo.cw-stream:receive-message (session-connection session))))

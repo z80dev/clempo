@@ -133,7 +133,7 @@ checkpoint counters and elapsed processing time exclude uncommitted trailing wor
                  (format progress "~&R1-ARCHIVE-FAIL ~A~%" json) (finish-output progress)))
              (work ()
                (loop
-                 (let ((first (sb-thread:with-mutex (lock) (unless stop (pop queue)))))
+                 (let ((first (clempo.lock:with-lock (lock) (unless stop (pop queue)))))
                    (unless first (return))
                    (let* ((lo (max from first)) (hi (min to (+ first size -1)))
                           (counts (make-r1-archive-counts)) (complete nil))
@@ -156,18 +156,18 @@ checkpoint counters and elapsed processing time exclude uncommitted trailing wor
                                        (r1-archive-check-block raw n ref counts))
                                    (error (condition)
                                      (incf (r1-archive-counts-failed counts))
-                                     (sb-thread:with-mutex (lock)
+                                     (clempo.lock:with-lock (lock)
                                        (record-failure
                                         (clempo.json:jobject "event" "block-failure" "block" n
                                                              "error" (princ-to-string condition)))))))))
                            (setf complete t))
                        (error (condition)
-                         (sb-thread:with-mutex (lock)
+                         (clempo.lock:with-lock (lock)
                            (setf stop t) (incf chunk-errors)
                            (record-failure
                             (clempo.json:jobject "event" "chunk-error" "from" lo "to" hi
                                                  "error" (princ-to-string condition))))))
-                     (sb-thread:with-mutex (lock)
+                     (clempo.lock:with-lock (lock)
                        (when complete
                          (incf (r1-archive-counts-blocks total) (r1-archive-counts-blocks counts))
                          (incf (r1-archive-counts-failed total) (r1-archive-counts-failed counts))

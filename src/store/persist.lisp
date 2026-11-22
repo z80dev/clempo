@@ -314,7 +314,7 @@ bad record with valid ones after it signals STORE-CORRUPT-LOG."
 
 (defun store-durable-number (store)
   "The last committed block on stable storage (in the log or the KV store)."
-  (sb-thread:with-mutex ((store-sync-lock store)) (store-durable store)))
+  (clempo.lock:with-lock ((store-sync-lock store)) (store-durable store)))
 
 (defun set-durable (store n)
   "Raise the durable block to N (under SYNC-LOCK)."
@@ -324,16 +324,16 @@ bad record with valid ones after it signals STORE-CORRUPT-LOG."
   (let ((lock (store-sync-lock store)) (cv (store-sync-cv store)))
     (loop
       (let ((target nil) (fd nil))
-        (sb-thread:with-mutex (lock)
+        (clempo.lock:with-lock (lock)
           (loop until (or (store-sync-request store) (store-sync-stop store))
-                do (sb-thread:condition-wait cv lock))
+                do (clempo.lock:condition-wait cv lock))
           (when (and (store-sync-stop store) (null (store-sync-request store)))
             (return))
           (setf target (shiftf (store-sync-request store) nil)
                 (store-sync-busy store) t
                 fd (sb-sys:fd-stream-fd (store-wal-stream store))))
         (let ((failure (handler-case (progn (sync-fd fd) nil) (error (e) e))))
-          (sb-thread:with-mutex (lock)
+          (clempo.lock:with-lock (lock)
             (if failure
                 (setf (store-sync-error store) failure)
                 (set-durable store target))
@@ -349,7 +349,7 @@ bad record with valid ones after it signals STORE-CORRUPT-LOG."
 (defun stop-syncer (store)
   (let ((thread (store-syncer store)))
     (when thread
-      (sb-thread:with-mutex ((store-sync-lock store))
+      (clempo.lock:with-lock ((store-sync-lock store))
         (setf (store-sync-stop store) t)
         (sb-thread:condition-broadcast (store-sync-cv store)))
       (sb-thread:join-thread thread :default nil)
@@ -358,13 +358,13 @@ bad record with valid ones after it signals STORE-CORRUPT-LOG."
 (defun quiesce-syncer (store)
   "Wait until the syncer has no sync posted or running (it is about to lose its file)."
   (when (store-syncer store)
-    (sb-thread:with-mutex ((store-sync-lock store))
+    (clempo.lock:with-lock ((store-sync-lock store))
       (loop while (or (store-sync-request store) (store-sync-busy store))
-            do (sb-thread:condition-wait (store-sync-cv store) (store-sync-lock store)))))
+            do (clempo.lock:condition-wait (store-sync-cv store) (store-sync-lock store)))))
   (check-sync-error store))
 
 (defun check-sync-error (store)
-  (let ((e (sb-thread:with-mutex ((store-sync-lock store)) (shiftf (store-sync-error store) nil))))
+  (let ((e (clempo.lock:with-lock ((store-sync-lock store)) (shiftf (store-sync-error store) nil))))
     (when e (error e))))
 
 (defun post-sync (store)
@@ -373,7 +373,7 @@ bad record with valid ones after it signals STORE-CORRUPT-LOG."
   (check-sync-error store)
   (sink-flush (store-wal-sink store))
   (finish-output (store-wal-stream store))
-  (sb-thread:with-mutex ((store-sync-lock store))
+  (clempo.lock:with-lock ((store-sync-lock store))
     (setf (store-sync-request store) (store-logged-number store))
     (sb-thread:condition-broadcast (store-sync-cv store)))
   (setf (store-unsynced store) 0
@@ -528,7 +528,7 @@ its RAM and never reach DIR."
   (sync-stream (store-wal-stream store))
   (setf (store-unsynced store) 0
         (store-synced-at store) (clempo.io:monotonic-ticks))
-  (sb-thread:with-mutex ((store-sync-lock store))
+  (clempo.lock:with-lock ((store-sync-lock store))
     (set-durable store (store-logged-number store))))
 
 (defun flush-db (store)
@@ -546,7 +546,7 @@ segment is in MANIFEST)."
     (setf (store-logged-number store) (db-number db)
           (store-synced-at store) (clempo.io:monotonic-ticks)
           (store-unsynced store) 0)
-    (sb-thread:with-mutex ((store-sync-lock store))
+    (clempo.lock:with-lock ((store-sync-lock store))
       (set-durable store (db-number db)))
     (db-number db)))
 

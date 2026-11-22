@@ -372,7 +372,7 @@ block's last form."
           (when (plusp net) (setf grow (max grow (+ rel net))))
           (incf rel net)))
       (let ((tests (append (when (plusp need) `((< sp ,need)))
-                           (when (plusp grow) `((> sp ,(- 1024 grow)))))))
+                           (when (plusp grow) `((> sp ,(- +stack-limit+ grow)))))))
         (when tests
           (push `(when (or ,@tests) (resume ,(cblock-start block))) statements))))
     (dolist (seg (segments insns))
@@ -441,7 +441,7 @@ rest, so every result variable is bound once and never assigned."
     (dolist (b blocks) (setf (gethash (cblock-start b) *region*) t))
     `(lambda (frame stack sp entry)
        (declare ,*hot* (optimize (sb-c:store-source-form 0)) ; see COMPILE-REGION
-                (type frame frame) (type simple-vector stack) (type (integer 0 1024) sp)
+                (type frame frame) (type simple-vector stack) (type (integer 0 ,+stack-limit+) sp)
                 (type fixnum entry) (sb-ext:muffle-conditions sb-ext:compiler-note))
        ;; GAS is FRAME-GAS itself, not a variable: SBCL's propagation over a variable
        ;; assigned and compared once per segment is superlinear in the code size.

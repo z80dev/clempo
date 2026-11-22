@@ -29,7 +29,7 @@ series' CELL once and counts into it without the registry lock.")
   (check-type kind (member :counter :gauge :summary))
   (unless (every (lambda (c) (or (alphanumericp c) (char= c #\_))) name)
     (error "Bad metric name ~S" name))
-  (sb-thread:with-mutex ((registry-lock registry))
+  (clempo.lock:with-lock ((registry-lock registry))
     (let ((found (gethash name (registry-metrics registry))))
       (cond (found (unless (eq kind (metric-kind found))
                      (error "Metric ~A is a ~(~A~)" name (metric-kind found)))
@@ -39,7 +39,7 @@ series' CELL once and counts into it without the registry lock.")
                      (%make-metric name kind help registry)))))))
 
 (defmacro with-series ((metric) &body body)
-  `(sb-thread:with-mutex ((registry-lock (metric-registry ,metric))) ,@body))
+  `(clempo.lock:with-lock ((registry-lock (metric-registry ,metric))) ,@body))
 
 ;;; Cells: a counter's or a summary's series counted without the registry lock. Each has a
 ;;; 64-octet line of words per shard; a thread counts into its own shard (*SHARD*), so
@@ -137,7 +137,7 @@ through it show in METRIC-VALUE and RENDER-METRICS like any other."
 (defun render-metrics (&optional (registry *registry*))
   "The Prometheus text exposition of REGISTRY."
   (with-output-to-string (out)
-    (sb-thread:with-mutex ((registry-lock registry))
+    (clempo.lock:with-lock ((registry-lock registry))
       (dolist (name (reverse (registry-order registry)))
         (let ((m (gethash name (registry-metrics registry))))
           (format out "# HELP ~A ~A~%# TYPE ~A ~(~A~)~%" name (metric-help m) name (metric-kind m))

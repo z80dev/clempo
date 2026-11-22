@@ -1,8 +1,9 @@
 (defsystem "clempo-base"
-  :description "clempo foundations: policy, octets, hex, u256, tests"
+  :description "clempo foundations: policy, bound proofs, octets, hex, u256, tests"
   :serial t
   :components ((:file "package")
                (:file "policy")
+               (:file "bounds")
                (:file "octets")
                (:file "u256")
                (:file "test"))

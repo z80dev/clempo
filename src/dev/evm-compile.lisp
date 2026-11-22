@@ -46,18 +46,18 @@ threads see global values). Returns true when compilation is on."
 
 (defvar *compiler-thread* nil)
 (defvar *queue* '())
-(defvar *queue-lock* (sb-thread:make-mutex :name "jit queue"))
-(defvar *queue-ready* (sb-thread:make-waitqueue :name "jit queue"))
+(defvar *queue-lock* (sb-thread:make-mutex :name "evm-compile queue"))
+(defvar *queue-ready* (sb-thread:make-waitqueue :name "evm-compile queue"))
 
 (defun enqueue (thunk)
-  (sb-thread:with-mutex (*queue-lock*)
+  (clempo.lock:with-lock (*queue-lock*)
     (setf *queue* (nconc *queue* (list thunk)))
     (sb-thread:condition-notify *queue-ready*))
   t)
 
 (defun dequeue ()
-  (sb-thread:with-mutex (*queue-lock*)
-    (loop until *queue* do (sb-thread:condition-wait *queue-ready* *queue-lock*))
+  (clempo.lock:with-lock (*queue-lock*)
+    (loop until *queue* do (clempo.lock:condition-wait *queue-ready* *queue-lock*))
     (pop *queue*)))
 
 (defun start-background-compiler (&key (threshold clempo.evm:*jit-threshold*))

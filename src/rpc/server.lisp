@@ -39,7 +39,7 @@ first byte, and a response or notification must be taken by the client within
 
 (in-package #:clempo.rpcserver)
 
-(defconstant +header-line-max+ 8192 "Longest request line or header line, in bytes.")
+(defbound +header-line-max+ 8192 "Longest request line or header line, in bytes.")
 (defconstant +header-lines-max+ 128 "Most header (or chunk trailer) lines in one request.")
 (defconstant +body-max+ (* 15 1024 1024)
   "Largest request body or websocket message: reth's RPC_DEFAULT_MAX_REQUEST_SIZE_MB.")
@@ -92,9 +92,12 @@ starts there, so no notification precedes the response that names it)."
   "New heads a websocket subscriber may fall behind before the oldest is skipped: reth's
 PER_BLOCK_FEED_CAPACITY, the depth of its per-block broadcast feeds.")
 
-(defconstant +inbuf-size+ 16384
+(defbound +inbuf-size+ 16384
   "Room for the request lines and header lines being parsed (each at most
-+HEADER-LINE-MAX+ bytes) and for a body that fits; a larger body gets its own array.")
++HEADER-LINE-MAX+ bytes) and for a body that fits; a larger body gets its own array."
+  ;; NEXT-LINE waits for a line's LF, or refuses the line once more than
+  ;; +HEADER-LINE-MAX+ of its bytes are buffered: either needs that many bytes and one more.
+  (>= +inbuf-size+ (1+ +header-line-max+)))
 
 (defstruct (inbuf (:constructor make-inbuf ()))
   (octets (make-octets +inbuf-size+) :type octets)
@@ -160,7 +163,7 @@ PER_BLOCK_FEED_CAPACITY, the depth of its per-block broadcast feeds.")
     nil))
 
 (defun claim-consensus-slot (connection)
-  (sb-thread:with-mutex ((server-lock *server*))
+  (clempo.lock:with-lock ((server-lock *server*))
     (cond ((>= (connection-consensus-slots connection) 4)
            (rpc:rpc-fail -32006 "too many consensus subscriptions on this connection" 4))
           ((>= (server-consensus-slots *server*) 256)
@@ -169,7 +172,7 @@ PER_BLOCK_FEED_CAPACITY, the depth of its per-block broadcast feeds.")
              (incf (server-consensus-slots *server*))))))
 
 (defun release-consensus-slot (connection)
-  (sb-thread:with-mutex ((server-lock *server*))
+  (clempo.lock:with-lock ((server-lock *server*))
     (decf (connection-consensus-slots connection))
     (decf (server-consensus-slots *server*))))
 
@@ -178,7 +181,7 @@ PER_BLOCK_FEED_CAPACITY, the depth of its per-block broadcast feeds.")
 (defun check-subscription-room (connection)
   "Fail as jsonrpsee does once CONNECTION has +SUBSCRIPTIONS-MAX+ subscriptions, counting
 those accepted in the current request that start after its response."
-  (sb-thread:with-mutex ((connection-subscriptions-lock connection))
+  (clempo.lock:with-lock ((connection-subscriptions-lock connection))
     (when (>= (+ (length (connection-subscriptions connection)) (connection-reserved connection))
               +subscriptions-max+)
       (rpc:rpc-fail -32006 "Too many subscriptions on the connection"
@@ -186,19 +189,19 @@ those accepted in the current request that start after its response."
 
 (defun reserve-subscription (connection)
   "Count a subscription accepted now and added (ADD-SUBSCRIPTION) after the response."
-  (sb-thread:with-mutex ((connection-subscriptions-lock connection))
+  (clempo.lock:with-lock ((connection-subscriptions-lock connection))
     (incf (connection-reserved connection))))
 
 (defun add-subscription (connection subscription)
   "Start SUBSCRIPTION, reserved by RESERVE-SUBSCRIPTION."
-  (sb-thread:with-mutex ((connection-subscriptions-lock connection))
+  (clempo.lock:with-lock ((connection-subscriptions-lock connection))
     (decf (connection-reserved connection))
     (setf (connection-subscriptions connection)
           (cons subscription (connection-subscriptions connection)))))
 
 (defun remove-subscription-if (connection predicate)
   "Remove and return the first subscription of CONNECTION satisfying PREDICATE, or NIL."
-  (sb-thread:with-mutex ((connection-subscriptions-lock connection))
+  (clempo.lock:with-lock ((connection-subscriptions-lock connection))
     (let ((sub (find-if predicate (connection-subscriptions connection))))
       (when sub
         (setf (connection-subscriptions connection) (remove sub (connection-subscriptions connection))))
@@ -209,7 +212,7 @@ those accepted in the current request that start after its response."
   (let ((stream (if *server* (server-log *server*) *error-output*)))
     (when stream
       (flet ((emit () (format stream "~&rpc: ~?~%" fmt args) (force-output stream)))
-        (if *server* (sb-thread:with-mutex ((server-log-lock *server*)) (emit)) (emit))))))
+        (if *server* (clempo.lock:with-lock ((server-log-lock *server*)) (emit)) (emit))))))
 
 (defun new-subscription-id ()
   (format nil "0x~(~32,'0x~)" (octets->integer (clempo.io:random-octets 16))))
@@ -231,7 +234,7 @@ those accepted in the current request that start after its response."
 (defun ms-after (seconds) (+ (now-ms) (round (* 1000 seconds))))
 
 (defun send-text (connection text)
-  (sb-thread:with-mutex ((connection-send-lock connection))
+  (clempo.lock:with-lock ((connection-send-lock connection))
     (with-io-deadline (*write-seconds*)
       (ws:write-frame (connection-stream connection) ws:+op-text+ (string->octets text)))))
 
@@ -756,7 +759,7 @@ in C until the socket can take more) or :FAILED."
 
 (defun finish (server c)
   "End C: forget it and close its socket (which also leaves its poller)."
-  (sb-thread:with-mutex ((server-lock server))
+  (clempo.lock:with-lock ((server-lock server))
     (let ((fd (connection-fd c)) (table (server-table server)))
       (when (>= fd 0)
         (when (and (< fd (length table)) (eq c (svref table fd)))
@@ -823,7 +826,7 @@ to wait for the next event (input, room to write, or the reaper's shutdown), or 
          (accepted nil))
     (setf (connection-poller c) poller
           (connection-deadline c) (ms-after *idle-seconds*))
-    (sb-thread:with-mutex ((server-lock server))
+    (clempo.lock:with-lock ((server-lock server))
       (when (and (server-running server) (< (server-count server) (server-max-connections server)))
         (let ((table (server-table server)))
           (when (>= fd (length table))
@@ -892,7 +895,7 @@ watches the listening socket), until the server stops or the reaper gives POLLER
         (listen (server-listen-fd server)))
     (when (worker-sweep w)
       (setf (worker-sweep w) nil)
-      (dolist (c (sb-thread:with-mutex ((server-lock server)) (copy-list (server-connections server))))
+      (dolist (c (clempo.lock:with-lock ((server-lock server)) (copy-list (server-connections server))))
         (when (and (runnable c poller) (not (run-event server w c)))
           (return-from serve-poller))))
     (loop while (server-running server)
@@ -913,11 +916,11 @@ watches the listening socket), until the server stops or the reaper gives POLLER
   (loop
     (let ((poller (worker-poller w)))
       (when poller (serve-poller server w poller)))
-    (sb-thread:with-mutex ((server-crew-lock server))
+    (clempo.lock:with-lock ((server-crew-lock server))
       (setf (worker-poller w) nil)
       (push w (server-spares server))
       (loop while (and (server-running server) (null (worker-poller w)))
-            do (sb-thread:condition-wait (server-crew-wait server) (server-crew-lock server)))
+            do (clempo.lock:condition-wait (server-crew-wait server) (server-crew-lock server)))
       (unless (and (server-running server) (worker-poller w)) (return)))))
 
 (defun call-with-rpc-thread (server function)
@@ -949,7 +952,7 @@ same on every zone verification replayed)."
 (defun hand-on (server index w state)
   "W, serving the poller at INDEX, has run one event since its STATE: give the poller to a
 spare thread, or a new one while fewer than *EXTRA-WORKERS-MAX* were started."
-  (sb-thread:with-mutex ((server-crew-lock server))
+  (clempo.lock:with-lock ((server-crew-lock server))
     (let ((spare (pop (server-spares server))))
       (when (or spare (< (server-extra server) *extra-workers-max*))
         (cond ((eql state (sb-ext:compare-and-swap (worker-state w) state :retired))
@@ -981,15 +984,15 @@ every 200 ms, end connections past their deadline: mark them and shut their sock
 which wakes the poller for them, and the thread taking that event closes them."
   (let ((next-reap 0))
     (loop while (server-running server)
-          do (sb-thread:with-mutex ((server-reaper-lock server))
+          do (clempo.lock:with-lock ((server-reaper-lock server))
                (when (server-running server)
-                 (sb-thread:condition-wait (server-reaper-wait server) (server-reaper-lock server)
-                                           :timeout (/ *stall-ms* 1000.0))))
+                 (clempo.lock:condition-wait (server-reaper-wait server) (server-reaper-lock server)
+                                             :timeout (/ *stall-ms* 1000.0))))
              (when (server-running server) (relieve-stalls server))
              (let ((now (now-ms)))
                (when (>= now next-reap)
                  (setf next-reap (+ now 200))
-                 (sb-thread:with-mutex ((server-lock server))
+                 (clempo.lock:with-lock ((server-lock server))
                    (dolist (c (server-connections server))
                      (when (and (> now (connection-deadline c)) (not (connection-expired c))
                                 (>= (connection-fd c) 0))
@@ -1032,7 +1035,7 @@ upgrade request first, then the socket's stream."))
   "Hand C, upgrading to a websocket, to a thread of its own for the rest of its life."
   (setf (connection-phase c) :thread (connection-deadline c) most-positive-fixnum)
   (poll:unwatch (connection-poller c) (connection-fd c))
-  (sb-thread:with-mutex ((server-lock server))
+  (clempo.lock:with-lock ((server-lock server))
     (setf (connection-thread c)
           (sb-thread:make-thread
            (lambda () (call-with-rpc-thread server (lambda () (serve-websocket-connection server c))))
@@ -1077,11 +1080,11 @@ upgrade request first, then the socket's stream."))
     (flet ((control (opcode payload)
              ;; pings may come between the fragments of a message; pongs need no answer
              (when (= opcode ws:+op-ping+)
-               (sb-thread:with-mutex ((connection-send-lock connection))
+               (clempo.lock:with-lock ((connection-send-lock connection))
                  (with-io-deadline (*write-seconds*)
                    (ws:write-frame stream ws:+op-pong+ payload)))))
            (close-with (payload)
-             (ignore-errors (sb-thread:with-mutex ((connection-send-lock connection))
+             (ignore-errors (clempo.lock:with-lock ((connection-send-lock connection))
                               (with-io-deadline (*write-seconds*)
                                 (ws:write-frame stream ws:+op-close+ payload))))))
       (loop
@@ -1107,20 +1110,20 @@ upgrade request first, then the socket's stream."))
 
 (defun close-connection (server connection)
   "Stop CONNECTION's writer and wake its reader: both see the socket shut down."
-  (sb-thread:with-mutex ((connection-outbox-lock connection))
+  (clempo.lock:with-lock ((connection-outbox-lock connection))
     (setf (connection-closed connection) t)
     (sb-thread:condition-broadcast (connection-outbox-ready connection)))
   ;; under the server lock, so the descriptor is not closed (and reused) meanwhile
-  (sb-thread:with-mutex ((server-lock server))
+  (clempo.lock:with-lock ((server-lock server))
     (when (>= (connection-fd connection) 0)
       (poll:fd-shutdown (connection-fd connection)))))
 
 (defun next-head (connection)
   "Wait for the oldest queued head; NIL once CONNECTION is closed."
   (let ((lock (connection-outbox-lock connection)))
-    (sb-thread:with-mutex (lock)
+    (clempo.lock:with-lock (lock)
       (loop until (or (connection-closed connection) (connection-outbox connection))
-            do (sb-thread:condition-wait (connection-outbox-ready connection) lock))
+            do (clempo.lock:condition-wait (connection-outbox-ready connection) lock))
       (unless (connection-closed connection)
         (decf (connection-outbox-length connection))
         (pop (connection-outbox connection))))))
@@ -1148,7 +1151,7 @@ the next head is sent."
 so far when this one pushed the oldest out, else NIL."
   (let ((subscriptions (reverse (connection-subscriptions connection))))
     (when subscriptions
-      (sb-thread:with-mutex ((connection-outbox-lock connection))
+      (clempo.lock:with-lock ((connection-outbox-lock connection))
         (unless (connection-closed connection)
           (setf (connection-outbox connection)
                 (nconc (connection-outbox connection) (list (list* number certificate seen subscriptions))))
@@ -1183,7 +1186,7 @@ started."
         (setf (server-crew server)
               (coerce (loop for p across pollers for i from 0 collect (make-worker (1+ (mod i 15)) p))
                       'simple-vector))
-        (sb-thread:with-mutex ((server-crew-lock server))
+        (clempo.lock:with-lock ((server-crew-lock server))
           (loop for w across (server-crew server) do (start-worker server w)))
         (setf (server-reaper server)
               (sb-thread:make-thread (lambda () (reap-loop server)) :name "rpc reaper"))
@@ -1194,16 +1197,16 @@ started."
 reaper and the websocket threads (each joins its notification writer)."
   (setf (server-running server) nil)
   (poll:wakeup (server-wake-write server))
-  (sb-thread:with-mutex ((server-reaper-lock server))
+  (clempo.lock:with-lock ((server-reaper-lock server))
     (sb-thread:condition-broadcast (server-reaper-wait server)))
   (sb-thread:join-thread (server-reaper server) :default nil :timeout 10)
   ;; the reaper starts no more threads now
-  (sb-thread:with-mutex ((server-crew-lock server))
+  (clempo.lock:with-lock ((server-crew-lock server))
     (sb-thread:condition-broadcast (server-crew-wait server)))
-  (dolist (thread (sb-thread:with-mutex ((server-crew-lock server)) (copy-list (server-threads server))))
+  (dolist (thread (clempo.lock:with-lock ((server-crew-lock server)) (copy-list (server-threads server))))
     (sb-thread:join-thread thread :default nil :timeout 10))
   (ignore-errors (sb-bsd-sockets:socket-close (server-socket server)))
-  (let ((connections (sb-thread:with-mutex ((server-lock server)) (copy-list (server-connections server)))))
+  (let ((connections (clempo.lock:with-lock ((server-lock server)) (copy-list (server-connections server)))))
     (dolist (c connections)
       (if (eq (connection-phase c) :thread)
           (close-connection server c)
@@ -1222,7 +1225,7 @@ return at once. Each connection's writer thread renders and sends, so a slow or 
 client never holds back the caller; one that falls +OUTBOX-CAPACITY+ heads behind skips
 the oldest, as a lagging receiver of reth's per-block feeds does (the connection stays)."
   (let ((*server* server) (seen (clempo.io:now-ms)))
-    (dolist (c (sb-thread:with-mutex ((server-lock server)) (copy-list (server-connections server))))
+    (dolist (c (clempo.lock:with-lock ((server-lock server)) (copy-list (server-connections server))))
       (when (connection-websocket-p c)
         (let ((skipped (queue-head c number certificate seen)))
           ;; reth logs every lagging receive at debug level; once per capacity's worth here

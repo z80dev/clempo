@@ -87,8 +87,16 @@ variables, which SBCL reports only as style warnings at the end of a compilation
                         collect name)))
 
 (defun test-all (&key dirs strict)
-  "Load the test systems of DIRS (all when NIL) and run them. Exits non-zero on failure."
+  "Load the test systems of DIRS (all when NIL) and run them. Exits non-zero on failure.
+Every test is audited for leaked threads, and in check builds for lock-order cycles."
   (call-strictly strict (lambda () (dolist (s (test-systems dirs)) (asdf:load-system s))))
-  (let ((ok (funcall (find-symbol "RUN-TESTS" "CLEMPO.BASE"))))
+  (let ((ok (funcall (find-symbol "RUN-TESTS" "CLEMPO.BASE")))
+        (summary (and (find-package "CLEMPO.LOCK") (find-symbol "LOCK-ORDER-SUMMARY" "CLEMPO.LOCK"))))
+    (cond ((string= *mode* "release")
+           (format t "~&lock order: not checked in release builds~%"))
+          (summary
+           (multiple-value-bind (classes orders) (funcall summary)
+             (format t "~&lock order: ~D lock classes, ~D orders between them checked for cycles~%"
+                     classes orders))))
     (unless ok (sb-ext:exit :code 1 :abort t))
     ok))

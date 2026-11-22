@@ -406,7 +406,7 @@ root is the empty root, which has no nodes)."
   (let ((a (db-account db address)))
     (when a
       (db-state-root db)
-      (let ((trie (sb-thread:with-mutex ((db-proof-lock db)) (ensure-storage-trie db a))))
+      (let ((trie (clempo.lock:with-lock ((db-proof-lock db)) (ensure-storage-trie db a))))
         (if (octets= (trie-root trie) +empty-trie-root+)
             '()
             (trie-proof trie (slot-octets slot)))))))
@@ -421,7 +421,7 @@ root is the empty root, which has no nodes)."
   (let ((a (db-account db address)))
     (when a
       (db-state-root db)
-      (let ((trie (sb-thread:with-mutex ((db-proof-lock db)) (ensure-storage-trie db a))))
+      (let ((trie (clempo.lock:with-lock ((db-proof-lock db)) (ensure-storage-trie db a))))
         (trie-root trie)
         trie))))
 

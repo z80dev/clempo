@@ -255,6 +255,132 @@ Walk quoted and backquoted code too: macros can generate executable forms from t
                       (first key) (second key) uses))
            starts))
 
+;;; Fixed-count loops in hot code take their count from a DEFBOUND limit, whose
+;;; definition proves at compile time what the count is safe for (clempo.base's
+;;; bounds.lisp). A count is fixed when it is a compile-time integer expression;
+;;; loops over data (a length, a list, a variable) are bounded by that data instead.
+
+(defun named-p (x package name)
+  (and (symbolp x) (symbol-package x)
+       (string= (package-name (symbol-package x)) package)
+       (string= (symbol-name x) name)))
+
+(defun hot-form-p (form)
+  "True when FORM declares the hot build policy (#.*HOT*) or SPEED 3 anywhere in it."
+  (labels ((walk (x)
+             (typecase x
+               (cons (or (and (eq (car x) 'source-read-eval) (consp (cdr x))
+                              (symbolp (second x)) (string= (symbol-name (second x)) "*HOT*"))
+                         (and (eq (car x) 'optimize) (member '(speed 3) (cdr x) :test #'equal))
+                         (loop for tail = x then (cdr tail) while (consp tail)
+                                 thereis (walk (car tail)))))
+               (sb-impl::comma (walk (sb-impl::comma-expr x))))))
+    (walk form)))
+
+(defun bound-names (forms)
+  "Names defined by DEFBOUND anywhere in FORMS."
+  (let ((names '()))
+    (labels ((walk (x)
+               (when (consp x)
+                 (if (and (named-p (car x) "CLEMPO.BASE" "DEFBOUND") (consp (cdr x)) (symbolp (second x)))
+                     (push (second x) names)
+                     (loop for tail = x then (cdr tail) while (consp tail) do (walk (car tail)))))))
+      (mapc #'walk forms))
+    names))
+
+(defun constant-count-p (x)
+  "True when X is an integer expression the compiler knows: literals, integer constants,
+read-time values, and arithmetic over them."
+  (typecase x
+    (integer t)
+    (symbol (and x (not (keywordp x)) (constantp x) (boundp x) (integerp (symbol-value x))))
+    (cons (or (eq (car x) 'source-read-eval)
+              (and (member (car x) '(+ - * 1+ 1- ash floor ceiling truncate round min max
+                                     logand logior expt mod rem integer-length))
+                   (every #'constant-count-p (cdr x)))))))
+
+(defun cites-bound-p (x bounds)
+  (typecase x
+    (symbol (gethash x bounds))
+    (cons (loop for tail = x then (cdr tail) while (consp tail)
+                  thereis (cites-bound-p (car tail) bounds)))))
+
+(defun fixed-counts (form)
+  "The count expressions of FORM if it is an iteration that runs a fixed number of
+times: each is a list of the expressions that together set one count."
+  (flet ((word (x &rest names) (apply #'loop-word-p x names)))
+    (case (and (consp form) (car form))
+      (dotimes (let ((spec (second form)))
+                 (when (and (consp spec) (consp (cdr spec)) (constant-count-p (second spec)))
+                   (list (list (second spec))))))
+      ((do do*) (let* ((end (third form)) (test (and (consp end) (first end)))
+                       (bindings (second form)))
+                  (when (and (consp test) (member (first test) '(< <= > >=)) (listp bindings))
+                    (let ((binding (find (second test) bindings :key (lambda (b) (if (consp b) (car b) b)))))
+                      (when (and (consp binding) (constant-count-p (second binding))
+                                 (constant-count-p (third test)))
+                        (list (list (second binding) (third test))))))))
+      (loop (let ((tokens (cdr form)) (counts '()))
+              (loop for (token next) on tokens
+                    when (and (word token "REPEAT") (constant-count-p next))
+                      do (push (list next) counts))
+              ;; Each FOR/AS/AND clause: FROM start (default 0) and TO/BELOW/... end.
+              (loop for tail on tokens
+                    when (word (car tail) "FOR" "AS" "AND")
+                      do (let ((start 0) (end nil) (numeric nil))
+                           (loop for (token next) on (cdr tail)
+                                 until (word token "FOR" "AS" "AND" "WITH" "WHILE" "UNTIL" "DO" "DOING"
+                                             "REPEAT" "COLLECT" "COLLECTING" "APPEND" "NCONC" "SUM" "COUNT"
+                                             "MAXIMIZE" "MINIMIZE" "WHEN" "IF" "UNLESS" "RETURN"
+                                             "FINALLY" "INITIALLY" "ALWAYS" "NEVER" "THEREIS")
+                                 do (cond ((word token "FROM" "UPFROM" "DOWNFROM") (setf start next))
+                                          ((word token "TO" "UPTO" "BELOW" "DOWNTO" "ABOVE")
+                                           (setf end next numeric t))))
+                           (when (and numeric (constant-count-p start) (constant-count-p end))
+                             (push (list start end) counts))))
+              (nreverse counts))))))
+
+(defun uncited-hot-loops (form bounds)
+  "Fixed counts in FORM, a hot definition, that name no DEFBOUND limit."
+  (let ((uncited '()))
+    (labels ((walk (x)
+               (typecase x
+                 (cons
+                  (unless (eq (car x) 'source-read-eval)
+                    (dolist (count (fixed-counts x))
+                      (unless (cites-bound-p count bounds) (push count uncited)))
+                    (loop for tail = x then (cdr tail) while (consp tail) do (walk (car tail)))))
+                 (sb-impl::comma (walk (sb-impl::comma-expr x))))))
+      (walk form))
+    (nreverse uncited)))
+
+;;; Locks are taken through clempo.lock, which checks their order in check builds.
+
+(defparameter *untracked-lock-operators*
+  '(sb-thread:with-mutex sb-thread:with-recursive-lock sb-thread:grab-mutex
+    sb-thread:release-mutex sb-thread:condition-wait))
+
+(defun lock-violations (path operators report)
+  (unless (string= path "src/io/locks.lisp")
+    (dolist (op *untracked-lock-operators*)
+      (when (gethash op operators)
+        (funcall report "~S bypasses the lock-order checker; use clempo.lock" op)))))
+
+(defun mutex-names (form)
+  "The :NAME of every SB-THREAD:MAKE-MUTEX in FORM; NIL for one without a literal name.
+A mutex's name is its lock class, so each needs one of its own."
+  (let ((names '()))
+    (labels ((walk (x)
+               (typecase x
+                 (cons (when (eq (car x) 'sb-thread:make-mutex)
+                         (let* ((args (cdr x))
+                                (name (and (ignore-errors (evenp (list-length args))) (getf args :name))))
+                           (push (and (stringp name) name) names)))
+                       (loop for tail = x then (cdr tail) while (consp tail) do (walk (car tail))))
+                 (sb-impl::comma (walk (sb-impl::comma-expr x))))))
+      (walk form))
+    names))
+
 (defun check-layers ()
   (let* ((layers (layers))
          (policy (read-layer-policy))
@@ -265,12 +391,15 @@ Walk quoted and backquoted code too: macros can generate executable forms from t
          (starts (make-hash-table :test 'equal))
          (joins (make-hash-table :test 'equal))
          (assertions (make-hash-table :test 'equal))
+         (bounds (make-hash-table :test 'eq))
+         (mutex-sites (make-hash-table :test 'equal))
          (violations '()))
     (dolist (layer layers)
       (let ((dir (getf layer :dir)))
         (dolist (file (source-files dir))
           (let ((forms (read-source file)))
             (push (cons file forms) (gethash dir units))
+            (dolist (name (bound-names forms)) (setf (gethash name bounds) t))
             (dolist (form forms)
               (when (and (consp form) (eq (car form) 'defpackage))
                 (let* ((package (find-package (second form)))
@@ -303,6 +432,15 @@ Walk quoted and backquoted code too: macros can generate executable forms from t
                                        ((and (not target) (eql 0 (search "CLEMPO." name)))
                                         (report "unknown project package ~A" name)))))
                              (native-violations dir path io-p symbols operators packages #'report))
+                           (lock-violations path operators #'report)
+                           (dolist (name (mutex-names form))
+                             (if name
+                                 (push (format nil "~A (~A)" path definition) (gethash name mutex-sites))
+                                 (report "SB-THREAD:MAKE-MUTEX needs a literal :NAME, its lock class")))
+                           (when (hot-form-p form)
+                             (dolist (count (uncited-hot-loops form bounds))
+                               (report "fixed-count hot loop ~{~S~^ to ~} must take its count from a DEFBOUND limit"
+                                       count)))
                            (unless io-p
                              (record-site-use hash-order path definition hash-scans)
                              (record-site-use loops path definition unbounded-loops))
@@ -316,7 +454,11 @@ Walk quoted and backquoted code too: macros can generate executable forms from t
     (flet ((report (control &rest args) (push (apply #'format nil control args) violations)))
       (check-iteration-uses policy :loops loops "unproven iteration" #'report)
       (check-iteration-uses policy :hash-order hash-order "hash traversal" #'report)
-      (check-thread-owners policy starts joins #'report))
+      (check-thread-owners policy starts joins #'report)
+      (maphash (lambda (name sites)
+                 (when (rest sites)
+                   (report "mutex name ~S names ~D lock classes: ~{~A~^, ~}" name (length sites) (reverse sites))))
+               mutex-sites))
     (loop for (path count reason) in (getf policy :assertions)
           do (unless (and (plusp count) (plusp (length reason)))
                (error "Invalid assertion rule for ~A" path))

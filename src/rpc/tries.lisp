@@ -72,7 +72,7 @@ loaded), and a full collection needs room to copy everything that lives.")
 
 (defun backend-tries (backend)
   (or (gethash backend *tries*)
-      (sb-thread:with-mutex (*tries-lock*)
+      (clempo.lock:with-lock (*tries-lock*)
         (or (gethash backend *tries*) (setf (gethash backend *tries*) (make-tries))))))
 
 (defun unavailable (n why)
@@ -92,7 +92,7 @@ loaded), and a full collection needs room to copy everything that lives.")
   "Collect the whole heap when it is over half full, one thread at a time (a thread that
 waited for another's collection looks again first)."
   (unless (heap-below-p 1/2)
-    (sb-thread:with-mutex (*collect-lock*)
+    (clempo.lock:with-lock (*collect-lock*)
       (unless (heap-below-p 1/2) (sb-ext:gc :full t)))))
 
 ;;; Checkpoints
@@ -273,7 +273,7 @@ writes it collects the heap if it is over half full (COLLECT-IF-HALF-FULL)."
 then only read (proofs over clean tries are safe for concurrent readers)."
   (let ((tries (backend-tries backend))
         (head (chain:backend-head backend)))
-    (sb-thread:with-mutex ((tries-head-lock tries))
+    (clempo.lock:with-lock ((tries-head-lock tries))
       (let ((db (tries-head tries)))
         (if (and db (= (store:db-number db) head))
             db
@@ -321,18 +321,18 @@ waiting from the block a lent state was lent for plus twice that."
 (defun lend-cursor (tries ticket h bases)
   "Wait until CHOOSE-CURSOR has a state for TICKET's call ((n) for a call at block N), then
 count TICKET lent and return the choice."
-  (sb-thread:with-mutex ((tries-lock tries))
+  (clempo.lock:with-lock ((tries-lock tries))
     (loop
       (multiple-value-bind (plan db) (choose-cursor tries (car ticket) h bases)
         (when plan
           (when db (setf (tries-idle tries) (delete db (tries-idle tries) :count 1)))
           (push ticket (tries-lent tries))
           (return (values plan db))))
-      (sb-thread:condition-wait (tries-returned tries) (tries-lock tries)))))
+      (clempo.lock:condition-wait (tries-returned tries) (tries-lock tries)))))
 
 (defun return-cursor (tries ticket db)
   "End TICKET's loan; DB, when it is whole (no block left open), becomes the newest idle state."
-  (sb-thread:with-mutex ((tries-lock tries))
+  (clempo.lock:with-lock ((tries-lock tries))
     (setf (tries-lent tries) (delete ticket (tries-lent tries) :count 1 :test #'eq))
     (when (and db (not (store:db-block-open-p db)))
       (push db (tries-idle tries)))

@@ -60,3 +60,35 @@
   (assert (null violations))
   (assert (= 2 hashes))
   (assert (= 2 loops)))
+
+;; Fixed-count loops in hot code cite a DEFBOUND limit; loops over data, and cold code, need not.
+(flet ((uncited (source &rest bound-names)
+         (let ((bounds (make-hash-table :test 'eq)))
+           (dolist (name bound-names) (setf (gethash name bounds) t))
+           (with-input-from-string (in source)
+             (loop for form in (read-source-stream in "layer-check fixture")
+                   when (hot-form-p form) append (uncited-hot-loops form bounds))))))
+  (assert (equal '((16) (3 0) (8) (0 4) (0 2))
+                 (uncited "(defun f (v n)
+                             (declare #.*hot*)
+                             (dotimes (i 16) (use i))
+                             (loop for i from 3 downto 0 do (use i))
+                             (loop repeat 8 do (use))
+                             (do ((i 0 (1+ i))) ((>= i 4)) (use i))
+                             (loop for i below 2 do (use i))
+                             (dotimes (i n) (use i))
+                             (loop for x across v for i below (length v) do (use x i)))")))
+  (assert (null (uncited "(defun f () (dotimes (i 16) (use i)))")))
+  (assert (null (uncited "(defun f () (declare (optimize (speed 3))) (dotimes (i (ash most-positive-fixnum -60)) (use i)))"
+                         'most-positive-fixnum)))
+  (assert (equal '((most-positive-fixnum))
+                 (uncited "(defun f () (declare (optimize (speed 3))) (dotimes (i most-positive-fixnum) (use i)))"))))
+
+;; Locks go through clempo.lock, and each mutex names its own lock class.
+(let ((violations '()))
+  (lock-violations "src/codec/fixture.lisp"
+                   (nth-value 1 (audit-form '(sb-thread:with-mutex (m) (sb-thread:condition-wait q m))))
+                   (lambda (control &rest args) (push (apply #'format nil control args) violations)))
+  (assert (= 2 (length violations))))
+(assert (equal '(nil "pool")
+               (mutex-names '(list (sb-thread:make-mutex :name "pool") (sb-thread:make-mutex)))))

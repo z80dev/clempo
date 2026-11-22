@@ -12,10 +12,10 @@
   jobs function failure stopped)
 
 (defun claim-job (pool wait)
-  (sb-thread:with-mutex ((worker-pool-lock pool))
+  (clempo.lock:with-lock ((worker-pool-lock pool))
     (when wait
       (loop until (or (worker-pool-stopped pool) (worker-pool-jobs pool))
-            do (sb-thread:condition-wait (worker-pool-work pool) (worker-pool-lock pool))))
+            do (clempo.lock:condition-wait (worker-pool-work pool) (worker-pool-lock pool))))
     (when (and (not (worker-pool-stopped pool)) (worker-pool-jobs pool))
       (values (pop (worker-pool-jobs pool)) (worker-pool-function pool)))))
 
@@ -23,9 +23,9 @@
   (unwind-protect
        (handler-case (funcall fn job)
          (error (c)
-           (sb-thread:with-mutex ((worker-pool-lock pool))
+           (clempo.lock:with-lock ((worker-pool-lock pool))
              (unless (worker-pool-failure pool) (setf (worker-pool-failure pool) c)))))
-    (sb-thread:with-mutex ((worker-pool-lock pool))
+    (clempo.lock:with-lock ((worker-pool-lock pool))
       (when (zerop (decf (worker-pool-remaining pool)))
         (sb-thread:condition-notify (worker-pool-done pool))))))
 
@@ -37,7 +37,7 @@
 (defun run-batch (pool function jobs)
   (let ((count (length jobs)))
     (invariant (<= count 16) "parallel batch exceeds 16 jobs")
-    (sb-thread:with-mutex ((worker-pool-lock pool))
+    (clempo.lock:with-lock ((worker-pool-lock pool))
       (invariant (zerop (worker-pool-remaining pool)) "parallel worker pool already in use")
       (setf (worker-pool-jobs pool) jobs
             (worker-pool-function pool) function
@@ -49,9 +49,9 @@
           (unless fn (return))
           (run-job pool job fn)))
   (let ((failure
-          (sb-thread:with-mutex ((worker-pool-lock pool))
+          (clempo.lock:with-lock ((worker-pool-lock pool))
             (loop until (zerop (worker-pool-remaining pool))
-                  do (sb-thread:condition-wait (worker-pool-done pool) (worker-pool-lock pool)))
+                  do (clempo.lock:condition-wait (worker-pool-done pool) (worker-pool-lock pool)))
             (prog1 (worker-pool-failure pool)
               (setf (worker-pool-failure pool) nil (worker-pool-function pool) nil)))))
     (when failure (error failure)))
@@ -74,7 +74,7 @@ so it can bind per-thread specials; the caller supplies its own bindings."
                                               :name name)
                        workers))
                (funcall function (lambda (fn jobs) (run-batch pool fn jobs))))
-          (sb-thread:with-mutex ((worker-pool-lock pool))
+          (clempo.lock:with-lock ((worker-pool-lock pool))
             (setf (worker-pool-stopped pool) t)
             (sb-thread:condition-broadcast (worker-pool-work pool)))
           (mapc #'sb-thread:join-thread workers)))))

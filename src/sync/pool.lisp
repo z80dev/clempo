@@ -39,7 +39,7 @@ mined, stale, replaced, expired and no longer payable transactions. All calls ar
   "Note a head by its block-env ENV (its post-state is DB): record the beneficiary's fee
 token in the ten-head window and revalidate every entry. Returns the removals."
   (let ((token (pool:validator-fee-token db env (ex:block-env-beneficiary env))))
-    (sb-thread:with-mutex ((pool-service-lock service))
+    (clempo.lock:with-lock ((pool-service-lock service))
       (setf (pool-service-env service) env
             (pool-service-tokens service)
             (let ((tokens (remove token (pool-service-tokens service))))
@@ -54,7 +54,7 @@ token in the ten-head window and revalidate every entry. Returns the removals."
 (defun pool-service-submit (service tx db)
   "Validate TX against DB (the state of the last noted head) and admit it. Returns
 \(values hash status) with STATUS :PENDING or :QUEUED; signals POOL:POOL-ERROR on rejection."
-  (sb-thread:with-mutex ((pool-service-lock service))
+  (clempo.lock:with-lock ((pool-service-lock service))
     (unless (pool-service-env service) (error 'pool:pool-error :code :not-ready))
     (multiple-value-bind (admitted status)
         (pool:submit-transaction (pool-service-pool service) tx (reader service db))
@@ -62,27 +62,27 @@ token in the ten-head window and revalidate every entry. Returns the removals."
 
 (defun pool-service-transactions (service)
   "Every pooled transaction as (tx sender pending-p), in submission order."
-  (sb-thread:with-mutex ((pool-service-lock service))
+  (clempo.lock:with-lock ((pool-service-lock service))
     (pool:pool-snapshot (pool-service-pool service))))
 
 (defun pool-service-count (service)
-  (sb-thread:with-mutex ((pool-service-lock service))
+  (clempo.lock:with-lock ((pool-service-lock service))
     (pool:pool-count (pool-service-pool service))))
 
 (defun pool-service-clear (service)
   "Remove every pooled transaction; returns how many."
-  (sb-thread:with-mutex ((pool-service-lock service))
+  (clempo.lock:with-lock ((pool-service-lock service))
     (pool:pool-clear (pool-service-pool service))))
 
 (defmacro with-pool-service ((pool service) &body body)
   "Run BODY with POOL bound to SERVICE's pool under its lock (for payload building)."
   (let ((s (gensym)))
     `(let ((,s ,service))
-       (sb-thread:with-mutex ((pool-service-lock ,s))
+       (clempo.lock:with-lock ((pool-service-lock ,s))
          (let ((,pool (pool-service-pool ,s))) ,@body)))))
 
 
 (defun pool-service-remove (service hash)
   "Drop one transaction by hash; returns it or NIL."
-  (sb-thread:with-mutex ((pool-service-lock service))
+  (clempo.lock:with-lock ((pool-service-lock service))
     (pool:pool-remove-transaction (pool-service-pool service) hash)))

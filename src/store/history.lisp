@@ -52,16 +52,27 @@ read (the RPC backend's write lock).")
 
 (defconstant +slot-tag+ (ash 1 416))
 
+(defbound +account-key-bytes+ 21 "Bytes of an account key: the tag and the address."
+  (= +account-key-bytes+ (+ 1 20)))
+
+(defbound +slot-key-bytes+ 53
+  "Bytes of a slot key, the longest key: the tag, the address and the slot word. Every key
+buffer is this long."
+  (= +slot-key-bytes+ (+ +account-key-bytes+ 32))
+  (<= (integer-length (logior +slot-tag+ (1- +slot-tag+))) (* 8 +slot-key-bytes+))
+  ;; A record's SHARED and SUFFIX-LEN are single bytes.
+  (< +slot-key-bytes+ 256))
+
 (declaim (inline slot-key))
 (defun slot-key (address slot) (logior +slot-tag+ (ash address 256) slot))
 
-(defun key-length (key) (if (< key +slot-tag+) 21 53))
+(defun key-length (key) (if (< key +slot-tag+) +account-key-bytes+ +slot-key-bytes+))
 
 (defun key-into (key buffer)
   "Write KEY's bytes into BUFFER; returns their count."
   (declare (type octets buffer) (type integer key))
   (let ((n (key-length key)))
-    (setf (aref buffer 0) (if (= n 21) 0 1))
+    (setf (aref buffer 0) (if (= n +account-key-bytes+) 0 1))
     (loop for i from (1- n) downto 1
           for k = key then (ash k -8)
           do (setf (aref buffer i) (ldb (byte 8 0) k)))
@@ -237,7 +248,8 @@ read outside its mapping (the readers run at the hot policy's safety)."
 ;;;   footer   magic from to full level index-offset wipes-offset versions magic (u64 each)
 
 (define-constant +magic+ (string->octets "CLHIST01"))
-(defconstant +footer-size+ 72)
+(defbound +footer-size+ 72 "Bytes of a segment footer, laid out above."
+  (= +footer-size+ (+ (length +magic+) (* 7 8) (length +magic+))))
 (defconstant +page-size+ 4096)
 (defconstant +chunk-versions+ 64)
 
@@ -320,8 +332,9 @@ and count they hold lies inside the file."
             (setf pos index-offset)
             (with-sap-reader (sap pos wipes-offset)
               (let ((pages (be 8)))
-                ;; each index entry takes at least 8 + 8 + 1 + 21 bytes
-                (unless (<= (* pages 38) (- wipes-offset pos)) (bad "page count exceeds the index"))
+                ;; each index entry takes at least 8 + 8 + 1 + +ACCOUNT-KEY-BYTES+ bytes
+                (unless (<= (* pages (+ 8 8 1 +account-key-bytes+)) (- wipes-offset pos))
+                  (bad "page count exceeds the index"))
                 (let ((offsets (make-array pages :element-type 'fixnum))
                       (blocks (make-array pages :element-type 'fixnum))
                       (keys (make-array pages))
@@ -329,11 +342,11 @@ and count they hold lies inside the file."
                   (dotimes (i pages)
                     (let ((offset (be 8)) (block (be 8)) (n (u8)))
                       (unless (and (<= prev offset) (< offset index-offset) (typep block 'fixnum)
-                                   (or (= n 21) (= n 53)))
+                                   (or (= n +account-key-bytes+) (= n +slot-key-bytes+)))
                         (bad "bad page index entry"))
                       (setf prev offset
                             (aref offsets i) offset (aref blocks i) block
-                            (svref keys i) (let ((k (be n))) (if (= n 53) k (ldb (byte 160 0) k))))))
+                            (svref keys i) (let ((k (be n))) (if (= n +slot-key-bytes+) k (ldb (byte 160 0) k))))))
                   (setf (segment-page-offsets seg) offsets (segment-page-blocks seg) blocks
                         (segment-page-keys seg) keys))))
             (setf pos wipes-offset)
@@ -386,7 +399,7 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
              (end (if (< (1+ page) (length (segment-page-offsets seg)))
                       (aref (segment-page-offsets seg) (1+ page))
                       limit))
-             (buf (make-octets 53))
+             (buf (make-octets +slot-key-bytes+))
              (klen 0)
              (found nil) (fstart 0) (fend 0) (ffirst 0) (fcount 0))
         (declare (type fixnum pos end limit klen) (type sb-sys:system-area-pointer sap)
@@ -394,7 +407,7 @@ TLEN bytes. Returns (values body-start body-end first-block count) or NIL."
         (with-sap-reader (sap pos limit)
           (loop while (< pos end)
                 do (let* ((shared (u8)) (suffix (u8)))
-                     (unless (and (<= shared klen) (<= (+ shared suffix) 53))
+                     (unless (and (<= shared klen) (<= (+ shared suffix) +slot-key-bytes+))
                        (corrupt-segment "bad key prefix"))
                      (need suffix)
                      (dotimes (i suffix) (setf (aref buf (+ shared i)) (sb-sys:sap-ref-8 sap (+ pos i))))
@@ -581,7 +594,7 @@ SEGMENT-FLOOR bounded to START..END."
 
 (defun history-refresh (history)
   "Pick up segments and codes written since the history was opened (a running build job)."
-  (sb-thread:with-mutex ((history-lock history))
+  (clempo.lock:with-lock ((history-lock history))
     (let* ((dir (history-dir history))
            (files (segment-files dir))
            ;; a file gone from the directory (a merge input, a removed job) is dropped
@@ -618,7 +631,7 @@ SEGMENT-FLOOR bounded to START..END."
 (defun close-history (history)
   "Stop writing and forget the segments. Their mappings go with their finalizers once no
 view holds them, so a view still in use never reads an unmapped page."
-  (sb-thread:with-mutex ((history-lock history))
+  (clempo.lock:with-lock ((history-lock history))
     (setf (history-segments history) '())
     (when (history-code-out history)
       (close (history-code-out history))
@@ -688,7 +701,7 @@ executor layer, which may see this one)."
 (defun probe-segments (probes key decode)
   "(values block value) of KEY's newest version in the segments of PROBES ((segment . bound)
 ...), newest first, read by DECODE (sap start end first bound); NIL when none."
-  (let* ((target (make-octets 53))
+  (let* ((target (make-octets +slot-key-bytes+))
          (tlen (key-into key target)))
     (declare (dynamic-extent target))
     (loop for (seg . bound) in probes
@@ -795,14 +808,14 @@ cache."
   (let* ((sap (segment-sap seg))
          (pos (if (plusp (length (segment-page-offsets seg))) (aref (segment-page-offsets seg) 0) 0))
          (end (segment-index-offset seg))
-         (buf (make-octets 53))
+         (buf (make-octets +slot-key-bytes+))
          (klen 0))
     (declare (type fixnum pos end klen) (type sb-sys:system-area-pointer sap))
     (with-sap-reader (sap pos end)
       (loop while (< pos end)
             do (let* ((shared (u8)) (suffix (u8)))
                  (declare (type fixnum shared suffix))
-                 (unless (and (<= shared klen) (<= (+ shared suffix) 53))
+                 (unless (and (<= shared klen) (<= (+ shared suffix) +slot-key-bytes+))
                    (corrupt-segment "bad key prefix"))
                  (need suffix)
                  (dotimes (i suffix) (setf (aref buf (+ shared i)) (sb-sys:sap-ref-8 sap (+ pos i))))
@@ -813,7 +826,7 @@ cache."
                         (hit (cond ((> first to) nil)
                                    ((> first from) t)
                                    ;; walk the versions to the first one after FROM
-                                   (t (let ((block first) (slot-p (= klen 53)))
+                                   (t (let ((block first) (slot-p (= klen +slot-key-bytes+)))
                                         (declare (type fixnum block))
                                         (with-sap-reader (sap pos body-end)
                                           (loop repeat count
@@ -826,9 +839,10 @@ cache."
                                                        (setf pos (skip-aver sap pos body-end))))))))))
                    (declare (type fixnum first count body-len body-end))
                    (when hit
-                     (when (< klen 21) (corrupt-segment "short key"))
-                     (funcall fn (octets->integer buf :start 1 :end 21)
-                              (when (= klen 53) (octets->integer buf :start 21 :end 53))))
+                     (when (< klen +account-key-bytes+) (corrupt-segment "short key"))
+                     (funcall fn (octets->integer buf :start 1 :end +account-key-bytes+)
+                              (when (= klen +slot-key-bytes+)
+                                (octets->integer buf :start +account-key-bytes+ :end +slot-key-bytes+))))
                    (setf pos body-end)))))))
 
 (defun history-gap-seeds (history)

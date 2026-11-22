@@ -2,7 +2,6 @@
 
 ;;; Message calls and contract creation: the frames below the interpreter.
 
-(define-constant +max-depth+ 1024)
 (define-constant +max-nonce+ (1- (ash 1 64)))
 
 (declaim (inline all-but-64th success-p))

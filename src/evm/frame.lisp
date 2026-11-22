@@ -62,7 +62,10 @@
 (defvar *analysis-store* (make-analysis-store)
   "The analyses of every thread.")
 
-(define-constant +analysis-l1-size+ 64)
+(defbound +analysis-l1-size+ 64
+  "Slots of the direct-mapped analysis L1."
+  ;; CACHED-ANALYSIS indexes it by masking an address with (1- size).
+  (= (logcount +analysis-l1-size+) 1))
 
 (defun make-analysis-l1 () (make-array +analysis-l1-size+ :initial-element nil))
 
@@ -130,8 +133,17 @@ an analysis in steady use in an L1 never meets the store, so it is kept alive th
 ;;; Memory: MEMORY is a buffer at least MEM-SIZE long; MEM-SIZE is the active size in
 ;;; bytes, a multiple of 32.
 
-(define-constant +max-memory+ (ash 1 32)
-  "Memory beyond 4 GiB is out of gas for any reachable gas limit.")
+(defbound +max-memory+ (ash 1 32)
+  "Memory beyond 4 GiB is out of gas for any reachable gas limit."
+  ;; MEMORY-COST squares the word count in fixnum arithmetic.
+  (typep (* (ceiling +max-memory+ 32) (ceiling +max-memory+ 32)) 'fixnum)
+  ;; GROW-MEMORY at most doubles a buffer of this size.
+  (typep (* 2 +max-memory+) 'fixnum)
+  ;; Out of gas indeed: at the memory schedule (spec.lisp: 3 per word, quadratic
+  ;; divisor 512) this much memory costs over 2^40 gas, beyond any block gas limit
+  ;; and the RPC gas cap.
+  (> (+ (* 3 (ceiling +max-memory+ 32)) (floor (expt (ceiling +max-memory+ 32) 2) 512))
+     (ash 1 40)))
 
 (declaim (inline memory-cost mem-end))
 (defun memory-cost (bytes gp)
@@ -173,9 +185,25 @@ an analysis in steady use in an L1 never meets the store, so it is kept alive th
       +empty-code+
       (subseq (frame-memory frame) offset (+ offset size))))
 
-;;; Stacks are 1024-slot simple-vectors reused by depth.
+;;; Stacks are +STACK-LIMIT+-slot simple-vectors, one per call depth, reused.
 
-(defvar *stacks* (make-array 1026 :initial-element nil)
+(defbound +max-depth+ 1024
+  "Call depth at which a further CALL or CREATE fails (call.lisp).")
+
+(defbound +stack-limit+ 1024
+  "Operand stack slots of a frame; an instruction that would push past them halts with
+:STACK-OVERFLOW before it writes (interpreter.lisp, compile.lisp)."
+  ;; Stack pointers are declared (INTEGER 0 +STACK-LIMIT+) and must stay fixnums.
+  (typep +stack-limit+ 'fixnum)
+  ;; The widest instruction (a DUP16 or SWAP16) fits in a stack.
+  (>= +stack-limit+ 17))
+
+(defbound +depth-stacks+ (+ +max-depth+ 2)
+  "Stacks kept per thread, indexed by the depth of the frame that uses one."
+  ;; Frames run at depths 0 through +MAX-DEPTH+: ACQUIRE-STACK's index stays inside.
+  (> +depth-stacks+ +max-depth+))
+
+(defvar *stacks* (make-array +depth-stacks+ :initial-element nil)
   "Stack per call depth; per thread (see WITH-EVM-THREAD).")
 
 (defvar *keccak-scratch* (clempo.keccak:make-keccak)
@@ -187,7 +215,7 @@ an analysis in steady use in an L1 never meets the store, so it is kept alive th
   "Run BODY with this thread's own interpreter scratch: operand stacks, the code-analysis
 L1 and Keccak buffers. Every thread that executes EVM code besides the main one must
 run inside this."
-  `(let ((*stacks* (make-array 1026 :initial-element nil))
+  `(let ((*stacks* (make-array +depth-stacks+ :initial-element nil))
          (*analysis-l1* (make-analysis-l1))
          (*keccak-scratch* (clempo.keccak:make-keccak))
          (*keccak-out* (make-octets 32)))
@@ -199,4 +227,4 @@ run inside this."
   (let ((stacks *stacks*))
     (declare (type simple-vector stacks))
     (or (svref stacks depth)
-        (setf (svref stacks depth) (make-array 1024 :initial-element 0)))))
+        (setf (svref stacks depth) (make-array +stack-limit+ :initial-element 0)))))

@@ -59,12 +59,12 @@
   (let* ((items (coerce items 'simple-vector))
          (out (make-array (length items)))
          (next 0)
-         (lock (sb-thread:make-mutex))
+         (lock (sb-thread:make-mutex :name "map-on-threads"))
          (workers
            (loop repeat (max 1 (min threads (length items)))
                  collect (sb-thread:make-thread
                           (lambda ()
-                            (loop for i = (sb-thread:with-mutex (lock)
+                            (loop for i = (clempo.lock:with-lock (lock)
                                             (when (< next (length items))
                                               (prog1 next (incf next))))
                                   while i

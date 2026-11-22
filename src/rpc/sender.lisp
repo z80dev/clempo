@@ -149,7 +149,7 @@ Returns (values events transactions)."
          (txs 0) (next 0) (done 0) (lock (sb-thread:make-mutex :name "sender index")))
     (flet ((worker ()
              (loop
-               (let ((i (sb-thread:with-mutex (lock) (when (< next (length firsts)) (prog1 next (incf next))))))
+               (let ((i (clempo.lock:with-lock (lock) (when (< next (length firsts)) (prog1 next (incf next))))))
                  (unless i (return))
                  (let* ((first (svref firsts i))
                         (chunk (archive:read-chunk first archive-dir))
@@ -163,7 +163,7 @@ Returns (values events transactions)."
                                             (vector-push-extend k out) (vector-push-extend l out)
                                             (vector-push-extend w out))))
                    (setf (svref parts i) (coerce out '(simple-array (unsigned-byte 64) (*))))
-                   (sb-thread:with-mutex (lock)
+                   (clempo.lock:with-lock (lock)
                      (incf txs count)
                      (incf done)
                      (when (and log (zerop (mod done 100)))
@@ -184,7 +184,7 @@ Returns (values events transactions)."
 
 (defun open-sender-index (path)
   "The open index at PATH, reopened when the file was rebuilt, or NIL when there is none."
-  (sb-thread:with-mutex (*indexes-lock*)
+  (clempo.lock:with-lock (*indexes-lock*)
     (open-sender-index-locked path)))
 
 (defun open-sender-index-locked (path)
@@ -200,7 +200,7 @@ Returns (values events transactions)."
                (dotimes (i (1+ +buckets+)) (setf (aref offsets i) (get-u64 head (+ +header+ (* 8 i)))))
                ;; Readers of the old index hold its lock while they read; one that takes
                ;; it after this sees the stream closed and moves to the new index.
-               (when old (sb-thread:with-mutex ((sindex-lock old)) (close (sindex-stream old))))
+               (when old (clempo.lock:with-lock ((sindex-lock old)) (close (sindex-stream old))))
                (setf (gethash path *indexes*)
                      (make-sindex :path path :stream in :offsets offsets :covered (get-u64 head 8) :date date)))))))
 
@@ -212,7 +212,7 @@ Returns (values events transactions)."
 
 (defun index-events (index key)
   "The (location . word) events stored under KEY, in chain order."
-  (loop for events = (sb-thread:with-mutex ((sindex-lock index))
+  (loop for events = (clempo.lock:with-lock ((sindex-lock index))
                        (if (open-stream-p (sindex-stream index))
                            (locked-index-events index key)
                            :replaced))
@@ -249,7 +249,7 @@ Returns (values events transactions)."
 
 (defun tail-events (backend covered head key)
   (let ((tail (or (gethash backend *tails*) (setf (gethash backend *tails*) (make-tail)))))
-    (sb-thread:with-mutex ((tail-lock tail))
+    (clempo.lock:with-lock ((tail-lock tail))
       (when (< (tail-head tail) covered)
         (clrhash (tail-table tail)) (setf (tail-head tail) covered))
       (when (> (- head (tail-head tail)) *max-tail*)

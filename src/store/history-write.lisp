@@ -31,8 +31,8 @@
   (page (make-obuf 8192) :type obuf)
   (offset 0 :type index)                ; file offset of the page being filled
   (index '())                           ; ((offset first-block key) ...) newest first
-  (prev (make-octets 53) :type octets) (prev-len 0 :type fixnum)
-  (key (make-octets 53) :type octets)
+  (prev (make-octets +slot-key-bytes+) :type octets) (prev-len 0 :type fixnum)
+  (key (make-octets +slot-key-bytes+) :type octets)
   (versions 0 :type index))
 
 (defun writer-flush-page (w)
@@ -241,7 +241,7 @@ segments when a tier is full. Starts a new tail after it."
 
 (defstruct (cursor (:constructor make-cursor (seg pos end)))
   seg (pos 0 :type fixnum) (end 0 :type fixnum)
-  (kbuf (make-octets 53) :type octets) (klen 0 :type fixnum)
+  (kbuf (make-octets +slot-key-bytes+) :type octets) (klen 0 :type fixnum)
   (key 0) (first 0) (count 0) (body-start 0 :type fixnum) (body-end 0 :type fixnum))
 
 (defun cursor-next (c)
@@ -251,14 +251,14 @@ segments when a tier is full. Starts a new tail after it."
     (when (< pos end)
       (with-sap-reader (sap pos end)
         (let* ((shared (u8)) (suffix (u8)) (kbuf (cursor-kbuf c)) (klen (+ shared suffix)))
-          (unless (and (<= shared (cursor-klen c)) (or (= klen 21) (= klen 53)))
+          (unless (and (<= shared (cursor-klen c)) (or (= klen +account-key-bytes+) (= klen +slot-key-bytes+)))
             (corrupt-segment "bad key prefix"))
           (need suffix)
           (dotimes (i suffix) (setf (aref kbuf (+ shared i)) (sb-sys:sap-ref-8 sap (+ pos i))))
           (incf pos suffix)
           (setf (cursor-klen c) klen
                 (cursor-key c) (let ((k (octets->integer kbuf :start 1 :end klen)))
-                                 (if (= klen 53) (logior +slot-tag+ k) k))
+                                 (if (= klen +slot-key-bytes+) (logior +slot-tag+ k) k))
                 (cursor-first c) (varint)
                 (cursor-count c) (varint))
           (let ((len (varint)))

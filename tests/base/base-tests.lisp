@@ -30,3 +30,37 @@
         (let ((b (copy-seq a)))
           (setf (aref b i) (logxor (aref b i) 1))
           (is (not (octets= a b)) "length ~D, differing at ~D" n i))))))
+
+(defun compile-quietly (form)
+  "(values function warnings-p failure-p) of compiling FORM, its diagnostics muffled."
+  (let ((*error-output* (make-broadcast-stream)))
+    (handler-bind ((warning #'muffle-warning))
+      (compile nil form))))
+
+(deftest static-assertions-fail-the-compilation ()
+  (is (null (macroexpand-1 '(static-assert (= 4 (* 2 2))))))
+  (signals static-assertion-failed (macroexpand-1 '(static-assert (< most-positive-fixnum 0))))
+  (is (search "too small: 3"
+              (handler-case (progn (macroexpand-1 '(static-assert (> 3 4) "too small: ~D" (+ 1 2))) "")
+                (static-assertion-failed (c) (princ-to-string c)))))
+  ;; in a file or a COMPILE, the compiler reports the failure and the compilation fails
+  (is (nth-value 2 (compile-quietly '(lambda () (static-assert (= 1 2)) 1))))
+  (is (not (nth-value 2 (compile-quietly '(lambda () (static-assert (= 1 1)) 1))))))
+
+(deftest bounds-prove-their-relations-when-compiled ()
+  (signals static-assertion-failed
+           (eval '(defbound +base-tests-too-small+ 8 "A buffer" (>= +base-tests-too-small+ 16))))
+  (is (eq '+base-tests-bound+ (eval '(defbound +base-tests-bound+ 32 "A buffer" (= +base-tests-bound+ 32)))))
+  (is (eql 32 (symbol-value '+base-tests-bound+))))
+
+(deftest the-test-audit-names-leaked-threads ()
+  (let* ((before (clempo.base::live-threads))
+         (gate (sb-thread:make-semaphore))
+         (thread (sb-thread:make-thread (lambda () (sb-thread:wait-on-semaphore gate))
+                                        :name "base-tests leaker")))
+    (is (equal (list thread) (clempo.base::leaked-threads before)))
+    (let ((*long-lived-threads* (list "base-tests leaker")))
+      (is (null (clempo.base::leaked-threads before))))
+    (sb-thread:signal-semaphore gate)
+    (sb-thread:join-thread thread)
+    (is (null (clempo.base::leaked-threads before)))))

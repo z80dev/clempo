@@ -56,12 +56,14 @@
 (defun crash-node (node)
   "Kill NODE's validator as a crash would: its state store's unsynced tail is lost (the
 block log and journals sync every record) and, as when the process dies, its datadir lock
-is released."
+is released and its threads are gone. Its log syncer, stopped first, can only sync what
+the store already wrote to the file, which a process crash keeps anyway."
   (let* ((network (node-network node)) (app (shiftf (node-app node) nil))
          (store (net::validator-app-store app)))
     (push (mem-key network) (hub-offline (mem-hub network)))
     (setf (car (mem-inbox network)) nil (cdr (mem-inbox network)) nil)
     (net::close-block-log (net::validator-app-log app))
+    (clempo.store::stop-syncer store)
     (close (clempo.store::store-wal-stream store) :abort t)
     (clempo.store::kv-close (clempo.store::store-kv store))
     (clempo.store::unlock-datadir (clempo.store::store-lock-fd store))))

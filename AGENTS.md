@@ -9,6 +9,8 @@ clempo is a Common Lisp (SBCL) implementation of the Tempo blockchain node. Its 
 - **Lispy, on purpose** (GOAL.md, "What lispy means here"). Prefer one declarative form plus a macro over repeated code; context in special variables; conditions and restarts for recoverable failures; generic functions for backends and tracers; plain integers for 256-bit words.
 - **Fast where it matters.** Hot functions declare their types and use the build policy: `(declare #.clempo.base:*hot*)`. Check builds keep `safety 1` there; `CLEMPO_BUILD=release` drops to `safety 0`. Measure with `time` and `sb-sprof` before and after a speed change, and record the numbers.
 - **Invariants stay on.** Use `clempo.base:invariant` and `unreachable`; never `(declare (safety 0))` around code whose inputs come from the network without checking them first.
+- **Bounds are proven when compiled.** Name a fixed limit (a buffer size, a nesting depth, a limb, lane or round count) with `clempo.base:defbound` and give it the relations that make it safe as proofs: the buffer holds what the loop writes, the product stays a fixnum, the limbs cover the field. `static-assert` relates limits defined apart. A false proof fails the compile. The source gate requires every fixed-count loop in hot code to take its count from a `defbound` limit.
+- **Locks and threads.** Take mutexes through `clempo.lock` (`with-lock`, `with-recursive-lock`, `condition-wait`), never `sb-thread`'s own forms, and give each `make-mutex` a literal `:name` of its own: the name is its lock class. Check builds record the order locks are taken in and signal `lock-order-violation` when an acquisition closes a cycle, as Linux's lockdep does. A test joins every thread it starts; a process-wide thread meant to outlive tests is named in `clempo.base:*long-lived-threads*`. The test harness fails a test that leaves another thread running or records a lock-order cycle.
 - **Determinism.** Route raw clock and entropy through `clempo.io`; direct file, process, socket and thread operations belong in the I/O boundary in `layers.sexp`. In non-I/O code, use a finite iteration driver and make hash traversal order-independent. The source gate checks reader forms. `scripts/layer-policy.sexp` records reviewed iteration bounds, order-independent traversals, named thread join owners and critical assertion requirements. There are no inline bypass directives.
 - **Differential.** A result the reference can produce is tested against the reference: recorded RPC answers, traces, execution-spec-tests, the precompile oracle. A fixture records where it came from in a README next to it.
 - **Record deviations** from the reference in `docs/DEVIATIONS.md`, numbered, never renumbered.
@@ -42,7 +44,8 @@ One directory under `src/` per layer, in import order (`layers.sexp`). Each has 
 ## Build and checks
 
 ```sh
-scripts/verify.sh                 # the gate: cold strict compile, all tests, layer check
+scripts/verify.sh                 # the gate: cold strict compile (bound proofs included), all tests
+                                  # (thread-leak and lock-order audits), layer check
 bin/clempo-dev help               # list commands
 bin/clempo-dev score -help       # find the inputs for a rung
 ```

@@ -2,10 +2,49 @@
 
 ;;; A small test harness: DEFTEST registers a named test, IS records a failure with the
 ;;; failing form and keeps going, and a test that signals an unhandled error fails.
+;;;
+;;; Every test is also audited when it ends, as goleak audits a Go test: a thread it
+;;; started that is still alive (after a grace period for threads on their way out)
+;;; fails it, unless the thread is one of the named *LONG-LIVED-THREADS*. Layers add
+;;; their own audits to *TEST-AUDITS* (the lock-order checker in clempo.lock does).
 
 (defvar *tests* '() "Registered tests, newest first: (name . function).")
 (defvar *test-verbose* nil)
 (defvar *current-failures* nil)
+
+(defvar *long-lived-threads* '()
+  "Names of process-wide threads allowed to outlive the test that started them.")
+
+(defvar *test-audits* '()
+  "Functions of no arguments called after every test; each returns a list of strings,
+the test's failures that audit found.")
+
+(defun live-threads ()
+  (remove-if (lambda (thread)
+               (or (not (sb-thread:thread-alive-p thread)) (sb-thread:thread-ephemeral-p thread)))
+             (sb-thread:list-all-threads)))
+
+(defun leaked-threads (before)
+  "Threads alive now that are not in BEFORE and not long-lived. Threads that are
+finishing get up to two seconds to exit."
+  (flet ((leaks ()
+           (remove-if (lambda (thread)
+                        (or (member thread before)
+                            (member (sb-thread:thread-name thread) *long-lived-threads* :test #'equal)))
+                      (live-threads))))
+    (loop repeat 200
+          for leaks = (leaks)
+          while leaks
+          do (sleep 1/100)
+          finally (return leaks))))
+
+(defun audit-test (threads-before)
+  "Record the failures of the end-of-test audits; true when there were any."
+  (let ((failures (append (loop for thread in (leaked-threads threads-before)
+                                collect (format nil "leaked thread ~S" (sb-thread:thread-name thread)))
+                          (loop for audit in *test-audits* append (funcall audit)))))
+    (dolist (f failures) (record-failure "~A" f))
+    (and failures t)))
 
 (define-condition test-skipped (condition)
   ((reason :initarg :reason :reader test-skipped-reason)))
@@ -60,6 +99,7 @@
                   (some (lambda (p) (eql 0 (search p (test-package-name name)))) prefixes))
           (let ((*current-failures* '())
                 (start (get-internal-real-time))
+                (threads (live-threads))
                 (skip-reason nil))
             (setf skip-reason
                   (catch 'skip
@@ -68,8 +108,9 @@
                         (record-failure "unhandled ~A: ~A" (type-of e) e)
                         nil))))
             (let ((ms (round (* 1000 (- (get-internal-real-time) start))
-                             internal-time-units-per-second)))
-              (cond (skip-reason
+                             internal-time-units-per-second))
+                  (audit-failed (audit-test threads)))
+              (cond ((and skip-reason (not audit-failed))
                      (incf skipped)
                      (format stream "~&SKIP ~S: ~A~%" name skip-reason))
                     (*current-failures*

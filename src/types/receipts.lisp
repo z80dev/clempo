@@ -13,6 +13,18 @@
   (cumulative-gas-used 0 :type (unsigned-byte 64)) (logs nil :type list)
   (bloom nil :type (or null octets)) fee-token fee-payer)
 
+(defbound +bloom-bytes+ 256 "Bytes of a logs bloom."
+  ;; A probe is an 11-bit index (#x7FF) into the bloom's bits.
+  (= (* 8 +bloom-bytes+) (1+ #x7ff)))
+
+(defbound +bloom-probes+ 3
+  "Bits each address or topic sets, from successive byte pairs of its Keccak-256 hash."
+  (<= (* 2 +bloom-probes+) 32))
+
+(defbound +bloom-words+ (floor +bloom-bytes+ sb-vm:n-word-bytes)
+  "Machine words of a bloom, which RECEIPTS-BLOOM merges a word at a time."
+  (= (* +bloom-words+ sb-vm:n-word-bytes) +bloom-bytes+))
+
 (defun bloom-accrue (bloom bytes &optional k)
   "Set BYTES' three bloom bits in BLOOM. K, a reusable keccak context, saves allocating one
 for inputs that are not 32 or 64 bytes."
@@ -20,13 +32,13 @@ for inputs that are not 32 or 64 bytes."
   (let ((hash (make-array 32 :element-type '(unsigned-byte 8))))
     (declare (dynamic-extent hash))
     (clempo.keccak:keccak256-into bytes 0 (length bytes) hash 0 k)
-    (dotimes (i 3)
+    (dotimes (i +bloom-probes+)
       (let* ((bit (logand #x7ff (logior (ash (aref hash (* i 2)) 8) (aref hash (1+ (* i 2))))))
-             (byte (- 255 (ash bit -3))))
+             (byte (- (1- +bloom-bytes+) (ash bit -3))))
         (setf (aref bloom byte) (logior (aref bloom byte) (ash 1 (logand bit 7))))))))
 
 (defun logs-bloom (logs)
-  (let ((bloom (make-octets 256))
+  (let ((bloom (make-octets +bloom-bytes+))
         (address (make-array 20 :element-type '(unsigned-byte 8)))
         (k (when logs (clempo.keccak:make-keccak))))
     (declare (dynamic-extent address))
@@ -34,7 +46,7 @@ for inputs that are not 32 or 64 bytes."
       (bloom-accrue bloom (integer-into-octets (event-log-address log) address 0 20) k)
       (dolist (topic (event-log-topics log)) (bloom-accrue bloom topic k)))))
 
-(defvar +zero-bloom+ (make-octets 256)
+(defvar +zero-bloom+ (make-octets +bloom-bytes+)
   "The bloom of no logs; read, never written (a receipt without logs has a NIL bloom).")
 
 (declaim (inline receipt-bloom*))
@@ -45,14 +57,14 @@ for inputs that are not 32 or 64 bytes."
 
 (defun receipts-bloom (receipts)
   (declare #.clempo.base:*hot*)
-  (let ((bloom (make-octets 256)))
-    (declare (type (octets 256) bloom))
+  (let ((bloom (make-octets +bloom-bytes+)))
+    (declare (type (octets #.+bloom-bytes+) bloom))
     (dolist (receipt receipts bloom)
       (unless (and (null (receipt-bloom receipt)) (null (receipt-logs receipt))) ; adds nothing
         (let ((other (receipt-bloom* receipt)))
           (declare (type octets other))
-          (invariant (= (length other) 256) "a bloom is 256 bytes, not ~D" (length other))
-          (dotimes (i 32)               ; a 64-bit word at a time
+          (invariant (= (length other) +bloom-bytes+) "a bloom is ~D bytes, not ~D" +bloom-bytes+ (length other))
+          (dotimes (i +bloom-words+)    ; a machine word at a time
             (setf (sb-kernel:%vector-raw-bits bloom i)
                   (logior (sb-kernel:%vector-raw-bits bloom i) (sb-kernel:%vector-raw-bits other i)))))))))
 

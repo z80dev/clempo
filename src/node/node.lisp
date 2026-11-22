@@ -199,7 +199,7 @@ log and from memory."
           (fold-step :fold-blocks-written)
           (let ((segment (list through (backend:open-index (segment-path dir from through :blocks))
                                (backend:open-index (segment-path dir from through :txs)) from)))
-            (sb-thread:with-mutex ((node-segment-lock node)) (push segment (node-segments node))))
+            (clempo.lock:with-lock ((node-segment-lock node)) (push segment (node-segments node))))
           (setf (node-folded-to node) through)
           (dolist (h thashes) (remhash h (node-followed-txs node)))
           (dolist (h bhashes) (remhash h (node-followed-blocks node)))
@@ -247,7 +247,7 @@ log and from memory."
   "The due pair to merge next, or NIL when none is due or merging stopped; then, when
 IDLE-WHEN-DONE, marks the merger idle in the same critical section, so a fold that lands
 after this either sees the merger idle and starts another or is picked up by this one."
-  (sb-thread:with-mutex ((node-segment-lock node))
+  (clempo.lock:with-lock ((node-segment-lock node))
     (or (and (not (node-merges-stopped node)) (due-merge (node-segments node)))
         (progn (when idle-when-done (setf (node-merging node) nil)) nil))))
 
@@ -261,7 +261,7 @@ after this either sees the merger idle and starts another or is picked up by thi
       (fold-step :merge-blocks-written)
       (let ((merged (list to (backend:open-index (segment-path dir from to :blocks))
                           (backend:open-index (segment-path dir from to :txs)) from)))
-        (sb-thread:with-mutex ((node-segment-lock node))
+        (clempo.lock:with-lock ((node-segment-lock node))
           (setf (node-segments node)
                 (loop for s in (node-segments node)
                       unless (eq s (cdr pair)) collect (if (eq s (car pair)) merged s)))))
@@ -278,7 +278,7 @@ after this either sees the merger idle and starts another or is picked up by thi
 
 (defun start-segment-merge (node)
   "Start the background merger unless it is already working."
-  (sb-thread:with-mutex ((node-segment-lock node))
+  (clempo.lock:with-lock ((node-segment-lock node))
     (when (and (not (node-merging node)) (not (node-merges-stopped node))
                (due-merge (node-segments node)))
       (when (node-merger node) (sb-thread:join-thread (node-merger node) :default nil))
@@ -289,12 +289,12 @@ after this either sees the merger idle and starts another or is picked up by thi
                (handler-case (merge-segments node t)
                  (error (e)
                    (log-node "node: merging followed segments failed: ~A" e)
-                   (sb-thread:with-mutex ((node-segment-lock node)) (setf (node-merging node) nil)))))
+                   (clempo.lock:with-lock ((node-segment-lock node)) (setf (node-merging node) nil)))))
              :name "followed segment merge")))))
 
 (defun close-hash-log (node)
   "Stop merging after the merge in progress, join the merger and close the log."
-  (sb-thread:with-mutex ((node-segment-lock node)) (setf (node-merges-stopped node) t))
+  (clempo.lock:with-lock ((node-segment-lock node)) (setf (node-merges-stopped node) t))
   (when (node-merger node) (sb-thread:join-thread (node-merger node) :default nil))
   (when (node-hash-log node) (close (node-hash-log node))))
 
@@ -469,9 +469,9 @@ after this either sees the merger idle and starts another or is picked up by thi
     (setf (forwarder-thread f)
           (sb-thread:make-thread
            (lambda ()
-             (loop (let ((job (sb-thread:with-mutex ((forwarder-lock f))
+             (loop (let ((job (clempo.lock:with-lock ((forwarder-lock f))
                                 (loop until (or (forwarder-queue f) (forwarder-stopped f))
-                                      do (sb-thread:condition-wait (forwarder-ready f) (forwarder-lock f)))
+                                      do (clempo.lock:condition-wait (forwarder-ready f) (forwarder-lock f)))
                                 (pop (forwarder-queue f)))))
                      (unless job (return))
                      (forward-one f (car job) (cdr job)))))
@@ -479,14 +479,14 @@ after this either sees the merger idle and starts another or is picked up by thi
     f))
 
 (defun forward (forwarder raw hash)
-  (sb-thread:with-mutex ((forwarder-lock forwarder))
+  (clempo.lock:with-lock ((forwarder-lock forwarder))
     (unless (forwarder-stopped forwarder)
       (setf (forwarder-queue forwarder) (nconc (forwarder-queue forwarder) (list (cons raw hash))))
       (sb-thread:condition-notify (forwarder-ready forwarder)))))
 
 (defun stop-forwarder (forwarder)
   "Forward what is queued, then stop."
-  (sb-thread:with-mutex ((forwarder-lock forwarder))
+  (clempo.lock:with-lock ((forwarder-lock forwarder))
     (setf (forwarder-stopped forwarder) t)
     (sb-thread:condition-broadcast (forwarder-ready forwarder)))
   (sb-thread:join-thread (forwarder-thread forwarder) :default nil))
@@ -629,16 +629,16 @@ or NIL."
     (setf (jit-worker-thread w)
           (sb-thread:make-thread
            (lambda ()
-             (loop (let ((thunk (sb-thread:with-mutex ((jit-worker-lock w))
+             (loop (let ((thunk (clempo.lock:with-lock ((jit-worker-lock w))
                                   (loop until (or (jit-worker-queue w) (jit-worker-stopped w))
-                                        do (sb-thread:condition-wait (jit-worker-ready w) (jit-worker-lock w)))
+                                        do (clempo.lock:condition-wait (jit-worker-ready w) (jit-worker-lock w)))
                                   (pop (jit-worker-queue w)))))
                      (unless thunk (return))
                      (funcall (the function thunk)))))
            :name "evm compiler"))
     (clempo.evm:install-jit-compiler
      (lambda (thunk)
-       (sb-thread:with-mutex ((jit-worker-lock w))
+       (clempo.lock:with-lock ((jit-worker-lock w))
          (unless (jit-worker-stopped w)
            (setf (jit-worker-queue w) (nconc (jit-worker-queue w) (list thunk)))
            (sb-thread:condition-notify (jit-worker-ready w))
@@ -647,7 +647,7 @@ or NIL."
 
 (defun stop-jit-worker (w)
   (clempo.evm:remove-jit-compiler)
-  (sb-thread:with-mutex ((jit-worker-lock w))
+  (clempo.lock:with-lock ((jit-worker-lock w))
     (setf (jit-worker-stopped w) t (jit-worker-queue w) '())
     (sb-thread:condition-broadcast (jit-worker-ready w)))
   (sb-thread:join-thread (jit-worker-thread w) :default nil))

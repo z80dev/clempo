@@ -171,7 +171,7 @@ of a crash during an append, is cut off; any other damage signals an error."
     log))
 
 (defun close-block-log (log)
-  (thr:with-mutex ((block-log-lock log))
+  (clempo.lock:with-lock ((block-log-lock log))
     (when (block-log-output log)
       (close (block-log-output log))
       (setf (block-log-output log) nil))))
@@ -179,7 +179,7 @@ of a crash during an append, is cut off; any other damage signals an error."
 (defun block-log-append (log height raw receipts finalization)
   "Append HEIGHT's record and make it durable. RECEIPTS are EIP-2718 envelopes."
   (let ((record (make-log-record :height height :block raw :receipts receipts :finalization finalization)))
-    (thr:with-mutex ((block-log-lock log))
+    (clempo.lock:with-lock ((block-log-lock log))
       (let* ((out (block-log-output log)) (offset (file-position out)))
         (write-sequence (frame-record (clempo.cwcodec:cw-encode 'log-record record)) out)
         (finish-output out)
@@ -189,7 +189,7 @@ of a crash during an append, is cut off; any other damage signals an error."
 
 (defun block-log-record (log height)
   "HEIGHT's LOG-RECORD, or NIL."
-  (thr:with-mutex ((block-log-lock log))
+  (clempo.lock:with-lock ((block-log-lock log))
     (when (and (integerp height) (<= 0 height (block-log-head log)))
       (or (gethash height (block-log-recent log))
           (with-open-file (in (block-log-path log) :element-type 'octet)
@@ -197,10 +197,10 @@ of a crash during an append, is cut off; any other damage signals an error."
             (clempo.cwcodec:cw-decode 'log-record (read-frame in)))))))
 
 (defun block-log-height (log hash)
-  (thr:with-mutex ((block-log-lock log)) (gethash hash (block-log-hashes log))))
+  (clempo.lock:with-lock ((block-log-lock log)) (gethash hash (block-log-hashes log))))
 
 (defun block-log-transaction (log hash)
-  (thr:with-mutex ((block-log-lock log)) (gethash hash (block-log-txs log))))
+  (clempo.lock:with-lock ((block-log-lock log)) (gethash hash (block-log-txs log))))
 
 ;;; JSON-RPC over the validator's chain: blocks and receipts from the log, state at the
 ;;; head, and the transaction pool consensus proposes from.
@@ -243,7 +243,7 @@ of a crash during an append, is cut off; any other damage signals an error."
   (lock (thr:make-mutex :name "validator pool") :read-only t))
 
 (defmacro with-validator-pool ((pool) &body body)
-  `(thr:with-mutex ((validator-pool-lock ,pool)) ,@body))
+  `(clempo.lock:with-lock ((validator-pool-lock ,pool)) ,@body))
 
 (defun pool-snapshot-reader (backend)
   "A txpool state reader over the head state, for the next block's environment, with the fee

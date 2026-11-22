@@ -124,7 +124,7 @@
 
 (deftest tempo-structures-nest-far-below-the-rlp-limit ()
   ;; The deepest recorded envelope is a keychain-v2 transaction carrying a key authorization
-  ;; with call scopes: 8 lists, a quarter of clempo.rlp's depth limit.
+  ;; with call scopes; clempo.rlp proves its depth limit against this measured depth.
   (let ((deepest 0))
     (dolist (fixture *rpc-transactions*)
       (let ((raw (hex->octets (second fixture))))
@@ -139,7 +139,7 @@
                  (dolist (tx (second body))
                    (when (typep tx 'octets)
                      (setf deepest (max deepest (list-depth (clempo.rlp:rlp-decode tx :start 1)))))))))
-    (is= 8 deepest)
+    (is= clempo.rlp::+rlp-deepest-tempo-structure+ deepest)
     (is (< deepest clempo.rlp:*rlp-max-depth*))))
 
 ;;; EIP-2: alloy's secp256k1::recover_signer rejects s > n/2 for every Ethereum envelope and

@@ -82,11 +82,11 @@ http://, clempo.tls for https://. Connects and reads time out, and responses are
 
 (defun take-conn (key scheme host port)
   "A pooled connection (second value T) or a new one."
-  (let ((pooled (sb-thread:with-mutex (*pool-lock*) (pop (gethash key *pool*)))))
+  (let ((pooled (clempo.lock:with-lock (*pool-lock*) (pop (gethash key *pool*)))))
     (if pooled (values pooled t) (values (open-conn scheme host port) nil))))
 
 (defun give-conn (key conn)
-  (sb-thread:with-mutex (*pool-lock*) (push conn (gethash key *pool*))))
+  (clempo.lock:with-lock (*pool-lock*) (push conn (gethash key *pool*))))
 
 (defun close-conn (conn)
   (ignore-errors (close (conn-stream conn) :abort t))
