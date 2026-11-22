@@ -39,7 +39,7 @@
   (backfill-missing (make-hash-table))    ; height -> peers that answered with an error
   (backfill-next-ms (make-hash-table :test #'equalp)) ; peer -> earliest next request time
   (backfill-queued 0)                     ; a finalization above a gap, queued for its ancestors
-  (proposed 0) (committed 0) (dealings-sent 0) (acks-sent 0)
+  (proposed 0) (committed 0) (dealings-sent 0) (acks-sent 0) (epochs 0)
   (signing nil)                           ; whether it holds a share in the current epoch
   (report (constantly nil)))
 
@@ -503,6 +503,7 @@ last block. It is the voter's genesis (Floor::Genesis) and its timestamp picks t
                                                            (cons index (clempo.dkg:share-private share))))
                      (clempo.consensus:make-verifier-scheme (clempo.dkg:sharing-coefficients sharing)
                                                            (clempo.dkg:sharing-total sharing)))))
+    (incf (validator-app-epochs app))
     (setf (validator-app-outcome app) outcome
           (validator-app-scheme app) scheme
           (validator-app-logged-dealers app) nil

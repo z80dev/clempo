@@ -156,6 +156,10 @@ journal keeps it from signing against its own earlier votes). Peers and the next
 players come from `ValidatorConfigV2` at the parent state. Its JSON-RPC feeds the
 transaction pool its proposals draw from; `/metrics` serves `clempo_validator_*`
 (head, epoch, member, peers, proposed, committed, DKG dealt and acks).
+`clempo_validatorStatus` on the JSON-RPC port returns the same view as one object
+(`head`, `epoch`, `member`, `peers`, `proposed`, `committed`, `epochs` entered,
+DKG `dealt` and `acks`), refreshed with the metrics once a second, or null before
+the first refresh.
 
 ```sh
 MIX="$HOME/cache/clempo/devnet-mixed"

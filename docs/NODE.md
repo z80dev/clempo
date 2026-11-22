@@ -40,9 +40,19 @@ For a header/body-only probe, run
 `bin/clempo-dev follow -source devp2p -peers FILE -last 10 -once -no-archive`.
 
 `--once` exits at the initial target, and `--seconds N` exits after N seconds
-of live following, starting when the initial target is reached. Both print a
-JSON run summary. Without either, the node runs until SIGINT or SIGTERM,
-stops its services in order, then flushes history and closes the store.
+of live following, starting when the initial target is reached. `--to N` stops
+after executing block N: when the upstream tip is past N it follows no further,
+and when it is not it waits for the tip; a head already at or past N stops at
+once. Each prints a JSON run summary (head, hash, state root, upstream tip,
+blocks and transactions executed, certification counts, wall seconds) to
+standard output, and `--summary FILE` also writes it to FILE once the node has
+shut down, with a `failed` message when following failed (a node that fails
+before it starts following writes none). Those three bound the
+upstream retries (20 in a row, then the run fails). `--hold` keeps JSON-RPC,
+metrics and the REPL serving the final state after `--to`, `--once` or
+`--seconds` until SIGINT or SIGTERM; without one of them it is an error. With
+none of them, the node runs until SIGINT or SIGTERM. Either way it stops its
+services in order, then flushes history and closes the store.
 Build a standalone executable with `scripts/build-node.sh` (default output
 `build/clempo`). `CLEMPO_HEAP` sets the heap size in MiB.
 
@@ -56,8 +66,11 @@ The hash index, receipts, historical state and finalizations default to
 subdirectories of the datadir. Override them with `--index-dir`,
 `--receipts-dir`, `--history-dir` and `--finalization-dir`. The raw-block
 archive remains separate (`--archive`). Receipts are persisted as blocks
-execute. Block- or transaction-hash queries outside the most recent 256
-blocks use the hash index built by `clempo-dev index`.
+execute. The last `--recent N` executed blocks (default 1024, 1 to 65,536) stay
+in memory with their receipts, and their block and transaction hashes resolve
+from memory. Older hash queries use the hash index: the datadir's own (seeded
+from the archive's complete chunks and extended with every followed block), or
+the one `--index-dir` names, which `clempo-dev index` builds.
 
 The datadir uses an exclusively locked (`LOCK`) disk-backed key/value store:
 checksummed immutable segments hold accounts, slots, code and reference-counted

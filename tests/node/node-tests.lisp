@@ -370,3 +370,129 @@ those requests fail, as during an upstream outage."
             (hash (blocks:block-hash (blocks:decode-block (svref chain 41)))))
         (is (member 42 (clempo.rpc.chain:index-lookup blocks-index (clempo.rpc.chain:hash-prefix hash))))
         (is= 5000 (clempo.rpc.chain:index-covered-height index))))))
+
+;;; --to, --hold, --summary and --recent.
+
+(defun read-summary (path) (json:parse-json (clempo.io:read-file-string path)))
+
+(deftest node-stops-at-to-and-writes-a-summary ()
+  ;; The tip is past --to: the node stops after block 7, not at the tip, and writes the
+  ;; report it returns to --summary. A head already at --to stops at once.
+  (let ((raws (recorded-blocks)) (tip (list 20)))
+    (with-temp-dirs (datadir archive out)
+      (let ((summary (format nil "~Asummary.json" out)))
+        (fake:call-with-fake-upstream
+         (upstream raws tip)
+         (lambda (url)
+           (let ((report (run datadir archive url :to 7 :summary summary)))
+             (is= 7 (json:jget report "head"))
+             (is= 7 (json:jget report "executed"))
+             (is= 7 (json:jget report "to"))
+             (is= 20 (json:jget report "tip"))
+             (is (plusp (json:jget report "transactions")))
+             (is (null (json:jget report "failed")))
+             (let ((written (read-summary summary)))
+               (is= 7 (json:jget written "head"))
+               (is (equal (json:jget report "hash") (json:jget written "hash")))
+               (is (floatp (json:jget written "seconds")))))
+           (let ((report (run datadir archive url :to 5)))
+             (is= 7 (json:jget report "head"))
+             (is= 0 (json:jget report "executed")))))))))
+
+(deftest node-waits-for-the-tip-to-reach-to ()
+  ;; --to past the tip: it follows the tip, waits, and stops at --to once the tip passes it.
+  (let* ((raws (recorded-blocks)) (tip (list 4)) (report nil)
+         (rpc-port (free-port)) (node-url (format nil "http://127.0.0.1:~D/" rpc-port)))
+    (with-temp-dirs (datadir archive)
+      (fake:call-with-fake-upstream
+       (upstream raws tip)
+       (lambda (url)
+         (let ((thread (sb-thread:make-thread
+                        (lambda () (setf report (run datadir archive url :rpc-port rpc-port :to 9)))
+                        :name "node under test")))
+           (is (loop repeat 600
+                     thereis (equal "0x4" (ignore-errors (clempo.jsonrpc:rpc-call "eth_blockNumber" '()
+                                                                                  :url node-url :retries 0)))
+                     do (sleep 0.05)))
+           (is (sb-thread:thread-alive-p thread))
+           (setf (car tip) 20)
+           (sb-thread:join-thread thread :timeout 60 :default nil)
+           (is report)
+           (when report
+             (is= 9 (json:jget report "head"))
+             (is (eq :false (json:jget report "stopped"))))))))))
+
+(deftest node-holds-rpc-after-to-until-sigterm ()
+  (let* ((raws (recorded-blocks)) (tip (list 20)) (report nil)
+         (rpc-port (free-port)) (node-url (format nil "http://127.0.0.1:~D/" rpc-port)))
+    (signals error (node:run-node "/nonexistent/clempo-hold" :hold t))
+    (with-temp-dirs (datadir archive out)
+      (let ((summary (format nil "~Asummary.json" out)))
+        (fake:call-with-fake-upstream
+         (upstream raws tip)
+         (lambda (url)
+           (let ((thread (sb-thread:make-thread
+                          (lambda () (setf report (run datadir archive url :rpc-port rpc-port :to 6 :hold t
+                                                                           :summary summary)))
+                          :name "node under test")))
+             (is (loop repeat 600
+                       thereis (equal "0x6" (ignore-errors (clempo.jsonrpc:rpc-call "eth_blockNumber" '()
+                                                                                    :url node-url :retries 0)))
+                       do (sleep 0.05)))
+             ;; Still serving, still at 6, though the tip is at 20.
+             (sleep 0.3)
+             (is (sb-thread:thread-alive-p thread))
+             (is (equal "0x6" (json:jget* (clempo.jsonrpc:rpc-call "clempo_status" '() :url node-url :retries 0)
+                                          "head" "number")))
+             (is (not (probe-file summary)))
+             (sb-posix:kill (sb-posix:getpid) sb-unix:sigterm)
+             (sb-thread:join-thread thread :timeout 30 :default nil)
+             (is report)
+             (when report
+               (is= 6 (json:jget report "head"))
+               (is (eq :true (json:jget report "stopped"))))
+             (is= 6 (json:jget (read-summary summary) "head"))
+             (is (null (ignore-errors (clempo.jsonrpc:rpc-call "eth_blockNumber" '() :url node-url
+                                                                                   :retries 0)))))))))))
+
+(deftest node-summary-records-a-failed-run ()
+  ;; A bounded run (--to) gives up after its retries; the summary says why, and the error
+  ;; still reaches the caller.
+  (let ((raws (recorded-blocks)) (tip (list 20)))
+    (with-temp-dirs (datadir archive out)
+      (let ((summary (format nil "~Asummary.json" out)))
+        (fake:call-with-fake-upstream
+         (upstream raws tip)
+         (lambda (url)
+           (signals error (run datadir archive url :to 10 :summary summary :poll-seconds 0.001
+                                                   :block-source (lambda (from count)
+                                                                   (declare (ignore from count))
+                                                                   nil)))
+           (let ((written (read-summary summary)))
+             (is= 0 (json:jget written "head"))
+             (is (search "wrong block batch shape" (json:jget written "failed"))))))))))
+
+(deftest recent-ring-is-sized-and-indexes-its-hashes ()
+  (let ((raws (recorded-blocks)))
+    (is= 1024 (length (clempo.node::node-recent (make-instance 'clempo.node::node-backend
+                                                               :archive-dir "/nonexistent/" :head 0))))
+    (signals error (clempo.node::make-recent-ring 0))
+    (signals error (clempo.node::make-recent-ring 65537))
+    (let ((options (node:node-options '("--to" "9" "--recent" "64" "--summary" "s.json" "--hold"))))
+      (is (equal '(9 64 "s.json" t) (mapcar (lambda (k) (getf options k)) '(:to :recent :summary :hold)))))
+    ;; A ring of 4: block 7 is evicted by 11 and leaves the hash lookups with it.
+    (let ((node (make-instance 'clempo.node::node-backend :archive-dir "/nonexistent/" :head 0
+                                                          :recent (clempo.node::make-recent-ring 4)))
+          (block-7 (blocks:decode-block (svref raws 7))))
+      (loop for n from 7 to 11
+            do (clempo.node::note-recent node (clempo.node::recent-entry (blocks:decode-block (svref raws n)) nil)))
+      (is (null (clempo.node::recent-block node 7)))
+      (is= 11 (clempo.node::recent-block-number (clempo.node::recent-block node 11)))
+      (is (null (gethash (blocks:block-hash block-7) (clempo.node::node-recent-blocks node))))
+      (is (null (gethash (clempo.transactions:transaction-hash (first (blocks:block-transactions block-7)))
+                         (clempo.node::node-recent-txs node))))
+      (let* ((block-10 (blocks:decode-block (svref raws 10)))
+             (tx (first (blocks:block-transactions block-10))))
+        (is= 10 (gethash (blocks:block-hash block-10) (clempo.node::node-recent-blocks node)))
+        (is (equal '(10 0) (multiple-value-list
+                            (clempo.rpc.chain:backend-tx-location node (clempo.transactions:transaction-hash tx)))))))))

@@ -208,7 +208,10 @@ of a crash during an append, is cut off; any other damage signals an error."
 (defclass validator-backend (clempo.rpc.chain:backend)
   ((log :initarg :log :reader backend-log)
    (store :initarg :store :reader backend-store)
-   (pool :initarg :pool :initform nil :reader backend-pool-service)))
+   (pool :initarg :pool :initform nil :reader backend-pool-service)
+   ;; The event loop's latest status (a JSON object it replaces whole), for
+   ;; clempo_validatorStatus; NIL until the loop first publishes.
+   (status :initform nil :accessor backend-validator-status)))
 
 (defmethod clempo.rpc.chain:backend-head ((b validator-backend))
   (clempo.store:db-number (clempo.store:store-db (backend-store b))))

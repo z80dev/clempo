@@ -220,46 +220,52 @@ closed; this function never rolls back."
             (when (<= left 0) (return nil))
             (sleep (/ (min left 100) 1000))))))
 
-(defun follow-live (follower &key tip (poll-seconds 0.25) once seconds on-poll on-target stop on-retry)
+(defun follow-live (follower &key tip (poll-seconds 0.25) once seconds to on-poll on-target stop on-retry)
   "Catch up to the supplied TIP (or the current one), then poll until STOP returns true.
-ONCE exits after reaching the initial TIP. SECONDS counts from first reaching it.
+ONCE exits after reaching the initial TIP. SECONDS counts from first reaching it. TO stops
+after executing block TO (at once when the head is already there), following no further
+than it while the tip is past it and waiting for the tip while it is not.
 ON-TARGET receives FOLLOWER and each remote TIP before following to it; ON-POLL the same
 at the end of each poll.
 A failed step (upstream, transport, certificate or rejected block) is retried with
 exponential backoff up to 10 s, calling ON-RETRY with the attempt and condition; a live
-follower retries forever, a bounded one (ONCE or SECONDS) gives up after 20 in a row.
+follower retries forever, a bounded one (ONCE, SECONDS or TO) gives up after 20 in a row.
 EXECUTION-FAILED is never retried."
   (check-type poll-seconds (real (0) *))
   (check-type seconds (or null (real 0 *)))
+  (check-type to (or null (integer 0 *)))
   (let ((url (follower-rpc-url follower))
         (poll-ms (max 1 (round (* 1000 poll-seconds))))
         (initial-tip tip)
         (since nil)
         (retries 0))
-    (loop
-      (when (and stop (funcall stop)) (return (follower-head follower)))
-      (let ((failure
-              (handler-case
-                  (let ((target (or initial-tip (rpc-head :latest :url url))))
-                    (when on-target (funcall on-target follower target))
-                    (when (nth-value 1 (follow-to follower target :stop stop))
-                      (setf initial-tip nil)
-                      (unless since (setf since (clempo.io:now-ms))))
-                    (when on-poll (funcall on-poll follower target))
-                    nil)
-                (execution-failed (c) (error c))
-                (error (c) c))))
-        (cond (failure
-               (incf retries)
-               (when (and (or once seconds) (> retries +retries-bounded+))
-                 (error failure))
-               (when on-retry (funcall on-retry retries failure))
-               (when (pause (min (* poll-ms (expt 2 (min retries 8))) +backoff-max-ms+) stop)
-                 (return (follower-head follower))))
-              (t
-               (setf retries 0)
-               (when (and since
-                          (or once (and seconds (>= (- (clempo.io:now-ms) since) (* seconds 1000)))))
-                 (return (follower-head follower)))
-               (when (pause poll-ms stop)
-                 (return (follower-head follower)))))))))
+    (flet ((reached-to-p () (and to (>= (head-number (follower-head follower)) to))))
+      (loop
+        (when (or (and stop (funcall stop)) (reached-to-p)) (return (follower-head follower)))
+        (let ((failure
+                (handler-case
+                    (let* ((remote (or initial-tip (rpc-head :latest :url url)))
+                           (target (if (and to (> (head-number remote) to)) (rpc-head to :url url) remote)))
+                      (when on-target (funcall on-target follower remote))
+                      (when (nth-value 1 (follow-to follower target :stop stop))
+                        (setf initial-tip nil)
+                        (unless since (setf since (clempo.io:now-ms))))
+                      (when on-poll (funcall on-poll follower remote))
+                      nil)
+                  (execution-failed (c) (error c))
+                  (error (c) c))))
+          (cond (failure
+                 (incf retries)
+                 (when (and (or once seconds to) (> retries +retries-bounded+))
+                   (error failure))
+                 (when on-retry (funcall on-retry retries failure))
+                 (when (pause (min (* poll-ms (expt 2 (min retries 8))) +backoff-max-ms+) stop)
+                   (return (follower-head follower))))
+                (t
+                 (setf retries 0)
+                 (when (or (reached-to-p)
+                           (and since
+                                (or once (and seconds (>= (- (clempo.io:now-ms) since) (* seconds 1000))))))
+                   (return (follower-head follower)))
+                 (when (pause poll-ms stop)
+                   (return (follower-head follower))))))))))

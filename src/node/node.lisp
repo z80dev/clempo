@@ -17,7 +17,8 @@
 (in-package #:clempo.node)
 
 (defvar *node-backend* nil "Live backend bound in the node's socket REPL.")
-(define-constant +recent-count+ 256)
+(define-constant +default-recent-blocks+ 1024)
+(define-constant +max-recent-blocks+ 65536)
 (define-constant +history-flush-blocks+ 100000)
 
 ;;; Metrics (Prometheus, on --metrics-address).
@@ -48,12 +49,15 @@
 ;;; The backend.
 
 (defstruct recent-block
-  number raw receipts receipts-known-p transaction-hashes)
+  number hash raw receipts receipts-known-p transaction-hashes)
 
 (defclass node-backend (backend:archive-backend)
   ((store :initarg :store :reader node-store)
    (chain :initarg :chain :reader node-chain)
-   (recent :initform (make-array +recent-count+ :initial-element nil) :reader node-recent)
+   (recent :initarg :recent :initform (make-recent-ring +default-recent-blocks+) :reader node-recent)
+   ;; Hash lookups into the ring: block hash -> number, transaction hash -> (number . index).
+   (recent-blocks :initform (make-hash-table :test 'equalp :synchronized t) :reader node-recent-blocks)
+   (recent-txs :initform (make-hash-table :test 'equalp :synchronized t) :reader node-recent-txs)
    (server :initform nil :accessor node-server)
    (history-writer :initform nil :accessor node-history-writer)
    (pool :initarg :pool :reader node-pool)
@@ -313,13 +317,20 @@ after this either sees the merger idle and starts another or is picked up by thi
 
 (defun node-db (node) (store:store-db (node-store node)))
 
+(defun make-recent-ring (count)
+  (unless (typep count `(integer 1 ,+max-recent-blocks+))
+    (error "--recent takes 1..~D blocks, not ~A" +max-recent-blocks+ count))
+  (make-array count :initial-element nil))
+
 (defun recent-block (node number)
-  (let ((entry (svref (node-recent node) (mod number +recent-count+))))
+  (let* ((ring (node-recent node))
+         (entry (svref ring (mod number (length ring)))))
     (when (and entry (= number (recent-block-number entry))) entry)))
 
 (defun recent-entry (block receipts &optional (known t))
   (make-recent-block
    :number (headers:header-number (blocks:block-header block))
+   :hash (blocks:block-hash block)
    :raw (or (blocks:block-raw block) (blocks:encode-block block))
    :receipts-known-p known
    :receipts (mapcar #'clempo.receipts:encode-receipt receipts)
@@ -327,7 +338,32 @@ after this either sees the merger idle and starts another or is picked up by thi
                                (blocks:block-transactions block))))
 
 (defun note-recent (node entry)
-  (setf (svref (node-recent node) (mod (recent-block-number entry) +recent-count+)) entry))
+  "Put ENTRY in its ring slot, replacing the block that held it in the hash lookups too."
+  (let* ((ring (node-recent node))
+         (slot (mod (recent-block-number entry) (length ring)))
+         (old (svref ring slot))
+         (blocks (node-recent-blocks node))
+         (txs (node-recent-txs node)))
+    (when old
+      (let ((n (recent-block-number old)))
+        (when (eql n (gethash (recent-block-hash old) blocks)) (remhash (recent-block-hash old) blocks))
+        (dolist (h (recent-block-transaction-hashes old))
+          (when (eql n (car (gethash h txs))) (remhash h txs)))))
+    (setf (svref ring slot) entry)
+    (let ((n (recent-block-number entry)))
+      (setf (gethash (recent-block-hash entry) blocks) n)
+      (loop for h in (recent-block-transaction-hashes entry) for j from 0
+            do (setf (gethash h txs) (cons n j))))))
+
+(defun recent-number (node hash)
+  "The number of the block HASH names when the ring or the store's recent hashes hold it."
+  (let ((n (gethash hash (node-recent-blocks node))))
+    (if (and n (recent-block node n))
+        n
+        (let* ((db (node-db node)) (head (store:db-number db)))
+          (loop for n downfrom head to (max 0 (- head 255))
+                for h = (store:db-block-hash db n)
+                when (and h (octets= h hash)) return n)))))
 
 (defmethod backend:backend-head ((node node-backend))
   (store:db-number (node-db node)))
@@ -343,18 +379,15 @@ after this either sees the merger idle and starts another or is picked up by thi
         (call-next-method))))
 
 (defmethod backend:backend-block-number ((node node-backend) hash)
-  (let* ((db (node-db node)) (head (store:db-number db)))
-    (or (loop for n downfrom head to (max 0 (- head (1- +recent-count+)))
-              for h = (store:db-block-hash db n)
-              when (and h (octets= h hash)) return n)
-        (gethash hash (node-followed-blocks node))
-        (segment-block-number node hash)
-        (call-next-method))))
+  (or (recent-number node hash)
+      (gethash hash (node-followed-blocks node))
+      (segment-block-number node hash)
+      (call-next-method)))
 
 (defmethod backend:backend-tx-location ((node node-backend) hash)
-  (loop for entry across (node-recent node)
-        for index = (and entry (position hash (recent-block-transaction-hashes entry) :test #'octets=))
-        when index do (return-from backend:backend-tx-location (values (recent-block-number entry) index)))
+  (let ((location (gethash hash (node-recent-txs node))))
+    (when location
+      (return-from backend:backend-tx-location (values (car location) (cdr location)))))
   (let ((value (gethash hash (node-followed-txs node))))
     (when value
       (return-from backend:backend-tx-location (values (ash value -20) (ldb (byte 20 0) value)))))
@@ -657,22 +690,26 @@ mode 600). The file holds the key as 64 hex digits, encoded and decoded in const
 (defun eth-source (node)
   (lambda (kind key)
     (ecase kind
-      (:number (let* ((db (node-db node)) (head (store:db-number db)))
-                 (loop for n downfrom head to (max 0 (- head (1- +recent-count+)))
-                       for h = (store:db-block-hash db n)
-                       when (and h (octets= h key)) return n)))
+      (:number (recent-number node key))
       (:block (and (<= key (store:db-number (node-db node))) (local-block-raw node key)))
       (:receipts (let ((entry (recent-block node key)))
                    (if (and entry (recent-block-receipts-known-p entry))
                        (values (recent-block-receipts entry) t)
                        (values nil nil)))))))
 
+(defun recent-earliest (node head)
+  "The lowest block from which the ring holds every block through HEAD."
+  (loop for n downfrom head to (max 0 (- head (1- (length (node-recent node)))))
+        while (recent-block node n)
+        minimize n into lowest
+        finally (return (or lowest head))))
+
 (defun eth-status (node)
   (lambda ()
     (let* ((db (node-db node)) (head (store:db-number db))
            (block (blocks:decode-block (local-block-raw node head))))
       (values (if (archive:chunk-present-p 0 (node-archive-dir node))
-                  0 (max 0 (- head (1- +recent-count+))))
+                  0 (recent-earliest node head))
               head (store:db-hash db)
               (headers:ethereum-header-timestamp (headers:header-inner (blocks:block-header block)))))))
 
@@ -734,23 +771,34 @@ mode 600). The file holds the key as 64 hex digits, encoded and decoded in const
     (unless colon (error "Expected HOST:PORT, got ~A" text))
     (values (subseq text 0 colon) (parse-integer text :start (1+ colon)))))
 
+(defun write-summary (path report)
+  "Write the JSON run REPORT to PATH (replaced atomically, mode 600)."
+  (clempo.io:write-file-atomically
+   path (string->octets (format nil "~A~%" (json:to-json-string report)))))
+
 (defun run-node (datadir &key (chain :mainnet) upstream archive-dir
                            index-dir receipts-dir history-dir finalization-dir
                            (rpc-port 8545) (bind "127.0.0.1")
                            (certify t) certify-from cert-rpc
                            repl-port repl-token-file (checkpoint-interval 0)
-                           (batch-size 32) (root-workers 4) block-source once seconds
+                           (batch-size 32) (root-workers 4) block-source once seconds to hold
+                           summary (recent +default-recent-blocks+)
                            metrics-address p2p-listen (jit t) (forward t) (poll-seconds 0.25)
                            (sync "ms:1000"))
   "Open DATADIR (initialized with CHAIN's genesis when empty), follow the chain with
 execution and, unless CERTIFY is NIL, finalization certificates, and serve committed state.
 Caches (hash index, receipts, history, finalizations) live under DATADIR unless a directory
 is given. BLOCK-SOURCE optionally provides raw blocks instead of fetching them from UPSTREAM;
-UPSTREAM still supplies canonical header commitments. Returns a JSON report after ONCE,
-SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
+UPSTREAM still supplies canonical header commitments. RECENT blocks are held in memory with
+their receipts. Returns a JSON report after ONCE, SECONDS, block TO or a stop request
+(SIGTERM, SIGINT); with HOLD, JSON-RPC keeps serving after ONCE, SECONDS or TO until a stop
+request. Upstream failures are retried. SUMMARY names a file the report is written to once
+the node has shut down, with \"failed\" set when following failed."
   (check-type rpc-port (unsigned-byte 16))
   (check-type root-workers (integer 1 16))
+  (check-type to (or null (integer 0 *)))
   (when (and once seconds) (error "Choose --once or --seconds"))
+  (when (and hold (not (or once seconds to))) (error "--hold needs --to, --once or --seconds"))
   (unless (eq (null repl-port) (null repl-token-file))
     (error "--repl-port and --repl-token-file must be supplied together"))
   (setf *stop-requested* nil)
@@ -761,6 +809,8 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
          (archive-dir (namestring (uiop:ensure-directory-pathname
                                    (or archive-dir (archive:archive-dir name)))))
          (repl-token (when repl-token-file (token-file-secret repl-token-file)))
+         (ring (make-recent-ring recent))
+         (began (clempo.io:monotonic-ticks))
          (executor:*chain* chain))
     (reject-healed-datadir dir)
     (let* ((datastore (trie:call-with-trie-hashing
@@ -770,7 +820,8 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
                                                   (log-node "node: empty datadir; loading the ~A genesis" name)
                                                   (executor:load-genesis db :chain chain))))))
            (rpc-server nil) (repl-server nil) (metrics-server nil) (jit-worker nil)
-           (forwarder nil) (history-writer nil) (node-ref nil) (own-index (null index-dir)))
+           (forwarder nil) (history-writer nil) (node-ref nil) (own-index (null index-dir))
+           (report-of nil) (report nil) (failure nil))
       (unwind-protect
            (let* ((db (store:store-db datastore))
                   (head (validate-head db upstream))
@@ -780,7 +831,7 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
                                    (seed-hash-index own archive-dir (follow:head-number head))
                                    own)))
                   (node (backend:make-archive-backend
-                         :class 'node-backend :store datastore :chain chain :pool pool
+                         :class 'node-backend :store datastore :chain chain :pool pool :recent ring
                          :head (follow:head-number head) :archive-dir archive-dir :upstream upstream
                          :index-dir index-dir
                          :receipts-dir (or receipts-dir (datadir-subdir dir "receipts"))
@@ -827,72 +878,96 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
                                       :configure (lambda (fn)
                                                    (let ((*node-backend* node)) (funcall fn)))))
                (log-node "node: Lisp REPL on 127.0.0.1:~D (token required)" (repl:repl-port repl-server)))
-             (let* ((last (call-with-p2p-listener
-                           node p2p-listen dir chain
-                           (lambda ()
-                             (call-with-stop-signals
-                           (lambda ()
-                             (follow-with-root-workers
-                              root-workers follower :once once :seconds seconds :poll-seconds poll-seconds
-                              :stop (lambda () *stop-requested*)
-                              :on-retry
-                              (lambda (attempt condition)
-                                (metrics:metric-inc *m-retries*)
-                                (setf (getf (node-status node) :retries) (1+ (getf (node-status node) :retries))
-                                      (getf (node-status node) :last-error) (princ-to-string condition))
-                                (log-node "node: retry ~D: ~A" attempt condition))
-                              :on-target
-                              (lambda (follow remote)
-                                (declare (ignore follow))
-                                (setf (getf (node-status node) :tip) (follow:head-number remote))
-                                (metrics:metric-set *m-tip* (follow:head-number remote)))
-                              :on-poll
-                              (lambda (follow remote)
-                                (let* ((local (follow:follower-head follow))
-                                       (height (follow:head-number local))
-                                       (tip (follow:head-number remote))
-                                       (lag (- tip height))
-                                       (now (clempo.io:monotonic-ticks)))
-                                  (setf (getf (node-status node) :tip) tip)
-                                  (metrics:metric-set *m-tip* tip)
-                                  (metrics:metric-set *m-lag* (max 0 lag))
-                                  (metrics:metric-set *m-certified* (follow:follower-certified follow))
-                                  (when certifier
-                                    (metrics:metric-set *m-uncertified* (certs:certifier-uncertified certifier)))
-                                  (metrics:metric-set *m-accounts* (store:db-account-count (node-db node)))
-                                  (when (and (not started) (<= lag 0))
-                                    (setf started now live-base height))
-                                  (when started (setf max-lag (max max-lag lag)))
-                                  (when (>= now next-report)
-                                    (log-node "node: head ~D lag ~D, executed ~D, certified ~D"
-                                              height lag (follow:follower-blocks follow)
-                                              (follow:follower-certified follow))
-                                    (setf next-report (+ now (* 30 internal-time-units-per-second))))))))))))
-                    (elapsed (if started (/ (- (clempo.io:monotonic-ticks) started)
-                                             internal-time-units-per-second) 0)))
-               (json:jobject "chain" name "anchor" initial-number "head" (follow:head-number last)
-                             "hash" (octets->hex (follow:head-hash last) :prefix t)
-                             "stateRoot" (octets->hex (follow:head-state-root last) :prefix t)
-                             "executed" (follow:follower-blocks follower)
-                             "certified" (follow:follower-certified follower)
-                             "uncertified" (if certifier (certs:certifier-uncertified certifier) 0)
-                             "archivedChunks" (follow:follower-chunks follower)
-                             "stopped" (if *stop-requested* :true :false)
-                             "liveSeconds" (floor elapsed)
-                             "liveBlocks" (if live-base (- (follow:head-number last) live-base) 0)
-                             "maxLagAfterCatchup" max-lag)))
+             (setf report-of
+                   (lambda (failure)
+                     (let ((last (follow:follower-head follower))
+                           (tip (getf (node-status node) :tip))
+                           (elapsed (if started (/ (- (clempo.io:monotonic-ticks) started)
+                                                   internal-time-units-per-second)
+                                        0)))
+                       (apply #'json:jobject
+                              "chain" name "anchor" initial-number "head" (follow:head-number last)
+                              "hash" (octets->hex (follow:head-hash last) :prefix t)
+                              "stateRoot" (octets->hex (follow:head-state-root last) :prefix t)
+                              "tip" (or tip :null) "to" (or to :null)
+                              "executed" (follow:follower-blocks follower)
+                              "transactions" (follow:follower-transactions follower)
+                              "certified" (follow:follower-certified follower)
+                              "uncertified" (if certifier (certs:certifier-uncertified certifier) 0)
+                              "archivedChunks" (follow:follower-chunks follower)
+                              "stopped" (if *stop-requested* :true :false)
+                              "seconds" (/ (- (clempo.io:monotonic-ticks) began)
+                                           (float internal-time-units-per-second 1d0))
+                              "liveSeconds" (floor elapsed)
+                              "liveBlocks" (if live-base (- (follow:head-number last) live-base) 0)
+                              "maxLagAfterCatchup" max-lag
+                              (when failure (list "failed" (princ-to-string failure)))))))
+             (handler-bind ((error (lambda (c) (unless failure (setf failure c)))))
+               (call-with-p2p-listener
+                node p2p-listen dir chain
+                (lambda ()
+                  (call-with-stop-signals
+                   (lambda ()
+                     (follow-with-root-workers
+                      root-workers follower :once once :seconds seconds :to to :poll-seconds poll-seconds
+                      :stop (lambda () *stop-requested*)
+                      :on-retry
+                      (lambda (attempt condition)
+                        (metrics:metric-inc *m-retries*)
+                        (setf (getf (node-status node) :retries) (1+ (getf (node-status node) :retries))
+                              (getf (node-status node) :last-error) (princ-to-string condition))
+                        (log-node "node: retry ~D: ~A" attempt condition))
+                      :on-target
+                      (lambda (follow remote)
+                        (declare (ignore follow))
+                        (setf (getf (node-status node) :tip) (follow:head-number remote))
+                        (metrics:metric-set *m-tip* (follow:head-number remote)))
+                      :on-poll
+                      (lambda (follow remote)
+                        (let* ((local (follow:follower-head follow))
+                               (height (follow:head-number local))
+                               (tip (follow:head-number remote))
+                               (lag (- tip height))
+                               (now (clempo.io:monotonic-ticks)))
+                          (setf (getf (node-status node) :tip) tip)
+                          (metrics:metric-set *m-tip* tip)
+                          (metrics:metric-set *m-lag* (max 0 lag))
+                          (metrics:metric-set *m-certified* (follow:follower-certified follow))
+                          (when certifier
+                            (metrics:metric-set *m-uncertified* (certs:certifier-uncertified certifier)))
+                          (metrics:metric-set *m-accounts* (store:db-account-count (node-db node)))
+                          (when (and (not started) (<= lag 0))
+                            (setf started now live-base height))
+                          (when started (setf max-lag (max max-lag lag)))
+                          (when (>= now next-report)
+                            (log-node "node: head ~D lag ~D, executed ~D, certified ~D"
+                                      height lag (follow:follower-blocks follow)
+                                      (follow:follower-certified follow))
+                            (setf next-report (+ now (* 30 internal-time-units-per-second)))))))
+                     (when (and hold (not *stop-requested*))
+                       (log-node "node: stopped following at ~D; serving JSON-RPC until SIGINT or SIGTERM"
+                                 (follow:head-number (follow:follower-head follower)))
+                       (loop until *stop-requested* do (sleep 0.05))))))))
+             (setf report (funcall report-of nil)))
         ;; Shutdown, in order: sessions that read the store, then the threads that feed or
-        ;; serve it, then the history and the store itself.
-        (shutdown-steps
-         (lambda () (when repl-server (repl:stop-repl repl-server)))
-         (lambda () (when rpc-server (server:stop-server rpc-server)))
-         (lambda () (when metrics-server (metrics:stop-metrics-server metrics-server)))
-         (lambda () (when forwarder (stop-forwarder forwarder)))
-         (lambda () (when (and node-ref (node-hash-log node-ref)) (close-hash-log node-ref)))
-         (lambda () (when jit-worker (stop-jit-worker jit-worker)))
-         (lambda () (when history-writer
-                      (history:history-flush history-writer :db (store:store-db datastore))))
-         (lambda () (store:close-store datastore)))))))
+        ;; serve it, then the history and the store itself. The summary follows it.
+        (unwind-protect
+             (shutdown-steps
+              (lambda () (when repl-server (repl:stop-repl repl-server)))
+              (lambda () (when rpc-server (server:stop-server rpc-server)))
+              (lambda () (when metrics-server (metrics:stop-metrics-server metrics-server)))
+              (lambda () (when forwarder (stop-forwarder forwarder)))
+              (lambda () (when (and node-ref (node-hash-log node-ref)) (close-hash-log node-ref)))
+              (lambda () (when jit-worker (stop-jit-worker jit-worker)))
+              (lambda () (when history-writer
+                           (history:history-flush history-writer :db (store:store-db datastore))))
+              (lambda () (store:close-store datastore)))
+          (when (and summary report-of)
+            (handler-case (write-summary summary (or report (funcall report-of failure)))
+              (error (c)
+                (log-node "node: writing the summary ~A failed: ~A" summary c)
+                (unless failure (error c)))))))
+      report)))
 
 (defun shutdown-steps (&rest steps)
   "Run every step even when an earlier one fails; then signal the first failure."
@@ -926,11 +1001,15 @@ SECONDS or a stop request (SIGTERM, SIGINT); upstream failures are retried."
               [--finalization-dir DIR] [--source rpc|devp2p] [--peers FILE]~%
               [--rpc-port N] [--bind IP] [--metrics-address HOST:PORT] [--p2p-listen HOST:PORT]~%
               [--no-certify] [--certify-from N] [--cert-rpc URL] [--no-jit] [--no-forward]~%
-              [--repl-port N --repl-token-file FILE] [--once | --seconds N]~%
+              [--repl-port N --repl-token-file FILE] [--once | --seconds N] [--to N] [--hold]~%
+              [--summary FILE] [--recent N]~%
               [--batch N] [--checkpoint-interval N] [--root-workers N] [--sync block|group:N|ms:T]~%
        clempo keys ...        (clempo keys --help)~%
 An empty datadir starts at the chain's genesis. Caches live under the datadir unless a~%
-directory flag shares one. SIGTERM or SIGINT stops cleanly.~%"))
+directory flag shares one. --to N stops after block N; --hold keeps serving JSON-RPC after~%
+--to, --once or --seconds. --summary writes the JSON run report to FILE on exit. --recent~%
+keeps the last N blocks (default ~D) with receipts in memory. SIGTERM or SIGINT stops~%
+cleanly.~%" +default-recent-blocks+))
 
 (defun node-options (words)
   (loop with options = nil
@@ -942,6 +1021,7 @@ directory flag shares one. SIGTERM or SIGINT stops cleanly.~%"))
                  ((string= flag "--no-jit") (setf (getf options :jit) nil))
                  ((string= flag "--no-forward") (setf (getf options :forward) nil))
                  ((string= flag "--once") (setf (getf options :once) t))
+                 ((string= flag "--hold") (setf (getf options :hold) t))
                  (t (let* ((entry (assoc flag '(("--datadir" :datadir) ("--chain" :chain)
                                                   ("--upstream" :upstream)
                                                   ("--source" :source) ("--peers" :peers)
@@ -955,6 +1035,8 @@ directory flag shares one. SIGTERM or SIGINT stops cleanly.~%"))
                                                   ("--metrics-address" :metrics-address) ("--p2p-listen" :p2p-listen)
                                                   ("--repl-port" :repl-port t) ("--repl-token-file" :repl-token-file)
                                                   ("--seconds" :seconds t) ("--batch" :batch-size t)
+                                                  ("--to" :to t) ("--summary" :summary)
+                                                  ("--recent" :recent t)
                                                   ("--root-workers" :root-workers t)
                                                   ("--checkpoint-interval" :checkpoint-interval t)
                                                   ("--sync" :sync))

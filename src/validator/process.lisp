@@ -146,6 +146,27 @@ before it enters its epoch. CLOSE-VALIDATOR-APP closes the datadir."
   ("clempo_validator_dkg_dealt_total" :counter "DKG dealings sent." validator-app-dealings-sent)
   ("clempo_validator_dkg_acks_total" :counter "DKG acks sent." validator-app-acks-sent))
 
+;;; clempo_validatorStatus: the event loop's view (goempo_validatorStatus's fields plus the
+;;; head), replaced whole when the metrics refresh, so JSON-RPC threads never read the app.
+
+(defun validator-status (app)
+  (json:jobject "head" (head-number app) "epoch" (epoch app)
+                "member" (json:jbool (validator-app-signing app)) "peers" (validator-peer-count app)
+                "proposed" (validator-app-proposed app) "committed" (validator-app-committed app)
+                "epochs" (validator-app-epochs app) "dealt" (validator-app-dealings-sent app)
+                "acks" (validator-app-acks-sent app)))
+
+(defun publish-status (app)
+  "Refresh the metrics and the status clempo_validatorStatus serves."
+  (publish-metrics app)
+  (setf (backend-validator-status (validator-app-backend app)) (validator-status app)))
+
+(clempo.rpc:defrpc "clempo_validatorStatus" () "the validator's epoch, membership, peers and counters"
+  (let ((backend clempo.rpc.chain:*backend*))
+    (if (typep backend 'validator-backend)
+        (or (backend-validator-status backend) :null)
+        (clempo.rpc:rpc-fail -32601 "the method clempo_validatorStatus does not exist/is not available"))))
+
 (defun run-validator (&key chain datadir seed share (listen-host "127.0.0.1") (listen-port 8000)
                            (fee-recipient 0) http-host http-port metrics-host metrics-port
                            network-options timeouts
@@ -172,7 +193,7 @@ REPORTER receives each JSON event."
                                   until (or *stop-requested* (and deadline (>= (io:now-ms) deadline)))
                                   do (step-validator app)
                                      (when (>= (io:now-ms) publish-at)
-                                       (publish-metrics app)
+                                       (publish-status app)
                                        (setf publish-at (+ (io:now-ms) 1000))))
                             (funcall reporter (json:jobject "event" "stopped" "head" (head-number app)))
                             (head-number app))

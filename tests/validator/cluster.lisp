@@ -142,7 +142,37 @@ is released."
               (clempo.metrics:metric-value (clempo.metrics:define-metric "clempo_validator_head" :gauge ""))))
        (is (= 1 (clempo.metrics:metric-value (clempo.metrics:define-metric "clempo_validator_member" :gauge ""))))
        (is (plusp (clempo.metrics:metric-value
-                   (clempo.metrics:define-metric "clempo_validator_proposed_total" :counter ""))))))))
+                   (clempo.metrics:define-metric "clempo_validator_proposed_total" :counter ""))))
+       ;; and clempo_validatorStatus serves the event loop's last published view: null
+       ;; until it publishes, then the same counters.
+       (let ((app (node-app n3)))
+         (flet ((status ()
+                  (let ((clempo.rpc.chain:*backend* (net::validator-app-backend app)))
+                    (json:jget (json:parse-json
+                                (nth-value 1 (clempo.rpc:handle-body
+                                              "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"clempo_validatorStatus\",\"params\":[]}")))
+                               "result"))))
+           (is (eq :null (status)))
+           (net::publish-status app)
+           (let ((s (status)))
+             (is= (node-head n3) (json:jget s "head"))
+             (is= (net::epoch app) (json:jget s "epoch"))
+             (is (eq :true (json:jget s "member")))
+             (is= (net::validator-app-proposed app) (json:jget s "proposed"))
+             (is (plusp (json:jget s "proposed")))
+             (is= (net::validator-app-committed app) (json:jget s "committed"))
+             (is= (net::validator-app-epochs app) (json:jget s "epochs"))
+             (is (plusp (json:jget s "epochs")))
+             (is= (net::validator-app-dealings-sent app) (json:jget s "dealt"))
+             (is= (net::validator-app-acks-sent app) (json:jget s "acks"))
+             (is= (net::validator-peer-count app) (json:jget s "peers")))))))))
+
+(deftest validator-status-needs-a-validator ()
+  (let ((clempo.rpc.chain:*backend* nil))
+    (is= -32601 (json:jget* (json:parse-json
+                             (nth-value 1 (clempo.rpc:handle-body
+                                           "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"clempo_validatorStatus\",\"params\":[]}")))
+                            "error" "code"))))
 
 (deftest validator-command-flags ()
   ;; `clempo validator` takes Tempo's flag names.
