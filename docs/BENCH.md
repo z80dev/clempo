@@ -1117,11 +1117,17 @@ medians of 2 rounds, calls per second:
 - With four states, calls scale 3.2–4.9x at 4 and 16 clients; the old cursor stays flat.
 - At one client the pool is also faster (1.5–1.8x) because consecutive calls land on the
   idle state nearest their block instead of moving the single cursor back and forth.
-- No errors on either side. In the answer diff, 32/32 answers were identical for three
-  methods. `debug_stateRootWithUpdates` differed on 4 of 32 during the diff pass.
-  Re-asked afterwards, the 3 recorded examples were identical on both servers and stable.
-  Its input here is not one the reference accepts (`nonce` as a string), and the cause of
-  the transient difference was not found.
+- No errors on either side, and every answer was identical. The diff pass first reported 4
+  of 32 `debug_stateRootWithUpdates` answers as different, but the recorded answers of both
+  servers are byte-identical. The comparison was wrong: `json-equal` assumed unique object
+  keys, but TrieUpdates path keys are packed nibbles with an odd one padded (`nibbles-hex`,
+  after reth), so the paths (c) and (c 0) are both `"c0"`. Each `"c0"` member was compared
+  with the other's first one. It now matches repeated keys as a
+  multiset (test `json-equal-matches-repeated-keys-as-a-multiset`). The old `json-equal`
+  gives NIL on all 3 recorded pairs, and the new one gives T. Replaying the 128-call corpus
+  in the diff order, then its 32 `debug_stateRootWithUpdates` calls 4 more times with an
+  `debug_intermediateRoots` call at another block between each, gave one answer per request
+  on the old and new code, in check and release builds, and the same answers on both.
 
 **What the pool does not fix: far-jumping calls.** The recorded rpcdiff cases jump across
 blocks 0..50M. Each costs a move of the state across the blocks in between: up to 93 s for

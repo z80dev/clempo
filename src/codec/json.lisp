@@ -499,13 +499,20 @@ object or MEMBERS ran out of room."
 (defun to-json-octets (v) (string->octets (to-json-string v)))
 
 (defun json-equal (a b)
-  "Structural equality; object key order is ignored."
+  "Structural equality; object member order is ignored. An object may repeat a key
+\(debug_stateRootWithUpdates writes the nibble paths (c) and (c 0) both as \"c0\"): its
+members match as a multiset, each member of A taking a distinct member of B with that key
+and an equal value."
   (cond ((jobject-p a)
          (and (jobject-p b)
               (= (length (cdr a)) (length (cdr b)))
-              (loop for (k . v) in (cdr a)
-                    always (let ((cell (assoc k (cdr b) :test #'string=)))
-                             (and cell (json-equal v (cdr cell)))))))
+              (let ((unmatched (copy-list (cdr b))))
+                (loop for (k . v) in (cdr a)
+                      always (let ((cell (find-if (lambda (m) (and (string= k (car m)) (json-equal v (cdr m))))
+                                                  unmatched)))
+                               (when cell
+                                 (setf unmatched (delete cell unmatched :count 1 :test #'eq))
+                                 t))))))
         ((and (vectorp a) (not (stringp a)))
          (and (vectorp b) (not (stringp b)) (= (length a) (length b))
               (every #'json-equal a b)))

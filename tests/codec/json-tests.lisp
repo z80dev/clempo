@@ -19,6 +19,17 @@
   (is (json-equal (parse-json "{\"a\":1,\"b\":[]}") (parse-json "{\"b\":[],\"a\":1}")))
   (is (not (json-equal (parse-json "[]") (parse-json "{}")))))
 
+(deftest json-equal-matches-repeated-keys-as-a-multiset ()
+  ;; debug_stateRootWithUpdates writes the nibble paths (c) and (c 0) both as "c0"; rpc-load
+  ;; once judged two identical such answers different (each "c0" of one compared with the
+  ;; first "c0" of the other)
+  (let ((one (parse-json "{\"c0\":{\"state_mask\":1},\"c0\":{\"state_mask\":2},\"d\":3}"))
+        (swapped (parse-json "{\"d\":3,\"c0\":{\"state_mask\":2},\"c0\":{\"state_mask\":1}}")))
+    (is (json-equal one (parse-json (to-json-string one))))
+    (is (json-equal one swapped))
+    (is (not (json-equal one (parse-json "{\"c0\":{\"state_mask\":1},\"c0\":{\"state_mask\":1},\"d\":3}"))))
+    (is (not (json-equal (parse-json "{\"c0\":1,\"c0\":1}") (parse-json "{\"c0\":1,\"e\":1}"))))))
+
 (deftest json-rejects-garbage ()
   (signals json-error (parse-json "{\"a\":1,}"))
   (signals json-error (parse-json "[1 2]"))
