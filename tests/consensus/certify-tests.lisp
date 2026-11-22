@@ -94,3 +94,18 @@
       (let ((v (make-finalization-verifier :network-identity +mainnet-network-identity+
                                            :network-from-epoch +mainnet-network-from-epoch+)))
         (signals certificate-error (certify-blocks v (list (block-row b1949 c1949))))))))
+
+(deftest network-identity-outranks-registered-epochs ()
+  ;; A scheme registered from block data for an epoch the trusted network identity covers
+  ;; never replaces it; epochs before the identity's start still use their registrations.
+  (let ((v (make-finalization-verifier :network-identity +mainnet-network-identity+
+                                       :network-from-epoch +mainnet-network-from-epoch+))
+        (foreign (clempo.dkg:outcome-network-identity
+                  (clempo.dkg:decode-onchain-dkg-outcome (boundary-extra 44085599)))))
+    (is (not (octets= foreign +mainnet-network-identity+)))
+    (verifier-register-epoch v +mainnet-network-from-epoch+ foreign)
+    (verifier-register-epoch v (1- +mainnet-network-from-epoch+) foreign)
+    (is-equalp +mainnet-network-identity+
+               (scheme-identity (verifier-identity-for v +mainnet-network-from-epoch+)))
+    (is-equalp foreign (scheme-identity (verifier-identity-for v (1- +mainnet-network-from-epoch+))))
+    (signals certificate-error (verifier-identity-for v (- +mainnet-network-from-epoch+ 2)))))

@@ -132,3 +132,40 @@
     (is-equalp (keccak256 a) (keccak-digest k scratch))
     (keccak-update k b)
     (is-equalp (keccak256 (octets-concat a b)) (keccak-digest k scratch))))
+
+#+arm64
+(deftest keccak-many-buffers-under-forced-gcs ()
+  ;; Every native entry (fixed 32 and 64 bytes, and the permutation behind longer inputs),
+  ;; fed fresh young vectors at odd offsets on four threads while the main thread forces
+  ;; nursery and full collections; each digest is checked against the portable code's.
+  (when clempo.keccak-arm64:**native**
+    (let* ((state (sb-ext:seed-random-state 17))
+           (inputs (coerce (loop repeat 64
+                                 collect (let ((data (make-octets (nth (random 4 state) '(32 64 135 1200)))))
+                                           (dotimes (j (length data)) (setf (aref data j) (random 256 state)))
+                                           (cons data (with-portable-keccak (keccak256 data)))))
+                           'simple-vector))
+           (stop nil) (hashed (list 0)) (mismatches (list 0))
+           (workers
+             (loop for w below 4 collect
+               (let ((w w))
+                 (sb-thread:make-thread
+                  (lambda ()
+                    (let ((state (sb-ext:seed-random-state (+ 100 w))))
+                      (loop until stop
+                            do (destructuring-bind (data . want) (svref inputs (random 64 state))
+                                 (let* ((offset (1+ (random 15 state)))
+                                        (copy (make-octets (+ offset (length data) 3))))
+                                   (replace copy data :start1 offset)
+                                   (unless (and (octets= want (keccak256 copy :start offset :end (+ offset (length data))))
+                                                (let ((out (make-octets 37)))
+                                                  (keccak256-into copy offset (+ offset (length data)) out 5)
+                                                  (octets= want (subseq out 5 37))))
+                                     (sb-ext:atomic-incf (car mismatches)))
+                                   (sb-ext:atomic-incf (car hashed)))))))
+                  :name "keccak gc stress")))))
+      (unwind-protect (dotimes (i 60) (sb-ext:gc :full (zerop (mod i 10))))
+        (setf stop t)
+        (mapc #'sb-thread:join-thread workers))
+      (is (> (car hashed) 1000) "~D digests" (car hashed))
+      (is= 0 (car mismatches)))))

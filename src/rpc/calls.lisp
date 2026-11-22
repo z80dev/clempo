@@ -1297,19 +1297,6 @@ its leaves), as reth's hashed post-state addresses them."
     (trie:trie-root view)
     view))
 
-(defun address-preimages (db hashes)
-  "keccak(address) -> address for the accounts of DB whose hashed address is among HASHES
-\(an EQUALP set). Only an account whose kept storage changes needs its address: clempo
-keeps storage tries by address."
-  (let ((found (make-hash-table :test 'equalp)))
-    (when (plusp (hash-table-count hashes))
-      (store:map-accounts (lambda (address account)
-                            (declare (ignore account))
-                            (let ((h (clempo.keccak:keccak256 (integer->octets address 20))))
-                              (when (gethash h hashes) (setf (gethash h found) address))))
-                          db))
-    found))
-
 (defun trie-updates-json (nodes removed)
   (values (cons :object
                 (loop for (path state tree hash hashes) in (sort (copy-list nodes) #'string<
@@ -1357,9 +1344,11 @@ keccak) applied to the state database DB; the new state root and reth's trie upd
 its walker over the stored trie would rebuild them (clempo.rpc.tries:trie-updates).
 Everything happens on snapshots of the block's tries addressed by the hashed keys
 themselves, so new accounts and slots need no preimage; an existing account's kept storage
-trie is found by its address. As in reth, a storage change of an account that exists
-neither in the state nor in INPUT's accounts adds no leaf, and a destroyed account (null in
-INPUT's accounts) reports every stored node of its storage trie removed."
+trie is opened by its hashed address (store:db-hashed-storage-trie: a preimage index kept by
+an in-RAM database, the account leaf's storage root in a backed one). As in reth, a storage
+change of an account that exists neither in the state nor in INPUT's accounts adds no leaf,
+and a destroyed account (null in INPUT's accounts) reports every stored node of its storage
+trie removed."
   (progn
     (let* ((accounts (mapcar (lambda (e) (cons (hex->octets (car e)) (cdr e))) (cdr (getf input :accounts))))
            (storages (mapcar (lambda (e) (cons (hex->octets (car e)) (cdr e))) (cdr (getf input :storages))))
@@ -1369,15 +1358,13 @@ INPUT's accounts) reports every stored node of its storage trie removed."
                        (loop for (h) in (append storages accounts)
                              when (trie:trie-get pre h) do (setf (gethash h set) t))
                        set))
-           (addresses (address-preimages db existing))
            (storage-tries (make-hash-table :test 'equalp)) ; h -> (pre post slot-changes)
            (roots (make-hash-table :test 'equalp)))
       (labels ((stored (h)
                  "A hashed view of the stored storage trie of the existing account H, or an empty trie."
                  (if (gethash h existing)
-                     (hashed-view (store:db-storage-trie
-                                   db (or (gethash h addresses)
-                                          (unreachable "account ~A is in the trie but not in the state" (hex32 h)))))
+                     (or (store:db-hashed-storage-trie db h)
+                         (unreachable "account ~A is in the trie but not in the state" (hex32 h)))
                      (trie:make-trie))))
        (loop for (h . storage) in storages
               for slots = (mapcar (lambda (e) (cons (hex->octets (car e)) (hex-or-integer (cdr e))))

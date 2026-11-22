@@ -16,3 +16,9 @@ error cases, one request per line with the reference's answer (the smaller answe
 `gaps` RPC corpus suite). Every request gives its gas, nonce, nonce key and fees, so the answers
 depend only on the chain id. Recorded on 2026-11-21 over HTTP from a Tempo `568b4fb425` mainnet
 archive node.
+
+`ws-blocks.jsonl`: mainnet blocks 3,462 and 3,463 (two transactions and three logs) as the
+reference's `debug_getRawBlock` and their receipts as its `debug_getRawReceipts`, one block per
+line. The websocket tests serve them (and renumbered copies of 3,462 as heads 2,000-3,999)
+without the block archive. Recorded on 2026-11-21 over HTTP from a Tempo `568b4fb425` mainnet
+archive node.

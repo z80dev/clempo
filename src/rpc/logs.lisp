@@ -300,6 +300,10 @@ cache-free path: exact percentiles, and no rows at all for empty percentiles."
 (defparameter *stale-filter-seconds* 300
   "reth DEFAULT_STALE_FILTER_TTL: a filter not polled for this long is removed.")
 
+(defparameter *filters-max* 4096
+  "Most installed filters at once, after stale ones are evicted; one more is refused
+(DEVIATIONS #13: reth bounds them by time only).")
+
 (defun evict-stale-filters (now)
   "Remove every filter whose last poll (or install) is *STALE-FILTER-SECONDS* old, as reth's
 clear_stale_filters does; called with *FILTERS-LOCK* held."
@@ -321,6 +325,8 @@ clear_stale_filters does; called with *FILTERS-LOCK* held."
         (now (clempo.io:now-ms)))
     (sb-thread:with-mutex (*filters-lock*)
       (evict-stale-filters now)
+      (when (>= (hash-table-count *filters*) *filters-max*)
+        (rpc-fail -32000 "too many installed filters"))
       (setf (gethash id *filters*)
             (make-installed :kind kind :filter filter :last-block chain:*head* :last-poll now)))
     id))

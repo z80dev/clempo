@@ -103,7 +103,6 @@
    ("COMPRESS" 4 "Varint and copy loops consume finite input lengths and matches.")
    ("DECOMPRESS" 1 "Consumes compressed tags up to the finite input length, checking the declared output bound."))
   ("src/rpc/defrpc.lisp"
-   ("VALUE-SPANS" 1 "Advances through values of a fixed JSON slice.")
    ("JSON-STRING-END" 1 "Advances one or two characters per step to the slice end.")
    ("LOOKUP-METHOD" 1 "Copies a name of at most 64 characters.")
    ("MEMBER-FIELDS" 2 "Walks the recorded member layout (at most +MEMBERS-MAX+ members) and the members before each.")

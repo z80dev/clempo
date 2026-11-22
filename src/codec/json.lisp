@@ -280,26 +280,32 @@ nest at most MAX-DEPTH deep (NIL: unbounded). Signals JSON-ERROR on any malforme
                          (setf value (cons :object (nreverse (cddr frame)))))
                         (t (jfail "expected , or } at ~D" pos)))))))))))))
 
-(defun json-valid-p (s &key (end (length s)) members)
+(defun json-valid-p (s &key (end (length s)) members elements (max-elements most-positive-fixnum))
   "Whether the simple string S[0,END) is one JSON text that PARSE-JSON (without a depth
-limit) accepts: the same grammar, read by the same steps, building no values.
+limit) accepts: the same grammar, read by the same steps, building no values. Each open
+container costs one bit, so time and memory are linear in END at any nesting.
 
 MEMBERS, a (simple-array fixnum (*)), receives the layout of a top-level object as it is
 checked: for each member its key's start (the opening quote), its key's end (after the
 closing quote) and its value's start (after the whitespace before it), three entries a
 member. The second value is the number of members recorded, or NIL when the text is not an
-object or MEMBERS ran out of room."
-  (declare #.*hot* (type simple-string s) (type fixnum end)
-           (type (or null (simple-array fixnum (*))) members))
+object or MEMBERS ran out of room.
+
+ELEMENTS, an adjustable fixnum vector with a fill pointer, receives the start and end of each
+element of a top-level array. Reading stops at element MAX-ELEMENTS + 1 of such an array:
+the values are then NIL and :TOO-MANY, however the rest of the text reads."
+  (declare #.*hot* (type simple-string s) (type fixnum end max-elements)
+           (type (or null (simple-array fixnum (*))) members)
+           (type (or null (and (vector fixnum) (not simple-array))) elements))
   ;; every read below is bounds-checked against END by hand
   (invariant (<= 0 end (length s)) "end ~D outside ~D characters" end (length s))
   (macrolet
       ((scan (type)
          `(let ((s s) (pos 0) (n end)
-                ;; open containers as bits, innermost lowest: 1 an object, 0 an array
-                (stack 0) (depth 0)
+                ;; open containers, outermost first: 1 an object, 0 an array
+                (stack (make-array 64 :element-type 'bit)) (depth 0)
                 (recorded (and members 0)) (want-value nil))
-            (declare (type ,type s) (type fixnum pos n depth) (type integer stack)
+            (declare (type ,type s) (type fixnum pos n depth) (type simple-bit-vector stack)
                      (type (or null fixnum) recorded))
             (macrolet ((fail () `(return-from json-valid-p nil)))
               (labels ((peek () (if (< pos n) (schar s pos) (fail)))
@@ -382,38 +388,50 @@ object or MEMBERS ran out of room."
                            (when (zerop (digits)) (fail)))))
                 (skip-ws)
                 (unless (and (< pos n) (char= (schar s pos) #\{)) (setf recorded nil))
-                (loop
-                  ;; a value, entering containers until one completes (T: a value completed)
-                  (skip-ws)
-                  (when want-value
-                    (setf (aref members (1- recorded)) pos want-value nil))
-                  (when (case (peek)
-                          (#\{ (incf pos) (skip-ws)
-                           (cond ((eql (peek) #\}) (incf pos) t)
-                                 (t (setf stack (logior (ash stack 1) 1)) (incf depth) (key) nil)))
-                          (#\[ (incf pos) (skip-ws)
-                           (cond ((eql (peek) #\]) (incf pos) t)
-                                 (t (setf stack (ash stack 1)) (incf depth) nil)))
-                          (#\" (str) t)
-                          (#\t (literal "true") t)
-                          (#\f (literal "false") t)
-                          (#\n (literal "null") t)
-                          (t (num) t))
-                    (loop
-                      (when (zerop depth)
+                (unless (and (< pos n) (char= (schar s pos) #\[)) (setf elements nil))
+                (flet ((open-container (bit)
+                         (when (= depth (length stack))
+                           (setf stack (replace (make-array (* 2 depth) :element-type 'bit) stack)))
+                         (setf (sbit stack depth) bit)
+                         (incf depth)))
+                  (loop
+                    ;; a value, entering containers until one completes (T: a value completed)
+                    (skip-ws)
+                    (when want-value
+                      (setf (aref members (1- recorded)) pos want-value nil))
+                    (when (and elements (= depth 1))
+                      (when (>= (ash (fill-pointer elements) -1) max-elements)
+                        (return-from json-valid-p (values nil :too-many)))
+                      (vector-push-extend pos elements))
+                    (when (case (peek)
+                            (#\{ (incf pos) (skip-ws)
+                             (cond ((eql (peek) #\}) (incf pos) t)
+                                   (t (open-container 1) (key) nil)))
+                            (#\[ (incf pos) (skip-ws)
+                             (cond ((eql (peek) #\]) (incf pos) t)
+                                   (t (open-container 0) nil)))
+                            (#\" (str) t)
+                            (#\t (literal "true") t)
+                            (#\f (literal "false") t)
+                            (#\n (literal "null") t)
+                            (t (num) t))
+                      (loop
+                        (when (zerop depth)
+                          (skip-ws)
+                          (return-from json-valid-p
+                            (if (= pos n) (values t (and recorded (floor recorded 3))) nil)))
+                        (when (and elements (= depth 1))
+                          (vector-push-extend pos elements))
                         (skip-ws)
-                        (return-from json-valid-p
-                          (if (= pos n) (values t (and recorded (floor recorded 3))) nil)))
-                      (skip-ws)
-                      (if (logbitp 0 stack)
-                          (case (peek)
-                            (#\, (incf pos) (skip-ws) (key) (return))
-                            (#\} (incf pos) (setf stack (ash stack -1)) (decf depth))
-                            (t (fail)))
-                          (case (peek)
-                            (#\, (incf pos) (return))
-                            (#\] (incf pos) (setf stack (ash stack -1)) (decf depth))
-                            (t (fail))))))))))))
+                        (if (= 1 (sbit stack (1- depth)))
+                            (case (peek)
+                              (#\, (incf pos) (skip-ws) (key) (return))
+                              (#\} (incf pos) (decf depth))
+                              (t (fail)))
+                            (case (peek)
+                              (#\, (incf pos) (return))
+                              (#\] (incf pos) (decf depth))
+                              (t (fail)))))))))))))
     (etypecase s
       (simple-base-string (scan simple-base-string))
       ((simple-array character (*)) (scan (simple-array character (*)))))))

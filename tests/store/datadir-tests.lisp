@@ -425,3 +425,43 @@ in the reopened datadir, whose state must be exactly its blocks'."
         (multiple-value-bind (stored reachable) (node-census (store-db again))
           (is= reachable stored))
         (close-store again)))))
+
+(defun check-hashed-storage-tries (db mirror)
+  "Every account of MIRROR has, in DB, a storage trie found by its hashed address that holds
+its slots under their hashed keys and hashes to its storage root."
+  (let ((accounts 0))
+    (map-accounts
+     (lambda (address account)
+       (incf accounts)
+       (let ((trie (db-hashed-storage-trie db (clempo.keccak:keccak256 (integer->octets address 20)))))
+         (is trie "account ~X" address)
+         (when trie
+           (is-equalp (account-storage-root account) (clempo.trie:trie-root trie) "root of ~X" address)
+           (map-account-storage
+            (lambda (slot value)
+              (is-equalp (clempo.rlp:rlp-encode value)
+                         (clempo.trie:trie-get trie (clempo.keccak:keccak256 (integer->octets slot 32)))
+                         "slot ~X of ~X" slot address))
+            account))))
+     mirror)
+    (is (plusp accounts))
+    (is (null (db-hashed-storage-trie db (make-octets 32))))))
+
+(deftest hashed-storage-tries-need-no-account-scan ()
+  ;; In RAM a preimage index is built once and kept as accounts are created; backed, the
+  ;; unflushed accounts are looked up in RAM and the rest open from their leaf's storage root.
+  (with-temp-dir (dir)
+    (let* ((rng (sb-ext:seed-random-state 41))
+           (store (open-test-store dir :interval 3))
+           (db (store-db store))
+           (mirror (mirror-db)))
+      (loop for n from 1 to 7 do (commit-random store rng n mirror))   ; block 7 is unflushed
+      (check-hashed-storage-tries mirror mirror)
+      (let ((index (clempo.store::db-preimages mirror)))
+        (is index)
+        (check-hashed-storage-tries db mirror)
+        (loop for n from 8 to 10 do (commit-random store rng n mirror))
+        (check-hashed-storage-tries mirror mirror)
+        (is (eq index (clempo.store::db-preimages mirror)) "the index is kept, not rebuilt")
+        (check-hashed-storage-tries db mirror))
+      (close-store store))))

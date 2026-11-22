@@ -104,11 +104,15 @@ reference node itself: compared by shape, never counted toward R5)."
 
 (defun case-matches (c status response)
   "A \"headRelative\" case is value-checked after HEAD-RELATIVE. Witness answers compare by
-value, their map orders aside (WITNESS-EQUAL)."
+value, their map orders aside (WITNESS-EQUAL), and a witness must also prove its keys under
+its parent header's state root (WITNESS-REPRODUCES-PRE-STATE-P)."
   (and (eql status (clempo.json:jget c "status"))
        (let ((class (case-compare-class c)))
          (cond ((member (clempo.json:jget c "method") *witness-methods* :test #'string=)
-                (witness-equal (clempo.json:jget c "response") response))
+                (and (witness-equal (clempo.json:jget c "response") response)
+                     (let ((result (clempo.json:jget response "result")))
+                       (or (not (clempo.json:jobject-p result))
+                           (witness-reproduces-pre-state-p result)))))
                ((string= class "stable")
                 (clempo.json:json-equal (if (and (eq :true (clempo.json:jget c "headRelative"))
                                                  (clempo.json:jobject-p response))

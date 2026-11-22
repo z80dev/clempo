@@ -199,3 +199,57 @@ code and storage hashes."
                                    (string-equal (clempo.json:jget result "codeHash") (clempo.json:jget proof "codeHash"))
                                    (string-equal (clempo.json:jget result "storageRoot")
                                                  (clempo.json:jget proof "storageHash")))))))))))))))
+
+;;; Checking an ExecutionWitness against the pre-state root. The witness of block N must
+;;; let a stateless client read every key it lists from the state after block N-1: each
+;;; account (and each listed slot of an existing account) resolves from the parent header's
+;;; state root through the witness's nodes alone, to a value or a proven absence.
+
+(defclass witness-nodes ()
+  ((table :initarg :table :reader witness-table))
+  (:documentation "A read-only node store over a witness's state nodes, by keccak."))
+
+(defmethod clempo.trie:node-store-get ((store witness-nodes) hash)
+  (gethash hash (witness-table store)))
+
+(defmethod clempo.trie:node-store-put ((store witness-nodes) hash bytes)
+  (declare (ignore hash bytes))
+  (unreachable "a witness is only read"))
+
+(defun witness-pre-state-root (witness)
+  "The state root of the last header WITNESS carries (the executed block's parent), or NIL."
+  (let ((headers (clempo.json:jget witness "headers")))
+    (and (vectorp headers) (plusp (length headers))
+         (clempo.headers:ethereum-header-state-root
+          (clempo.headers:header-inner
+           (clempo.headers:decode-header (hex-octets (aref headers (1- (length headers))))))))))
+
+(defun witness-proves-keys-p (witness root)
+  "Whether every key of WITNESS (an address, then that account's slots) resolves under the
+state ROOT through WITNESS's state nodes only."
+  (let ((table (make-hash-table :test 'equalp)))
+    (loop for node across (clempo.json:jget witness "state")
+          do (let ((o (hex-octets node))) (setf (gethash (clempo.keccak:keccak256 o) table) o)))
+    (let ((store (make-instance 'witness-nodes :table table))
+          (storage-root nil))
+      (flet ((read-key (root key)
+               (clempo.trie:trie-get (clempo.trie:make-trie :secure t :store store :root root) key)))
+        (handler-case
+            (loop for k across (clempo.json:jget witness "keys")
+                  for key = (hex-octets k)
+                  always (case (length key)
+                           (20 (let ((leaf (read-key root key)))
+                                 (setf storage-root (and leaf (nth-value 2 (clempo.trie:decode-account leaf))))
+                                 t))
+                           ;; a slot of an absent account reads nothing
+                           (32 (progn (when storage-root (read-key storage-root key)) t))
+                           (t nil)))
+          ((or clempo.trie:trie-node-error clempo.rlp:rlp-error) () nil))))))
+
+(defun witness-reproduces-pre-state-p (witness &optional expected-root)
+  "Whether WITNESS proves its keys under its parent header's state root, and that root is
+EXPECTED-ROOT when given."
+  (let ((root (ignore-errors (witness-pre-state-root witness))))
+    (and root
+         (or (null expected-root) (octets= root expected-root))
+         (witness-proves-keys-p witness root))))

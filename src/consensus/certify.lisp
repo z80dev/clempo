@@ -94,10 +94,13 @@ requiring the whole buffer) and install the next epoch's identity. Returns the o
       t)))
 
 (defun verifier-identity-for (v epoch &optional height)
-  "The scheme that verifies EPOCH's certificates, or a CERTIFICATE-ERROR."
-  (or (gethash epoch (finalization-verifier-schemes v))
-      (let ((s (finalization-verifier-network-scheme v)))
+  "The scheme that verifies EPOCH's certificates, or a CERTIFICATE-ERROR. The trusted network
+identity covers every epoch from its start, so it is consulted first: a registered epoch
+scheme (installed from block data) can never stand in for it there. Rust looks the epoch up
+first; the two agree whenever the registered identities are the network's."
+  (or (let ((s (finalization-verifier-network-scheme v)))
         (and s (>= epoch (finalization-verifier-network-from-epoch v)) s))
+      (gethash epoch (finalization-verifier-schemes v))
       (certificate-fail :identity-unavailable height "epoch ~D has no identity" epoch)))
 
 ;;; Decoding what consensus_getFinalization returns.

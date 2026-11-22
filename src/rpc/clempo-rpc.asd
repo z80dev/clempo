@@ -40,6 +40,7 @@
   :pathname "../../tests/rpc/"
   :serial t
   :components ((:file "rpc-tests")
+               (:file "fixture")
                (:file "ws-tests")
                (:file "state-tests")
                (:file "serde-tests")
@@ -50,4 +51,5 @@
                (:file "server-tests")
                (:file "gap-tests")
                (:file "impl-tests")
-               (:file "tries-tests")))
+               (:file "tries-tests")
+               (:file "hardening-tests")))

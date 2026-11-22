@@ -31,7 +31,7 @@ limits say.")
    ;; writes
    #:db-set-account #:db-delete-account #:db-set-storage #:db-wipe-storage
    #:db-put-code #:db-state-root #:db-account-proof #:db-storage-proof
-   #:db-account-trie #:db-storage-trie
+   #:db-account-trie #:db-storage-trie #:db-hashed-storage-trie
    #:db-begin-block #:db-commit-block #:db-revert-block #:db-block-open-p
    #:with-speculative-blocks
    ;; block diffs
@@ -158,6 +158,8 @@ number of writes (accounts, slots and trie nodes) kept in RAM before the store f
   (speculative '() :type list)
   ;; serializes proof readers' lazy storage-trie builds (DB-STORAGE-PROOF)
   (proof-lock (sb-thread:make-mutex :name "statedb proofs"))
+  ;; in RAM: keccak(address) integer -> address, built by DB-ADDRESS-OF-HASH's first call
+  (preimages nil)
   ;; backed: writes since the last flush, and cache bookkeeping
   (account-total 0 :type integer)                          ; accounts in the state
   (flush-accounts (make-hash-table) :type hash-table)      ; address -> flush-mark
@@ -423,6 +425,40 @@ root is the empty root, which has no nodes)."
         (trie-root trie)
         trie))))
 
+(defun hashed-snapshot (trie)
+  "A snapshot of the secure TRIE addressed by hashed keys (the 32-octet paths of its leaves)."
+  (let ((snapshot (trie-clone trie)))
+    (clempo.trie::%make-trie (clempo.trie::trie-root-node snapshot) (clempo.trie::trie-store snapshot) nil)))
+
+(defun db-address-of-hash (db hash)
+  "The address of the account in RAM whose keccak is HASH (32 octets), or NIL. In RAM the
+preimage index is built on the first call, one pass over the accounts, and then kept by
+LIVE-ACCOUNT as accounts are created; backed, only the unflushed accounts are looked at
+\(the store holds the rest, tries included)."
+  (let ((key (octets->integer hash)))
+    (if (db-backing db)
+        (loop for address being the hash-keys of (unflushed-addresses db)
+              when (= key (octets->integer (keccak256 (integer->octets address 20)))) return address)
+        (sb-thread:with-mutex ((db-proof-lock db))
+          (gethash key (or (db-preimages db)
+                           (let ((index (make-hash-table :size (max 16 (hash-table-count (db-accounts db))))))
+                             (loop for address being the hash-keys of (db-accounts db)
+                                   do (setf (gethash (octets->integer (keccak256 (integer->octets address 20))) index)
+                                            address))
+                             (setf (db-preimages db) index))))))))
+
+(defun db-hashed-storage-trie (db hash)
+  "The storage trie, as it is now and addressed by hashed slots, of the account whose
+hashed address is HASH; NIL when DB has none. No scan of the store: an account the store
+holds unchanged opens from the storage root in its account leaf."
+  (db-state-root db)
+  (let ((address (db-address-of-hash db hash)))
+    (cond (address (let ((trie (db-storage-trie db address))) (and trie (hashed-snapshot trie))))
+          ((db-backing db)
+           (let ((leaf (clempo.trie:trie-get (hashed-snapshot (db-trie db)) hash)))
+             (and leaf (clempo.trie:make-trie :store (db-nodes db)
+                                              :root (nth-value 2 (decode-account leaf)))))))))
+
 ;;; Writes. Every write happens inside an open block so it can be undone and logged.
 
 (defun db-begin-block (db)
@@ -455,10 +491,18 @@ root is the empty root, which has no nodes)."
                     (touch-trie tc) (when trie (trie-clone trie)))))
           (setf (gethash address touched) tc)))))
 
+(defun note-preimage (db address)
+  "Keep DB's preimage index, once built, covering ADDRESS."
+  (let ((index (db-preimages db)))
+    (when index
+      (sb-thread:with-mutex ((db-proof-lock db))
+        (setf (gethash (octets->integer (keccak256 (integer->octets address 20))) index) address)))))
+
 (defun live-account (db address)
   (or (db-account db address)
       (let ((a (%make-account address)))
         (when (db-backing db) (setf (account-owner a) db (account-used a) t))
+        (note-preimage db address)
         (setf (gethash address (db-accounts db)) a))))
 
 (defun db-set-account (db address nonce balance code-hash &optional (commitment 0))
@@ -660,6 +704,7 @@ undo record is kept so the speculation can be unwound."
                                   (remhash slot s)
                                   (setf (gethash slot s) old)))
                             (touch-old-slots tc))))
+               (note-preimage db address)
                (setf (gethash address accounts) a)))))
      touched)
     (setf (db-trie db) saved-trie)

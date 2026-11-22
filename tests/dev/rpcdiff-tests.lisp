@@ -82,3 +82,22 @@
           ;; zero hashes for a present account fail
           (is (not (clempo.dev::verify-account-proof
                     root (proof present "0x3" "0x4d" zero zero) (expect "0x3" empty-code "0x4d")))))))))
+
+(deftest witnesses-prove-their-keys-under-the-pre-state-root ()
+  (let* ((witness (parse (clempo.io:read-file-string
+                          (asdf:system-relative-pathname "clempo-dev" "../../tests/dev/witness-3463.json"))))
+         (root (hex->octets "0x7a91f968a770f34f613d35abc602fad42d51ec26afc7040155b34f7d06a0c70c"))
+         (nodes (clempo.json:jget witness "state"))
+         (root-node (find-if (lambda (n) (octets= root (clempo.keccak:keccak256 (hex->octets n)))) nodes)))
+    (is-equalp root (clempo.dev::witness-pre-state-root witness))
+    (is (clempo.dev::witness-reproduces-pre-state-p witness root))
+    (is (not (clempo.dev::witness-reproduces-pre-state-p witness (make-octets 32))))
+    (is root-node)
+    (flet ((without (node)
+             (cons :object (loop for (k . v) in (cdr witness)
+                                 collect (cons k (if (equal k "state") (remove node v :test #'equal) v))))))
+      (is (not (clempo.dev::witness-reproduces-pre-state-p (without root-node))))
+      ;; a node below the root that a key's path needs breaks the check as well
+      (is (some (lambda (n) (and (not (equal n root-node))
+                                 (not (clempo.dev::witness-reproduces-pre-state-p (without n)))))
+                nodes)))))

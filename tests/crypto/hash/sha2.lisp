@@ -72,3 +72,38 @@
       (let* ((n (random 300 random)) (data (make-octets n)))
         (dotimes (j n) (setf (aref data j) (random 256 random)))
         (is-equalp (with-portable-sha256 (sha256 data)) (sha256 data) "length ~D" n)))))
+
+#+arm64
+(deftest sha256-many-buffers-under-forced-gcs ()
+  ;; The FEAT_SHA256 VOP holds interior pointers to its input and round constants in raw
+  ;; registers; it runs pseudo-atomic. Four threads hash fresh young vectors of one to
+  ;; twenty blocks at odd offsets while the main thread forces nursery and full collections;
+  ;; each digest is checked against the portable code's.
+  (when clempo.sha256-arm64:**native**
+    (let* ((state (sb-ext:seed-random-state 23))
+           (inputs (coerce (loop repeat 64
+                                 collect (let ((data (make-octets (random 1300 state))))
+                                           (dotimes (j (length data)) (setf (aref data j) (random 256 state)))
+                                           (cons data (with-portable-sha256 (sha256 data)))))
+                           'simple-vector))
+           (stop nil) (hashed (list 0)) (mismatches (list 0))
+           (workers
+             (loop for w below 4 collect
+               (let ((w w))
+                 (sb-thread:make-thread
+                  (lambda ()
+                    (let ((state (sb-ext:seed-random-state (+ 200 w))))
+                      (loop until stop
+                            do (destructuring-bind (data . want) (svref inputs (random 64 state))
+                                 (let* ((offset (1+ (random 15 state)))
+                                        (copy (make-octets (+ offset (length data) 3))))
+                                   (replace copy data :start1 offset)
+                                   (unless (octets= want (sha256 copy :start offset :end (+ offset (length data))))
+                                     (sb-ext:atomic-incf (car mismatches)))
+                                   (sb-ext:atomic-incf (car hashed)))))))
+                  :name "sha256 gc stress")))))
+      (unwind-protect (dotimes (i 60) (sb-ext:gc :full (zerop (mod i 10))))
+        (setf stop t)
+        (mapc #'sb-thread:join-thread workers))
+      (is (> (car hashed) 1000) "~D digests" (car hashed))
+      (is= 0 (car mismatches)))))

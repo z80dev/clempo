@@ -1,8 +1,8 @@
 (defpackage #:clempo.rpc.ws-tests
-  (:use #:cl #:clempo.base)
+  (:use #:cl #:clempo.base #:clempo.rpc.fixture)
   (:local-nicknames (#:json #:clempo.json) (#:rpc #:clempo.rpc) (#:chain #:clempo.rpc.chain)
                     (#:server #:clempo.rpcserver) (#:ws #:clempo.websocket)
-                    (#:render #:clempo.rpc.render) (#:archive #:clempo.archive)))
+                    (#:render #:clempo.rpc.render)))
 (in-package #:clempo.rpc.ws-tests)
 
 ;;; The expected answers below were recorded from the reference node's websocket
@@ -215,27 +215,12 @@ answer to one more round trip."
       (is= "{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":-32603,\"message\":\"Internal error\"}}"
            (nth-value 1 (rpc:handle-body (request method params))) "~A ~A" method params))))
 
-;;; A live server over the block archive
-
-(defclass test-backend (chain:archive-backend) ()
-  (:documentation "The archive with a head the test moves."))
-
-(defparameter *block* 3463 "A mainnet block with two transactions and three logs.")
-
-(defun test-backend ()
-  "A backend headed one below *BLOCK*, or a skip when the archive or the block's stored
-receipts are absent."
-  (unless (archive:chunk-present-p 0 (archive:archive-dir))
-    (skip-test "no mainnet archive under ~/cache/clempo/mainnet"))
-  (let ((b (chain:make-archive-backend :class 'test-backend :head (1- *block*))))
-    (unless (chain:receipts-store-get (chain::archive-backend-receipts b) *block*)
-      (skip-test (format nil "receipts of block ~D are not in ~~/cache/clempo/receipts" *block*)))
-    b))
+;;; A live server over the recorded blocks (fixture.lisp)
 
 (defmacro with-test-server ((server backend &optional (log (gensym "LOG"))) &body body)
   "Run BODY with SERVER serving BACKEND (a TEST-BACKEND), its log going to the string output
 stream LOG."
-  `(let* ((,backend (test-backend))
+  `(let* ((,backend (make-test-backend))
           (,log (make-string-output-stream))
           (,server (server:start-server :port 0 :backend ,backend :log ,log)))
      (declare (ignorable ,log))
@@ -247,7 +232,7 @@ stream LOG."
   (json:parse-json (chain:with-backend-read (backend) (nth-value 1 (rpc:handle-body body)))))
 
 (defun advance-head (server backend)
-  (setf (chain:archive-backend-head backend) *block*)
+  (setf (backend-head-number backend) *block*)
   (server:publish-head server *block*))
 
 (defparameter +transfer+ "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef")
@@ -437,7 +422,7 @@ stream LOG."
                  (stalled-logs (json:jget (call stalled 2 "eth_subscribe" #("logs")) "result"))
                  (live-heads (json:jget (call live 1 "eth_subscribe" #("newHeads")) "result")))
              (declare (ignore stalled-logs))
-             (setf (chain:archive-backend-head backend) last)
+             (setf (backend-head-number backend) last)
              ;; LIVE reads on its own thread until the last head; STALLED reads nothing.
              (let* ((reader (sb-thread:make-thread
                              (lambda ()
@@ -480,11 +465,9 @@ stream LOG."
 (deftest ws-notification-errors-are-logged ()
   (with-test-server (server backend log)
     ;; a block whose receipts are not stored, and no upstream to fetch them
-    (let ((n (loop for n from 49000000 below 49000100
-                   when (and (chain:backend-block-raw (progn (setf (chain:archive-backend-head backend) n) backend) n)
-                             (null (chain:receipts-store-get (chain::archive-backend-receipts backend) n)))
-                     return n)))
-      (unless n (skip-test "no archived block without stored receipts near 49,000,000"))
+    (let ((n (1+ *block*)))
+      (setf (backend-head-number backend) n)
+      (put-block backend n (renumbered (chain:backend-block-raw backend *block*) n))
       (let ((c (connect (server:server-port server))))
         (unwind-protect
              (let ((heads (json:jget (call c 1 "eth_subscribe" #("newHeads")) "result"))

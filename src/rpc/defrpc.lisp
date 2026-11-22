@@ -433,17 +433,12 @@ layout of the object."
 (defun capped-response (id-text id-start id-end response)
   (if (> (length response) *response-max*) (response-too-big id-text id-start id-end) response))
 
-(defun value-spans (text start end)
-  "Start and end positions of each element of the array in TEXT[START,END)."
-  (let ((src (make-src text :start start :end end)) (spans '()) (*recursion-limit* nil))
-    (incf (src-pos src))
-    (unless (eql (peek src) #\])
-      (loop (skip-ws src)
-            (let ((s (src-pos src))) (skip-value src) (push (cons s (src-pos src)) spans))
-            (if (eql (peek src) #\,) (incf (src-pos src)) (return))))
-    (nreverse spans)))
-
 (defconstant +members-max+ 16 "Request object members whose layout validation records.")
+
+(defconstant +batch-max+ (floor (* 15 1024 1024) (1+ (length "{\"jsonrpc\":\"2.0\",\"method\":\"\"}")))
+  "Most entries in a batch: jsonrpsee's default (BatchRequestConfig::Unlimited) bound, the
+15 MiB request cap over the shortest request and its comma, so no batch of valid requests
+is refused. Entry MAX + 1 refuses the batch, however the rest of it reads.")
 
 (defun handle-body (text &optional (end (length text)))
   "Process the JSON-RPC HTTP body TEXT[0,END). Returns (values http-status response-string)."
@@ -455,9 +450,10 @@ layout of the object."
          (first (and (< start end) (char text start))))
     (case first
       ;; nesting is bounded per typed param (serde's recursion limit), not for the whole body:
-      ;; the reference answers a deeply nested param a method ignores. A single object is only
-      ;; checked (the same grammar as PARSE-JSON, no values built), recording where its
-      ;; members are; a batch needs its length.
+      ;; the reference answers a deeply nested param a method ignores, and a deeply nested
+      ;; batch entry as an invalid request (serde_json skips a raw value with one byte a level).
+      ;; A body is only checked (the same grammar as PARSE-JSON, no values built, one bit a
+      ;; level), recording where a single object's members or a batch's entries are.
       (#\{
        (let ((members (make-array (* 3 +members-max+) :element-type 'fixnum)))
          (declare (dynamic-extent members))
@@ -466,20 +462,25 @@ layout of the object."
                (values 200 (or (handle-request-object text start end members count) "null"))
                (values 200 (null-id-error +parse-error+ "Parse error"))))))
       (#\[
-       (let* ((text (if (= end (length text)) text (subseq text 0 end)))
-              (parsed (handler-case (json:parse-json text :max-depth nil) (json:json-error () :invalid))))
-         (cond ((eq parsed :invalid) (values 200 (null-id-error +parse-error+ "Parse error")))
-               ((zerop (length parsed)) (values 200 (null-id-error +invalid-request+ "Invalid request")))
-               (t
-                (let ((responses
-                        (loop for (s . e) in (value-spans text start end)
-                              for r = (if (char= (char text s) #\{)
-                                          (handle-request-object text s e)
-                                          (null-id-error +invalid-request+ "Invalid request"))
-                              ;; each kept apart from the reused response buffer
-                              when r collect (coerce r 'simple-string))))
-                  (values 200 (cond ((null responses) "null")
-                                    ((> (reduce #'+ responses :key #'length) *response-max*)
-                                     (response-too-big "null" 0 4))
-                                    (t (format nil "[~{~A~^,~}]" responses)))))))))
+       (let ((spans (make-array 64 :element-type 'fixnum :adjustable t :fill-pointer 0)))
+         (multiple-value-bind (valid why)
+             (json:json-valid-p text :end end :elements spans :max-elements +batch-max+)
+           (cond ((eq why :too-many)
+                  (values 200 (error-response "null" 0 4 -32010 "The batch request was too large"
+                                              (format nil "Exceeded max limit of ~D" +batch-max+))))
+                 ((not valid) (values 200 (null-id-error +parse-error+ "Parse error")))
+                 ((zerop (fill-pointer spans)) (values 200 (null-id-error +invalid-request+ "Invalid request")))
+                 (t
+                  (let ((responses
+                          (loop for i from 0 below (fill-pointer spans) by 2
+                                for s = (aref spans i) and e = (aref spans (1+ i))
+                                for r = (if (char= (char text s) #\{)
+                                            (handle-request-object text s e)
+                                            (null-id-error +invalid-request+ "Invalid request"))
+                                ;; each kept apart from the reused response buffer
+                                when r collect (coerce r 'simple-string))))
+                    (values 200 (cond ((null responses) "null")
+                                      ((> (reduce #'+ responses :key #'length) *response-max*)
+                                       (response-too-big "null" 0 4))
+                                      (t (format nil "[~{~A~^,~}]" responses))))))))))
       (t (values 400 (null-id-error +parse-error+ "Parse error"))))))
