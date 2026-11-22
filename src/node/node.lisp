@@ -127,12 +127,13 @@ readers take whole without the lock."
 ;;; then skips).
 ;;;
 ;;; Segments merge in the background, tiered like a binary counter: two adjacent segments
-;;; merge when the older spans no more blocks than the newer, so N folded chunks leave
-;;; about log2 N segments. A merge writes the covering segment FROM-TO (txs, then blocks)
-;;; before deleting its two inputs (blocks, then txs). The loader keeps only complete
-;;; segments that no other complete segment covers and deletes everything else (inputs a
-;;; crash left behind, half-written pairs, temporaries), so every hash sits in exactly one
-;;; segment whatever step a crash interrupts.
+;;; merge when the older spans no more blocks than the newer, oldest such pair first, so N
+;;; folded chunks leave about log2 N segments however far the merger lags behind the folds
+;;; (N equal folds end as N's binary form). A merge writes the covering segment FROM-TO (txs,
+;;; then blocks) before deleting its two inputs (blocks, then txs). The loader keeps only
+;;; complete segments that no other complete segment covers and deletes everything else
+;;; (inputs a crash left behind, half-written pairs, temporaries), so every hash sits in
+;;; exactly one segment whatever step a crash interrupts.
 
 (defvar *fold-step-hook* nil
   "When non-NIL, called with a keyword after each durable step of a fold or a segment merge;
@@ -277,10 +278,17 @@ log and from memory."
 (defun segment-span (segment) (- (first segment) (fourth segment) -1))
 
 (defun due-merge (segments)
-  "The newest adjacent (newer . older) pair whose older segment spans no more blocks."
-  (loop for (newer older) on segments
+  "The oldest adjacent (newer . older) pair whose older segment spans no more blocks.
+Oldest first, a merge never leaves a smaller segment behind a bigger one: the segment
+before the pair is bigger than its older half (else that pair would be older and due),
+so equal folds that pile up while the merger lags still end as a binary counter's
+segments. Newest first, three piled-up folds A A A became 2A and then 3A, which no later
+2A or A ever merges with."
+  (loop with due = nil
+        for (newer older) on segments
         while older
-        when (<= (segment-span older) (segment-span newer)) return (cons newer older)))
+        when (<= (segment-span older) (segment-span newer)) do (setf due (cons newer older))
+        finally (return due)))
 
 (defun next-merge (node &optional idle-when-done)
   "The due pair to merge next, or NIL when none is due or merging stopped; then, when

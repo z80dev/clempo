@@ -59,8 +59,11 @@ CURSORS states."
   (format nil "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":~S,\"params\":~A}" method params))
 
 (defun answer (backend body)
+  "BODY answered against BACKEND as a server worker answers it: with the thread's own EVM
+scratch (the test threads would otherwise share the main thread's operand stacks)."
   (let ((clempo.rpc.state:*eth-proof-window* most-positive-fixnum))
-    (json:parse-json (chain:with-backend-read (backend) (nth-value 1 (rpc:handle-body body))))))
+    (clempo.evm:with-evm-thread
+      (json:parse-json (chain:with-backend-read (backend) (nth-value 1 (rpc:handle-body body)))))))
 
 (defun requests (backend)
   "Every method that takes a trie state, at each of *BLOCKS*."

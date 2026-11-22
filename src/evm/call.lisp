@@ -37,6 +37,7 @@ given, replaces CODE-ADDRESS's code (EIP-7702 delegation). Value moves only for 
 Returns (values status gas-left output); state changes are rolled back unless the
 status is :stop or :return."
   (declare (type gas gas) (type fixnum depth))
+  (when (zerop depth) (check-evm-thread))
   (let* ((world *world*)
          (tracer *tracer*)
          (cp (checkpoint world))
@@ -69,6 +70,7 @@ status is :stop or :return."
 and checked collision). KIND is :create or :create2. Returns (values status gas-left
 output); output is the revert data on :revert, empty otherwise."
   (declare (type gas gas) (type fixnum depth))
+  (when (zerop depth) (check-evm-thread))
   (let* ((world *world*)
          (spec *spec*)
          (gp (spec-gas spec))

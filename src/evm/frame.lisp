@@ -214,12 +214,20 @@ an analysis in steady use in an L1 never meets the store, so it is kept alive th
 (defmacro with-evm-thread (&body body)
   "Run BODY with this thread's own interpreter scratch: operand stacks, the code-analysis
 L1 and Keccak buffers. Every thread that executes EVM code besides the main one must
-run inside this."
+run inside this; CHECK-EVM-THREAD refuses a top-level message that does not."
   `(let ((*stacks* (make-array +depth-stacks+ :initial-element nil))
          (*analysis-l1* (make-analysis-l1))
          (*keccak-scratch* (clempo.keccak:make-keccak))
          (*keccak-out* (make-octets 32)))
      ,@body))
+
+(defun check-evm-thread ()
+  "Refuse a top-level message on a thread other than the main one that has not bound its own
+scratch (WITH-EVM-THREAD): it would share the main thread's operand stacks and Keccak
+buffers with every other such thread and compute wrong results without failing."
+  (invariant (or (clempo.io:main-thread-p)
+                 (not (eq *stacks* (sb-ext:symbol-global-value '*stacks*))))
+             "EVM code runs on thread ~S outside WITH-EVM-THREAD" (clempo.io:current-thread-name)))
 
 (declaim (inline acquire-stack))
 (defun acquire-stack (depth)

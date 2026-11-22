@@ -7,7 +7,8 @@ variables, so a simulator rebinds them instead of threading parameters.")
            #:manual-clock-advance
            #:*entropy* #:random-octets #:random-below #:make-seeded-entropy #:real-entropy
            #:read-file-octets #:write-file-octets #:write-file-atomically #:write-new-file
-           #:temp-directory #:read-file-string #:getenv #:run-capture #:cpu-feature-p))
+           #:temp-directory #:read-file-string #:getenv #:run-capture #:cpu-feature-p
+           #:main-thread-p #:current-thread-name))
 
 (in-package #:clempo.io)
 
@@ -100,6 +101,9 @@ rename it over PATH."
     path))
 
 (defun getenv (name) (sb-ext:posix-getenv name))
+
+(defun main-thread-p () (eq sb-thread:*current-thread* (sb-thread:main-thread)))
+(defun current-thread-name () (sb-thread:thread-name sb-thread:*current-thread*))
 
 (defun temp-directory ()
   "$TMPDIR, else /tmp, ending in a slash."

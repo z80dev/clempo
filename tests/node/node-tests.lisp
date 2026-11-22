@@ -335,9 +335,34 @@ those requests fail, as during an upstream outage."
                                 :merge-input-deleted)
                               seen)))))
 
+(deftest lagging-merges-end-as-a-binary-counter ()
+  ;; Folds of 4 blocks with the merger running between any two of them, or not at all
+  ;; for a while: once it catches up the spans are 4 times the binary form of the fold count,
+  ;; whatever the interleaving. (Merging the newest due pair first left spans 12, 8 and 4,
+  ;; oldest first, after three folds piled up: the 3-segment failures under load.)
+  (let ((state (sb-ext:seed-random-state 7)))
+    (flet ((merge-due (segments)
+             (loop for pair = (clempo.node::due-merge segments)
+                   while pair
+                   do (let ((to (first (car pair))) (from (fourth (cdr pair))))
+                        (setf segments (loop for s in segments
+                                             unless (eq s (cdr pair))
+                                               collect (if (eq s (car pair)) (list to nil nil from) s)))))
+             segments))
+      (dotimes (trial 300)
+        (let ((segments '()) (folds (1+ (random 40 state))))
+          (loop for k from 1 to folds
+                do (push (list (* 4 k) nil nil (1+ (* 4 (1- k)))) segments)
+                   (when (zerop (random 3 state)) (setf segments (merge-due segments))))
+          (setf segments (merge-due segments))
+          (is= (loop for bit from 0 below 8 when (logbitp bit folds) collect (* 4 (ash 1 bit)))
+               (mapcar #'clempo.node::segment-span segments)
+               "~D folds" folds))))))
+
 (deftest followed-segments-merge-in-the-background ()
-  ;; 16 folds through the background merger leave one segment per set bit of the fold
-  ;; count, not 16; the merged segments resolve every hash once and survive a restart.
+  ;; 16 folds through the background merger (blocks 0..4, then 4 blocks each) leave 0..60
+  ;; and 61..64, not 16 segments, however far the merger lags behind the folds; the merged
+  ;; segments resolve every hash once and survive a restart.
   (let* ((total 64)
          (blocks (map 'vector #'blocks:decode-block (synthetic-chain total))))
     (with-temp-dirs (index)
@@ -351,8 +376,8 @@ those requests fail, as during an upstream outage."
                                  (clempo.node::node-merger node)))
         (let ((segments (clempo.node::node-segments node)))
           (is (null (clempo.node::due-merge segments)))
-          (is (<= (length segments) 2) "~D segments" (length segments))
-          (is= '(0 . 64) (cons (fourth (car (last segments))) (first (first segments)))))
+          (is (equal '((61 . 64) (0 . 60)) (mapcar (lambda (s) (cons (fourth s) (first s))) segments))
+              "segments ~S" (mapcar (lambda (s) (cons (fourth s) (first s))) segments)))
         (is (every-hash-once-p node blocks total))
         (clempo.node::close-hash-log node)
         (let ((again (open-followed index total)))
