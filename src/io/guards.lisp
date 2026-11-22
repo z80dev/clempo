@@ -125,7 +125,11 @@ writer, an :ATOMIC one only a COMPARE-AND-SWAP writer."
                   (guard-tests guard object (lambda (lock) `(,(raw lock) ,object)))
                 (push `(,slot ,init ,@keys ,@(when (eq kind :immutable) '(:read-only t))) raw-slots)
                 (let ((place (list name slot)) (accessor (public slot)) (raw (raw slot)))
-                  (push `(declaim (inline ,accessor ,@(when (eq kind :mutable) `((setf ,accessor)))))
+                  ;; inline, as DEFSTRUCT's own accessors are: an :ATOMIC slot's CAS compiles
+                  ;; to the bare slot CAS instead of a full call per swap
+                  (push `(declaim (inline ,accessor ,@(case kind
+                                                        (:mutable `((setf ,accessor)))
+                                                        (:atomic `((sb-ext:cas ,accessor))))))
                         accessors)
                   (push `(defun ,accessor (,object)
                            ,(checked-form read place :read guard `(,raw ,object)))

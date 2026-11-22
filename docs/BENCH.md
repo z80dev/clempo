@@ -1220,3 +1220,35 @@ failed. Medians of 7 rotated rounds of 100,000 requests (`three-2`), in req/s:
   published table has no trace row either. clempo against Rust on the same host
   (`trace-2`, 7 rounds of 20,000, 400/400 identical): **1.81 / 2.22 / 2.34** at 1/16/64.
 
+### Cost of declared guards in release builds (`e9460ca`)
+
+The guard series (`16772e1`..`e9460ca`) compiles guarded accessors to the bare slot
+access in release builds. A few protocol slots changed from a plain store to a
+compare-and-swap, one of them once per server event (`run-event`). Same Mac, all servers
+fresh release `rpc-serve` processes. Load: `rpc-load -total 40000 -rounds 7` at 1/16/64
+clients, interleaved with rotation; every answer was identical.
+
+- **Throughput:** `e9460ca`/`9013ec2` was 0.96–1.03 in every cell except `eth_getLogs` at
+  1 client. That cell was 0.92–0.98 in four runs, and 0.92–0.93 when both processes were
+  fresh. The 16- and 64-client cells sit at the load client's ceiling.
+- **Server user CPU per request** (16 clients, `ps` utime over 400,000 requests, median of
+  5 rotated rounds): `e9460ca` was above `9013ec2` by 0.15 µs on `eth_getBalance` (3.85 →
+  4.00), 0.60 µs on `eth_call` (22.05 → 22.65), 0.08 µs on `eth_getBlockByNumber` and
+  0.23 µs on `eth_getProof`.
+- **Cause:** an `:atomic` slot's `(cas accessor)` was a full call, not inline like the
+  slot accessors. In `run-connection` and `run-event` every swap went through that call.
+  `define-shared-struct` now declaims it inline, so the swaps compile to a bare `CASAL`
+  (test `guarded-accessors-are-inline`).
+- **After the fix** (user CPU, µs per request, `9013ec2` / fixed): `eth_getBalance`
+  3.85 / 3.98, `eth_call` 22.05 / 22.15, `eth_getBlockByNumber` 5.37 / 5.32,
+  `eth_getProof` 24.80 / 24.93. Throughput fixed/`9013ec2` was 0.96–1.01 in every cell
+  except `eth_getLogs` at 1 client.
+- **`eth_getLogs` at 1 client is not a guard cost:**
+  - `16772e1` only adds `guards.lisp` to the image and changes no request path, and it
+    shows the same 0.92.
+  - So does `9013ec2` with an unused copy of that file in its own package, loaded and
+    referenced by nothing (0.93).
+  - Size and order of code in the image move this cell by about 7%. In a server that had
+    run for an hour the gap was 0.38 µs of CPU instead of 1.9. The likely cause is that GC
+    has moved code and data by then. [inference]
+

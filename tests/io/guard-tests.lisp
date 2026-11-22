@@ -58,6 +58,13 @@
     (is (null (fboundp '(setf guarded-box-state))))
     (is (null (fboundp '(setf guarded-box-lock))) "an immutable slot has no writer")))
 
+(deftest guarded-accessors-are-inline ()
+  ;; DEFSTRUCT's accessors compile to the bare slot access; the guarded ones must too, or a
+  ;; release build pays a full call per access (an atomic slot's CAS was one per server event)
+  (dolist (name '(guarded-box-state (sb-ext:cas guarded-box-state)
+                  guarded-box-count (setf guarded-box-count) guarded-box-lock))
+    (is (eq 'inline (sb-int:info :function :inlinep name)) "~S is not inline" name)))
+
 (deftest thread-confined-slots-refuse-other-threads ()
   (checked-only
     (let ((box (make-guarded-box)))
