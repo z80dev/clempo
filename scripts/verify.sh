@@ -3,10 +3,12 @@
 #   1. a cold compile of every layer from source; warnings are errors, and so is a false
 #      compile-time bound proof (STATIC-ASSERT, DEFBOUND)
 #   2. every layer's tests, each audited for threads it leaves running (*LONG-LIVED-THREADS*
-#      aside) and, in this check build, for lock-order cycles (clempo.lock)
+#      aside) and, in this check build, for lock-order cycles (clempo.lock) and accesses that
+#      break a shared slot's declared guard (clempo.guard)
 #   3. fixed-seed fuzzing of every target plus tests/fuzz/cases.sexp (a few seconds)
 #   4. the import-graph and determinism check (layers.sexp), including bound citations in
-#      hot fixed-count loops and lock acquisition through clempo.lock
+#      hot fixed-count loops, lock acquisition through clempo.lock, and declared guards for
+#      shared structures and run-time-mutated globals
 #   5. compiled-form specification matches tracked spec/ outputs
 set -euo pipefail
 cd "$(dirname "$0")/.."

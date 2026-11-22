@@ -361,7 +361,8 @@ times: each is a list of the expressions that together set one count."
     sb-thread:release-mutex sb-thread:condition-wait))
 
 (defun lock-violations (path operators report)
-  (unless (string= path "src/io/locks.lisp")
+  ;; The checkers' own locks (lock order, guard violations) stay outside what they check.
+  (unless (member path '("src/io/locks.lisp" "src/io/guards.lisp") :test #'string=)
     (dolist (op *untracked-lock-operators*)
       (when (gethash op operators)
         (funcall report "~S bypasses the lock-order checker; use clempo.lock" op)))))
@@ -380,6 +381,209 @@ A mutex's name is its lock class, so each needs one of its own."
                  (sb-impl::comma (walk (sb-impl::comma-expr x))))))
       (walk form))
     names))
+
+;;; Shared state (clempo.guard), in the layers that run threads. A structure or class that
+;;; holds a mutex, or whose slot some function mutates under a lock, is shared: each of its
+;;; slots declares its guard, which its accessors check in check builds. A global mutated
+;;; at run time is shared too: DEFSHARED declares its guard, and every mutation must sit in
+;;; WITH-LOCK, WITH-RECURSIVE-LOCK or WITH-HELD of the declared lock.
+
+(defparameter *shared-state-dirs* '("rpc" "store" "sync" "node" "validator" "p2p"))
+
+(defun op-named-p (x package &rest names)
+  (and (symbolp x) (symbol-package x)
+       (string= (package-name (symbol-package x)) package)
+       (member (symbol-name x) names :test #'string=)
+       t))
+
+(defun makes-mutex-p (form)
+  (labels ((walk (x)
+             (typecase x
+               (cons (or (eq (car x) 'sb-thread:make-mutex)
+                         (loop for tail = x then (cdr tail) while (consp tail) thereis (walk (car tail)))))
+               (sb-impl::comma (walk (sb-impl::comma-expr x))))))
+    (walk form)))
+
+(defun struct-parts (form)
+  "(values name conc-name slots) of a DEFSTRUCT or DEFINE-SHARED-STRUCT form; each slot is
+(name initform . options)."
+  (let* ((head (second form))
+         (name (if (consp head) (first head) head))
+         (conc-option (and (consp head)
+                           (find :conc-name (rest head) :key (lambda (o) (and (consp o) (car o))))))
+         (conc (cond ((null conc-option) (format nil "~A-" (symbol-name name)))
+                     ((null (second conc-option)) "")
+                     (t (string (second conc-option)))))
+         (slots (loop for slot in (cddr form)
+                      unless (stringp slot) collect (if (consp slot) slot (list slot nil)))))
+    (values name conc slots)))
+
+(defun struct-accessor (name conc slot &optional (prefix ""))
+  (intern (format nil "~A~A~A" prefix conc (symbol-name slot)) (symbol-package name)))
+
+(defun class-slot-functions (slot-spec)
+  "The reader and accessor names of a DEFCLASS slot spec: the operators of its places."
+  (when (consp slot-spec)
+    (loop for (key value) on (rest slot-spec) by #'cddr
+          when (member key '(:reader :accessor)) collect value)))
+
+(defun walk-mutations (form fn)
+  "Call FN with (kind place locks bound) for each mutation in FORM: KIND :SET or :ATOMIC,
+PLACE the mutated place ((:CONTENTS table) for REMHASH and CLRHASH), LOCKS the lock forms of
+the lexically enclosing WITH-LOCK, WITH-RECURSIVE-LOCK and WITH-HELD forms, BOUND the
+variables LET-bound around it."
+  (labels ((lock-op-p (op)
+             (or (op-named-p op "CLEMPO.LOCK" "WITH-LOCK" "WITH-RECURSIVE-LOCK")
+                 (op-named-p op "CLEMPO.GUARD" "WITH-HELD")))
+           (walk-list (list locks bound)
+             (loop for tail = list then (cdr tail) while (consp tail) do (walk (car tail) locks bound)))
+           (place (p kind locks bound) (funcall fn kind p locks bound))
+           (note (op args locks bound)
+             (cond ((member op '(setf setq psetf psetq))
+                    (loop for (p) on args by #'cddr do (place p :set locks bound)))
+                   ((member op '(incf decf pop remf))
+                    (when (consp args) (place (first args) :set locks bound)))
+                   ((member op '(push pushnew))
+                    (when (consp (cdr args)) (place (second args) :set locks bound)))
+                   ((member op '(rotatef shiftf))
+                    (dolist (p (if (eq op 'shiftf) (butlast args) args)) (place p :set locks bound)))
+                   ((eq op 'remhash)
+                    (when (consp (cdr args)) (place (list :contents (second args)) :set locks bound)))
+                   ((eq op 'clrhash)
+                    (when (consp args) (place (list :contents (first args)) :set locks bound)))
+                   ((op-named-p op "SB-EXT" "ATOMIC-PUSH")
+                    (when (consp (cdr args)) (place (second args) :atomic locks bound)))
+                   ((op-named-p op "SB-EXT" "COMPARE-AND-SWAP" "CAS" "ATOMIC-INCF" "ATOMIC-DECF"
+                                "ATOMIC-POP" "ATOMIC-UPDATE")
+                    (when (consp args) (place (first args) :atomic locks bound)))))
+           (walk (x locks bound)
+             (typecase x
+               (sb-impl::comma (walk (sb-impl::comma-expr x) locks bound))
+               (cons
+                (let ((op (car x)) (args (cdr x)))
+                  (cond ((member op '(quote source-read-eval)))
+                        ((and (lock-op-p op) (consp args) (consp (first args)))
+                         (walk (first (first args)) locks bound)
+                         (walk-list (rest args) (cons (first (first args)) locks) bound))
+                        ((and (member op '(let let*)) (consp args) (listp (first args)))
+                         (dolist (b (first args)) (when (consp b) (walk-list (rest b) locks bound)))
+                         (walk-list (rest args) locks
+                                    (append (loop for b in (first args) collect (if (consp b) (car b) b))
+                                            bound)))
+                        (t (when (listp args) (note op args locks bound))
+                           (walk-list x locks bound))))))))
+    (walk form '() '())))
+
+(defun shared-state-violations (units report)
+  "Check the shared-state rules over UNITS, (dir . ((file . forms) ...)) pairs. REPORT takes
+the path, the definition and a message."
+  (let ((plain-accessors (make-hash-table :test 'eq))  ; accessor -> (type slot), undeclared
+        (raw-accessors (make-hash-table :test 'eq))    ; %% accessor -> type
+        (class-slots (make-hash-table :test 'eq))      ; class -> ((slot . functions) ...)
+        (guarded-class-slots (make-hash-table :test 'equal))
+        (guarded-slot-names (make-hash-table :test 'eq))
+        (globals (make-hash-table :test 'eq))          ; variable -> :plain or its guard
+        (scope '()))
+    (loop for (dir . files) in units
+          when (member dir *shared-state-dirs* :test #'string=)
+            do (dolist (unit files) (push unit scope)))
+    ;; Declarations, from every file in scope.
+    (loop for (nil . forms) in scope
+          do (dolist (form forms)
+               (when (consp form)
+                 (let ((op (car form)))
+                   (cond ((eq op 'defstruct)
+                          (multiple-value-bind (name conc slots) (struct-parts form)
+                            (dolist (slot slots)
+                              (setf (gethash (struct-accessor name conc (first slot)) plain-accessors)
+                                    (list name (first slot))))))
+                         ((op-named-p op "CLEMPO.GUARD" "DEFINE-SHARED-STRUCT")
+                          (multiple-value-bind (name conc slots) (struct-parts form)
+                            (dolist (slot slots)
+                              (setf (gethash (struct-accessor name conc (first slot) "%%") raw-accessors) name))))
+                         ((eq op 'defclass)
+                          (setf (gethash (second form) class-slots)
+                                (loop for spec in (fourth form)
+                                      collect (cons (if (consp spec) (first spec) spec)
+                                                    (class-slot-functions spec)))))
+                         ((op-named-p op "CLEMPO.GUARD" "DEFINE-SLOT-GUARDS")
+                          (loop for (slot) in (cddr form)
+                                do (setf (gethash (list (second form) slot) guarded-class-slots) t
+                                         (gethash slot guarded-slot-names) t)))
+                         ((member op '(defvar defparameter))
+                          (setf (gethash (second form) globals) :plain))
+                         ((op-named-p op "CLEMPO.GUARD" "DEFSHARED")
+                          (setf (gethash (second form) globals) (getf (cddddr form) :guard))))))))
+    ;; Class accessors of slots without a declared guard are plain.
+    (maphash (lambda (class slots)
+               (loop for (slot . functions) in slots
+                     unless (gethash (list class slot) guarded-class-slots)
+                       do (dolist (f functions) (setf (gethash f plain-accessors) (list class slot)))))
+             class-slots)
+    ;; Uses.
+    (loop for (file . forms) in scope
+          for path = (enough-namestring file *root*)
+          do (dolist (form forms)
+               (let ((definition (layer-definition form)))
+                 (flet ((report (control &rest args)
+                          (funcall report path definition (apply #'format nil control args))))
+                   (when (consp form)
+                     (case (car form)
+                       (defstruct
+                        (when (makes-mutex-p form)
+                          (report "structure ~S holds a lock: declare its slots' guards with DEFINE-SHARED-STRUCT"
+                                  (struct-parts form))))
+                       (defclass
+                        (when (makes-mutex-p form)
+                          (loop for (slot) in (gethash (second form) class-slots)
+                                unless (gethash (list (second form) slot) guarded-class-slots)
+                                  do (report "slot ~S of class ~S, which holds a lock, has no guard (DEFINE-SLOT-GUARDS)"
+                                             slot (second form)))))))
+                   (multiple-value-bind (symbols) (audit-form form)
+                     (maphash (lambda (symbol ignored)
+                                (declare (ignore ignored))
+                                (when (gethash symbol raw-accessors)
+                                  (report "~S is the unguarded slot access of shared structure ~S"
+                                          symbol (gethash symbol raw-accessors))))
+                              symbols))
+                   (unless (and (consp form) (member (car form) '(setf setq defvar defparameter)))
+                     (walk-mutations
+                      form
+                      (lambda (kind place locks bound)
+                        (let ((root (cond ((symbolp place) place)
+                                          ((and (consp place) (eq (first place) :contents) (symbolp (second place)))
+                                           (second place))))
+                              (accessor (and (consp place) (symbolp (first place)) (first place))))
+                          (when (and accessor (not (eq accessor :contents)))
+                            (let ((plain (gethash accessor plain-accessors)))
+                              (when (and plain locks)
+                                (report "~S of ~S is mutated under a lock: declare its guards (DEFINE-SHARED-STRUCT or DEFINE-SLOT-GUARDS)"
+                                        (second plain) (first plain)))
+                              (when (and (eq accessor 'slot-value) (consp (cddr place))
+                                         (consp (third place)) (eq (first (third place)) 'quote)
+                                         (gethash (second (third place)) guarded-slot-names))
+                                (report "(SETF SLOT-VALUE) of guarded slot ~S goes around its guard"
+                                        (second (third place))))
+                              ;; a container held in a global: (gethash k *table*), (aref *v* i),
+                              ;; (nth i *list*): the container argument, not a key that names one
+                              (unless (or plain (eq accessor 'slot-value))
+                                (let ((container (if (member accessor '(gethash nth nthcdr))
+                                                     (third place)
+                                                     (second place))))
+                                  (setf root (and (symbolp container) (gethash container globals) container))))))
+                          (when (and root (not (member root bound)))
+                            (let ((guard (gethash root globals)))
+                              (cond ((null guard))
+                                    ((eq guard :plain)
+                                     (report "global ~S is mutated at run time: declare its guard with DEFSHARED" root))
+                                    ((eq guard :immutable)
+                                     (report "immutable global ~S is mutated" root))
+                                    ((eq guard :atomic)
+                                     (unless (eq kind :atomic)
+                                       (report "atomic global ~S is mutated without COMPARE-AND-SWAP" root)))
+                                    ((eq (first guard) :lock)
+                                     (unless (member (second guard) locks :test #'equal)
+                                       (report "global ~S is mutated outside its lock ~S" root (second guard)))))))))))))))))
 
 (defun check-layers ()
   (let* ((layers (layers))
@@ -459,6 +663,10 @@ A mutex's name is its lock class, so each needs one of its own."
                  (when (rest sites)
                    (report "mutex name ~S names ~D lock classes: ~{~A~^, ~}" name (length sites) (reverse sites))))
                mutex-sites))
+    (shared-state-violations
+     (loop for layer in layers collect (cons (getf layer :dir) (gethash (getf layer :dir) units)))
+     (lambda (path definition message)
+       (pushnew (format nil "~A (~A): ~A" path definition message) violations :test #'string=)))
     (loop for (path count reason) in (getf policy :assertions)
           do (unless (and (plusp count) (plusp (length reason)))
                (error "Invalid assertion rule for ~A" path))

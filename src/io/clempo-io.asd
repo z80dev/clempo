@@ -5,9 +5,10 @@
   :components ((:file "io")
                (:file "clock")
                (:file "poll")
-               (:file "locks")))
+               (:file "locks")
+               (:file "guards")))
 
 (defsystem "clempo-io/tests"
   :depends-on ("clempo-io")
   :pathname "../../tests/io/"
-  :components ((:file "io-tests") (:file "lock-tests")))
+  :components ((:file "io-tests") (:file "lock-tests") (:file "guard-tests")))

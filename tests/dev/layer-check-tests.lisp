@@ -92,3 +92,27 @@
   (assert (= 2 (length violations))))
 (assert (equal '(nil "pool")
                (mutex-names '(list (sb-thread:make-mutex :name "pool") (sb-thread:make-mutex)))))
+
+;; Shared state: a structure holding a lock, a plain structure mutated under one, and run-time
+;; mutations of globals (a let-rebound one excepted) declare guards and respect them.
+(let ((violations '()))
+  (with-input-from-string (in "(defstruct box (lock (sb-thread:make-mutex :name \"box\")) (n 0))
+                               (defstruct plain (n 0))
+                               (defvar *count* 0)
+                               (clempo.guard:defshared *table* (make-hash-table) \"t\" :guard (:lock *table-lock*))
+                               (defun bump (b p)
+                                 (clempo.lock:with-lock ((box-lock b)) (incf (plain-n p)))
+                                 (incf *count*)
+                                 (setf (gethash 1 *table*) 2)
+                                 (clempo.lock:with-lock (*table-lock*) (remhash 1 *table*))
+                                 (let ((*count* 0)) (incf *count*)))")
+    (shared-state-violations
+     (list (cons "rpc" (list (cons (merge-pathnames "src/rpc/fixture.lisp" *root*)
+                                   (read-source-stream in "shared-state fixture")))))
+     (lambda (path definition message)
+       (declare (ignore path definition))
+       (pushnew message violations :test #'string=))))
+  (assert (= 4 (length violations)))
+  (dolist (expected '("holds a lock" "is mutated under a lock" "COUNT* is mutated at run time"
+                      "TABLE* is mutated outside its lock"))
+    (assert (find expected violations :test #'search))))
