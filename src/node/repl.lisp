@@ -9,10 +9,15 @@
 (defparameter *idle-timeout* 60 "Seconds an authenticated session may wait for its next form.")
 (defparameter *max-clients* 8 "Concurrent sessions; further connections are refused.")
 
-(defstruct (repl (:constructor %make-repl (listener port token configure)))
-  listener port token configure thread stopped
-  (clients '())                          ; (socket . thread) of live sessions
-  (lock (sb-thread:make-mutex :name "node REPL")))
+(clempo.guard:define-shared-struct (repl (:constructor %make-repl (listener port token configure)))
+  (listener nil :guard :immutable)
+  (port nil :guard :immutable)
+  (token nil :guard :immutable)
+  (configure nil :guard :immutable)
+  (thread nil :guard (:lock-writes lock))      ; set once by START-REPL, joined by STOP-REPL
+  (stopped nil :guard (:lock lock))
+  (clients '() :guard (:lock lock))            ; (socket . thread) of live sessions
+  (lock (sb-thread:make-mutex :name "node REPL") :guard :immutable))
 
 (defun authenticated-p (stream token)
   ;; Read at most one fixed-length line, without invoking the Lisp reader.
@@ -97,8 +102,9 @@ bind developer context. The token grants arbitrary Lisp execution."
           (socket:socket-listen listener 4)
           (let ((repl (%make-repl listener (nth-value 1 (socket:socket-name listener))
                                   token configure)))
-            (setf (repl-thread repl) (sb-thread:make-thread (lambda () (run-repl repl))
-                                                           :name "clempo Lisp REPL"))
+            (clempo.lock:with-lock ((repl-lock repl))
+              (setf (repl-thread repl) (sb-thread:make-thread (lambda () (run-repl repl))
+                                                             :name "clempo Lisp REPL")))
             repl))
       (error (c) (socket:socket-close listener) (error c)))))
 

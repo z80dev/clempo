@@ -62,8 +62,9 @@
    (history-writer :initform nil :accessor node-history-writer)
    (pool :initarg :pool :reader node-pool)
    (archive-dir :initarg :archive-dir :reader node-archive-dir)
-   (forwarder :initform nil :accessor node-forwarder)
+   (forwarder :initarg :forwarder :initform nil :reader node-forwarder)
    (status :initform (list :tip nil :retries 0 :last-error nil) :accessor node-status)
+   (status-lock :initform (sb-thread:make-mutex :name "node status") :reader node-status-lock)
    (follower :initform nil :accessor node-follower)
    (hash-log :initform nil :accessor node-hash-log)
    (index-dir :initform nil :accessor node-index-dir)
@@ -76,6 +77,43 @@
    (followed-blocks :initform (make-hash-table :test 'equalp :synchronized t) :reader node-followed-blocks)
    (followed-txs :initform (make-hash-table :test 'equalp :synchronized t) :reader node-followed-txs)
    (started :initform (clempo.io:now-seconds) :reader node-started)))
+
+;;; The follow thread writes blocks under the backend's write lock (WITH-BACKEND-WRITE), and
+;;; the followed hash log is opened, appended, folded and closed under it. Startup publishes
+;;; the follower, history writer and server under it; requests read them without it.
+(clempo.guard:define-slot-guards node-backend
+  (store :immutable)
+  (chain :immutable)
+  (recent :immutable)                   ; its entries change under the write lock
+  (recent-blocks :immutable)            ; synchronized tables
+  (recent-txs :immutable)
+  (server (:held-writes (n) (backend:backend-lock n)))
+  (history-writer (:held-writes (n) (backend:backend-lock n)))
+  (pool :immutable)
+  (archive-dir :immutable)
+  (forwarder :immutable)
+  (status (:lock-writes status-lock))   ; a fresh plist each time (NOTE-STATUS)
+  (status-lock :immutable)
+  (follower (:held-writes (n) (backend:backend-lock n)))
+  (hash-log (:held (n) (backend:backend-lock n)))
+  (index-dir (:held-writes (n) (backend:backend-lock n)))  ; read by the merger
+  (folded-to (:held (n) (backend:backend-lock n)))
+  (segments (:lock-writes segment-lock))                    ; requests read the list whole
+  (segment-lock :immutable)
+  (merger (:lock segment-lock))
+  (merging (:lock segment-lock))
+  (merges-stopped (:lock segment-lock))
+  (followed-blocks :immutable)          ; synchronized tables
+  (followed-txs :immutable)
+  (started :immutable))
+
+(defun note-status (node &rest changes)
+  "Publish NODE's status with CHANGES (indicator value ...) applied, as a fresh plist that
+readers take whole without the lock."
+  (clempo.lock:with-lock ((node-status-lock node))
+    (let ((status (copy-list (node-status node))))
+      (loop for (indicator value) on changes by #'cddr do (setf (getf status indicator) value))
+      (setf (node-status node) status))))
 
 ;;; The datadir's hash index. blocks.idx/txs.idx (CLEMPO.RPC.CHAIN's format) are seeded from
 ;;; the archive when the datadir is created. Every block the node follows after that is
@@ -142,34 +180,35 @@ returns the last block they cover, or -1."
                           complete)))
     (dolist (path (directory (merge-pathnames "followed-*.idx" dir)))
       (unless (member (segment-range path) kept :test #'equal) (delete-file path)))
-    (setf (node-segments node)
-          (sort (loop for (from . to) in kept
-                      collect (list to (backend:open-index (segment-path dir from to :blocks))
-                                    (backend:open-index (segment-path dir from to :txs)) from))
-                #'> :key #'first))
-    (if kept (first (first (node-segments node))) -1)))
+    (let ((segments (sort (loop for (from . to) in kept
+                                collect (list to (backend:open-index (segment-path dir from to :blocks))
+                                              (backend:open-index (segment-path dir from to :txs)) from))
+                          #'> :key #'first)))
+      (clempo.lock:with-lock ((node-segment-lock node)) (setf (node-segments node) segments))
+      (if segments (first (first segments)) -1))))
 
 (defun open-hash-log (node dir head)
   "Open DIR's followed segments, load followed.log entries past them up to HEAD (a crash may
 leave later ones) and append to the log."
-  (let ((path (merge-pathnames "followed.log" dir)) (loaded 0))
-    (ensure-directories-exist path)
-    (setf (node-index-dir node) dir
-          (node-folded-to node) (load-segments node dir))
-    (when (probe-file path)
-      (with-open-file (in path :element-type '(unsigned-byte 8))
-        (let ((record (make-octets +hash-record+)))
-          (loop while (= +hash-record+ (read-sequence record in))
-                do (let* ((kind (aref record 0))
-                          (value (octets->integer record :start 33 :end 41))
-                          (number (value-number kind value)))
-                     (when (< (node-folded-to node) number (1+ head))
-                       (note-hash node kind (subseq record 1 33) value)
-                       (incf loaded)))))))
-    (when (plusp loaded) (log-node "node: ~D followed hashes loaded from ~A" loaded path))
-    (setf (node-hash-log node)
-          (open path :direction :output :element-type '(unsigned-byte 8)
-                     :if-exists :append :if-does-not-exist :create))))
+  (backend:with-backend-write (node)
+    (let ((path (merge-pathnames "followed.log" dir)) (loaded 0))
+      (ensure-directories-exist path)
+      (setf (node-index-dir node) dir
+            (node-folded-to node) (load-segments node dir))
+      (when (probe-file path)
+        (with-open-file (in path :element-type '(unsigned-byte 8))
+          (let ((record (make-octets +hash-record+)))
+            (loop while (= +hash-record+ (read-sequence record in))
+                  do (let* ((kind (aref record 0))
+                            (value (octets->integer record :start 33 :end 41))
+                            (number (value-number kind value)))
+                       (when (< (node-folded-to node) number (1+ head))
+                         (note-hash node kind (subseq record 1 33) value)
+                         (incf loaded)))))))
+      (when (plusp loaded) (log-node "node: ~D followed hashes loaded from ~A" loaded path))
+      (setf (node-hash-log node)
+            (open path :direction :output :element-type '(unsigned-byte 8)
+                       :if-exists :append :if-does-not-exist :create)))))
 
 (defun write-hash-records (out kind table)
   (maphash (lambda (hash value)
@@ -294,9 +333,12 @@ after this either sees the merger idle and starts another or is picked up by thi
 
 (defun close-hash-log (node)
   "Stop merging after the merge in progress, join the merger and close the log."
-  (clempo.lock:with-lock ((node-segment-lock node)) (setf (node-merges-stopped node) t))
-  (when (node-merger node) (sb-thread:join-thread (node-merger node) :default nil))
-  (when (node-hash-log node) (close (node-hash-log node))))
+  (let ((merger (clempo.lock:with-lock ((node-segment-lock node))
+                  (setf (node-merges-stopped node) t)
+                  (node-merger node))))
+    (when merger (sb-thread:join-thread merger :default nil)))
+  (backend:with-backend-write (node)
+    (when (node-hash-log node) (close (node-hash-log node)))))
 
 (defun segment-block-number (node hash)
   (loop for (to blocks) in (node-segments node)
@@ -442,10 +484,14 @@ after this either sees the merger idle and starts another or is picked up by thi
 ;;; upstream (a follower has no gossip of its own), as reth's RPC forwards raw transactions
 ;;; to its sequencer. A transaction the upstream refuses leaves the local pool.
 
-(defstruct (forwarder (:constructor %make-forwarder (url pool)))
-  url pool thread (queue '()) (stopped nil)
-  (lock (sb-thread:make-mutex :name "tx forwarder"))
-  (ready (sb-thread:make-waitqueue :name "tx forwarder")))
+(clempo.guard:define-shared-struct (forwarder (:constructor %make-forwarder (url pool)))
+  (url nil :guard :immutable)
+  (pool nil :guard :immutable)
+  (thread nil :guard (:lock-writes lock))   ; set once by START-FORWARDER, joined on stop
+  (queue '() :guard (:lock lock))
+  (stopped nil :guard (:lock lock))
+  (lock (sb-thread:make-mutex :name "tx forwarder") :guard :immutable)
+  (ready (sb-thread:make-waitqueue :name "tx forwarder") :guard :immutable))
 
 (defun forward-one (forwarder raw hash)
   (handler-case
@@ -466,16 +512,17 @@ after this either sees the merger idle and starts another or is picked up by thi
 
 (defun start-forwarder (url pool)
   (let ((f (%make-forwarder url pool)))
-    (setf (forwarder-thread f)
-          (sb-thread:make-thread
-           (lambda ()
-             (loop (let ((job (clempo.lock:with-lock ((forwarder-lock f))
-                                (loop until (or (forwarder-queue f) (forwarder-stopped f))
-                                      do (clempo.lock:condition-wait (forwarder-ready f) (forwarder-lock f)))
-                                (pop (forwarder-queue f)))))
-                     (unless job (return))
-                     (forward-one f (car job) (cdr job)))))
-           :name "tx forwarder"))
+    (clempo.lock:with-lock ((forwarder-lock f))
+      (setf (forwarder-thread f)
+            (sb-thread:make-thread
+             (lambda ()
+               (loop (let ((job (clempo.lock:with-lock ((forwarder-lock f))
+                                  (loop until (or (forwarder-queue f) (forwarder-stopped f))
+                                        do (clempo.lock:condition-wait (forwarder-ready f) (forwarder-lock f)))
+                                  (pop (forwarder-queue f)))))
+                       (unless job (return))
+                       (forward-one f (car job) (cdr job)))))
+             :name "tx forwarder")))
     f))
 
 (defun forward (forwarder raw hash)
@@ -587,11 +634,11 @@ after this either sees the merger idle and starts another or is picked up by thi
      :threads threads :name "trie subtree hash")))
 
 (defun start-history-writer (node)
-  "Append followed blocks to the backend's history, so state of every block from now on is
-served as a reference archive node serves it. An empty history is first seeded with the
+  "Prepare the backend's history to take followed blocks, so state of every block from now on
+is served as a reference archive node serves it. An empty history is first seeded with the
 stored head's full state; one ending exactly at the stored head is continued; any other is
 left read-only (a gap would make later versions shadow unrecorded ones). Returns the history
-or NIL."
+to append to (the caller publishes it as NODE-HISTORY-WRITER) or NIL."
   (let* ((h (backend:backend-history node))
          (db (node-db node))
          (number (store:db-number db)))
@@ -606,10 +653,9 @@ or NIL."
              (history:history-refresh h)
              (log-node "node: history seeded in ~,1F s" (/ (- (clempo.io:monotonic-ticks) start)
                                                            internal-time-units-per-second)))
-           (setf (node-history-writer node) h))
+           h)
           ((eql (history:history-height h) number)
            (history:history-start-writer h (1+ number) db)
-           (setf (node-history-writer node) h)
            (log-node "node: appending followed blocks to history ~A from ~D"
                      (history:history-dir h) (1+ number))
            h)
@@ -619,23 +665,26 @@ or NIL."
 
 ;;; The EVM compiler thread: hot contracts compile here, never on a block or RPC thread.
 
-(defstruct (jit-worker (:constructor %make-jit-worker ()))
-  thread (queue '()) (stopped nil)
-  (lock (sb-thread:make-mutex :name "jit queue"))
-  (ready (sb-thread:make-waitqueue :name "jit queue")))
+(clempo.guard:define-shared-struct (jit-worker (:constructor %make-jit-worker ()))
+  (thread nil :guard (:lock-writes lock))   ; set once by START-JIT-WORKER, joined on stop
+  (queue '() :guard (:lock lock))
+  (stopped nil :guard (:lock lock))
+  (lock (sb-thread:make-mutex :name "jit queue") :guard :immutable)
+  (ready (sb-thread:make-waitqueue :name "jit queue") :guard :immutable))
 
 (defun start-jit-worker ()
   (let ((w (%make-jit-worker)))
-    (setf (jit-worker-thread w)
-          (sb-thread:make-thread
-           (lambda ()
-             (loop (let ((thunk (clempo.lock:with-lock ((jit-worker-lock w))
-                                  (loop until (or (jit-worker-queue w) (jit-worker-stopped w))
-                                        do (clempo.lock:condition-wait (jit-worker-ready w) (jit-worker-lock w)))
-                                  (pop (jit-worker-queue w)))))
-                     (unless thunk (return))
-                     (funcall (the function thunk)))))
-           :name "evm compiler"))
+    (clempo.lock:with-lock ((jit-worker-lock w))
+      (setf (jit-worker-thread w)
+            (sb-thread:make-thread
+             (lambda ()
+               (loop (let ((thunk (clempo.lock:with-lock ((jit-worker-lock w))
+                                    (loop until (or (jit-worker-queue w) (jit-worker-stopped w))
+                                          do (clempo.lock:condition-wait (jit-worker-ready w) (jit-worker-lock w)))
+                                    (pop (jit-worker-queue w)))))
+                       (unless thunk (return))
+                       (funcall (the function thunk)))))
+             :name "evm compiler")))
     (clempo.evm:install-jit-compiler
      (lambda (thunk)
        (clempo.lock:with-lock ((jit-worker-lock w))
@@ -731,9 +780,12 @@ mode 600). The file holds the key as 64 hex digits, encoded and decoded in const
 
 ;;; Stopping: SIGTERM and SIGINT ask the follow loop to return; RUN-NODE then shuts down.
 
-(defvar *stop-requested* nil)
+(clempo.guard:defshared *stop-requested* nil
+  "Set by SIGTERM and SIGINT (REQUEST-STOP), possibly in a signal handler, so only by
+COMPARE-AND-SWAP; the follow loop polls it."
+  :guard :atomic)
 
-(defun request-stop () (setf *stop-requested* t))
+(defun request-stop () (sb-ext:compare-and-swap (symbol-value '*stop-requested*) nil t))
 
 (defun call-with-stop-signals (thunk)
   (let ((old-term (sb-sys:enable-interrupt sb-unix:sigterm
@@ -801,7 +853,7 @@ the node has shut down, with \"failed\" set when following failed."
   (when (and hold (not (or once seconds to))) (error "--hold needs --to, --once or --seconds"))
   (unless (eq (null repl-port) (null repl-token-file))
     (error "--repl-port and --repl-token-file must be supplied together"))
-  (setf *stop-requested* nil)
+  (sb-ext:compare-and-swap (symbol-value '*stop-requested*) t nil)
   (let* ((chain (chain-keyword chain))
          (name (string-downcase chain))
          (upstream (or upstream (default-upstream chain)))
@@ -834,6 +886,7 @@ the node has shut down, with \"failed\" set when following failed."
                          :class 'node-backend :store datastore :chain chain :pool pool :recent ring
                          :head (follow:head-number head) :archive-dir archive-dir :upstream upstream
                          :index-dir index-dir
+                         :forwarder (when forward (setf forwarder (start-forwarder upstream pool)))
                          :receipts-dir (or receipts-dir (datadir-subdir dir "receipts"))
                          :history-dir (or history-dir (ensure-directories-exist (datadir-subdir dir "history")))
                          :finalization-dir (or finalization-dir (datadir-subdir dir "finalizations"))))
@@ -852,7 +905,7 @@ the node has shut down, with \"failed\" set when following failed."
                   (started nil) (next-report 0) (max-lag 0) (live-base nil))
              (note-recent node (recent-entry block nil nil))
              (pools:pool-service-block pool db (blocks:block-header block))
-             (setf (node-follower node) follower node-ref node)
+             (setf node-ref node)
              (when own-index (open-hash-log node index-dir (follow:head-number head)))
              (metrics:metric-set *m-head* initial-number)
              (metrics:metric-set *m-accounts* (store:db-account-count db))
@@ -861,11 +914,11 @@ the node has shut down, with \"failed\" set when following failed."
                          (certs:certifier-from certifier) (certs:certifier-from-source certifier)
                          (certs:certifier-anchor certifier)))
              (setf history-writer (start-history-writer node))
+             (backend:with-backend-write (node)
+               (setf (node-follower node) follower (node-history-writer node) history-writer))
              (when jit (setf jit-worker (start-jit-worker)))
-             (when forward (setf forwarder (start-forwarder upstream pool)
-                                 (node-forwarder node) forwarder))
-             (setf rpc-server (server:start-server :host bind :port rpc-port :backend node)
-                   (node-server node) rpc-server)
+             (setf rpc-server (server:start-server :host bind :port rpc-port :backend node))
+             (backend:with-backend-write (node) (setf (node-server node) rpc-server))
              (log-node "node: ~A JSON-RPC listening on ~A:~D; stored head ~D" name bind
                        (server:server-port rpc-server) initial-number)
              (when metrics-address
@@ -914,13 +967,13 @@ the node has shut down, with \"failed\" set when following failed."
                       :on-retry
                       (lambda (attempt condition)
                         (metrics:metric-inc *m-retries*)
-                        (setf (getf (node-status node) :retries) (1+ (getf (node-status node) :retries))
-                              (getf (node-status node) :last-error) (princ-to-string condition))
+                        (note-status node :retries (1+ (getf (node-status node) :retries))
+                                          :last-error (princ-to-string condition))
                         (log-node "node: retry ~D: ~A" attempt condition))
                       :on-target
                       (lambda (follow remote)
                         (declare (ignore follow))
-                        (setf (getf (node-status node) :tip) (follow:head-number remote))
+                        (note-status node :tip (follow:head-number remote))
                         (metrics:metric-set *m-tip* (follow:head-number remote)))
                       :on-poll
                       (lambda (follow remote)
@@ -929,7 +982,7 @@ the node has shut down, with \"failed\" set when following failed."
                                (tip (follow:head-number remote))
                                (lag (- tip height))
                                (now (clempo.io:monotonic-ticks)))
-                          (setf (getf (node-status node) :tip) tip)
+                          (note-status node :tip tip)
                           (metrics:metric-set *m-tip* tip)
                           (metrics:metric-set *m-lag* (max 0 lag))
                           (metrics:metric-set *m-certified* (follow:follower-certified follow))
@@ -957,7 +1010,7 @@ the node has shut down, with \"failed\" set when following failed."
               (lambda () (when rpc-server (server:stop-server rpc-server)))
               (lambda () (when metrics-server (metrics:stop-metrics-server metrics-server)))
               (lambda () (when forwarder (stop-forwarder forwarder)))
-              (lambda () (when (and node-ref (node-hash-log node-ref)) (close-hash-log node-ref)))
+              (lambda () (when (and node-ref own-index) (close-hash-log node-ref)))
               (lambda () (when jit-worker (stop-jit-worker jit-worker)))
               (lambda () (when history-writer
                            (history:history-flush history-writer :db (store:store-db datastore))))

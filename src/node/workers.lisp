@@ -4,12 +4,15 @@
 
 (in-package #:clempo.node.workers)
 
-(defstruct worker-pool
-  (lock (sb-thread:make-mutex :name "parallel work"))
-  (work (sb-thread:make-waitqueue))
-  (done (sb-thread:make-waitqueue))
-  (remaining 0 :type fixnum)
-  jobs function failure stopped)
+(clempo.guard:define-shared-struct worker-pool
+  (lock (sb-thread:make-mutex :name "parallel work") :guard :immutable)
+  (work (sb-thread:make-waitqueue) :guard :immutable)
+  (done (sb-thread:make-waitqueue) :guard :immutable)
+  (remaining 0 :type fixnum :guard (:lock lock))
+  (jobs nil :guard (:lock lock))
+  (function nil :guard (:lock lock))
+  (failure nil :guard (:lock lock))
+  (stopped nil :guard (:lock lock)))
 
 (defun claim-job (pool wait)
   (clempo.lock:with-lock ((worker-pool-lock pool))

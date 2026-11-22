@@ -194,9 +194,10 @@ those requests fail, as during an upstream outage."
     (with-temp-dirs (index)
       (let ((node (make-instance 'clempo.node::node-backend :archive-dir index :head 20000)))
         (clempo.node::open-hash-log node index 0)
-        (loop for n from 1 to 20
-              do (clempo.node::log-block-hashes node (blocks:decode-block (svref raws n)) n))
-        (close (clempo.node::node-hash-log node)))
+        (clempo.rpc.chain:with-backend-write (node)
+          (loop for n from 1 to 20
+                do (clempo.node::log-block-hashes node (blocks:decode-block (svref raws n)) n)))
+        (clempo.node::close-hash-log node))
       (let ((node (make-instance 'clempo.node::node-backend :archive-dir index :head 20000))
             (block-7 (blocks:decode-block (svref raws 7)))
             (block-15 (blocks:decode-block (svref raws 15))))
@@ -209,7 +210,7 @@ those requests fail, as during an upstream outage."
                                     (first (blocks:block-transactions block-7)))
                                    (clempo.node::node-followed-txs node)))
                (is (null (gethash (blocks:block-hash block-15) (clempo.node::node-followed-blocks node)))))
-          (close (clempo.node::node-hash-log node)))))))
+          (clempo.node::close-hash-log node))))))
 
 (defun synthetic-chain (count)
   "Raw blocks 1..COUNT of a linked synthetic chain (index I holds block I+1)."
@@ -225,15 +226,16 @@ those requests fail, as during an upstream outage."
     (with-temp-dirs (index)
       (let ((node (make-instance 'clempo.node::node-backend :archive-dir index :head 20000)))
         (clempo.node::open-hash-log node index 0)
-        (loop for i from 0 below (length chain)
-              do (clempo.node::log-block-hashes node (blocks:decode-block (svref chain i)) (1+ i)))
-        ;; Blocks 1..9999 folded at block 9999; 10000..10005 remain in memory.
-        (is= (- archive-chunk 1) (clempo.node::node-folded-to node))
+        (clempo.rpc.chain:with-backend-write (node)
+          (loop for i from 0 below (length chain)
+                do (clempo.node::log-block-hashes node (blocks:decode-block (svref chain i)) (1+ i)))
+          ;; Blocks 1..9999 folded at block 9999; 10000..10005 remain in memory.
+          (is= (- archive-chunk 1) (clempo.node::node-folded-to node)))
         (is= 6 (hash-table-count (clempo.node::node-followed-blocks node)))
         (is (probe-file (format nil "~Afollowed-000000000000-~12,'0D-blocks.idx" index (1- archive-chunk))))
         (let ((hash-7 (blocks:block-hash (blocks:decode-block (svref chain 6)))))
           (is= 7 (clempo.node::segment-block-number node hash-7))
-          (close (clempo.node::node-hash-log node))
+          (clempo.node::close-hash-log node)
           ;; Restart at head 10003: the segment answers 7; the log holds only 10000..10003.
           (let ((again (make-instance 'clempo.node::node-backend :archive-dir index :head 20000)))
             (clempo.node::open-hash-log again index 10003)
@@ -241,7 +243,7 @@ those requests fail, as during an upstream outage."
                  (progn
                    (is= 7 (clempo.node::segment-block-number again hash-7))
                    (is= 4 (hash-table-count (clempo.node::node-followed-blocks again))))
-              (close (clempo.node::node-hash-log again)))))))))
+              (clempo.node::close-hash-log again))))))))
 
 ;;; Folds and merges, small: every few blocks the open entries fold into a segment and due
 ;;; segments merge, through the same functions the node runs at each archive chunk.
@@ -251,14 +253,15 @@ those requests fail, as during an upstream outage."
 (defun fake-tx-hash (n j) (clempo.keccak:keccak256 (integer->octets (+ (* 1000 n) j) 8)))
 
 (defun log-followed (node block n)
-  "Log block N and two transactions of it, as the follower does."
-  (let ((out (clempo.node::node-hash-log node)))
-    (dotimes (j 2)
-      (let ((value (logior (ash n 20) j)))
-        (write-byte 1 out) (write-sequence (fake-tx-hash n j) out)
-        (write-sequence (integer->octets value 8) out)
-        (clempo.node::note-hash node 1 (fake-tx-hash n j) value))))
-  (clempo.node::log-block-hashes node block n))
+  "Log block N and two transactions of it, as the follower does (under the write lock)."
+  (clempo.rpc.chain:with-backend-write (node)
+    (let ((out (clempo.node::node-hash-log node)))
+      (dotimes (j 2)
+        (let ((value (logior (ash n 20) j)))
+          (write-byte 1 out) (write-sequence (fake-tx-hash n j) out)
+          (write-sequence (integer->octets value 8) out)
+          (clempo.node::note-hash node 1 (fake-tx-hash n j) value))))
+    (clempo.node::log-block-hashes node block n)))
 
 (defun index-hits (node kind hash value)
   "How many places hold HASH -> VALUE: the in-memory table plus every segment."
@@ -296,7 +299,7 @@ those requests fail, as during an upstream outage."
         do (log-followed node (svref blocks (1- n)) n)
            (funcall on-logged n)
            (when (zerop (mod n 4))
-             (clempo.node::fold-followed node n)
+             (clempo.rpc.chain:with-backend-write (node) (clempo.node::fold-followed node n))
              (clempo.node::merge-segments node))))
 
 (deftest followed-index-survives-a-crash-at-every-fold-step ()
@@ -316,7 +319,7 @@ those requests fail, as during an upstream outage."
                                (when (= (incf count) crash-at) (error 'simulated-crash :step step)))))
                        (drive-followed node blocks 1 total (lambda (n) (setf head n))))
                    (simulated-crash (c) (setf crashed (crash-step c)) (pushnew crashed seen)))
-                 (close (clempo.node::node-hash-log node))
+                 (clempo.node::close-hash-log node)
                  (let ((again (open-followed index head)))
                    (unwind-protect
                         (progn
@@ -341,9 +344,11 @@ those requests fail, as during an upstream outage."
       (let ((node (open-followed index 0)))
         (loop for n from 1 to total
               do (log-followed node (svref blocks (1- n)) n)
-                 (when (and (zerop (mod n 4)) (clempo.node::fold-followed node n))
-                   (clempo.node::start-segment-merge node)))
-        (sb-thread:join-thread (clempo.node::node-merger node))
+                 (clempo.rpc.chain:with-backend-write (node)
+                   (when (and (zerop (mod n 4)) (clempo.node::fold-followed node n))
+                     (clempo.node::start-segment-merge node))))
+        (sb-thread:join-thread (clempo.lock:with-lock ((clempo.node::node-segment-lock node))
+                                 (clempo.node::node-merger node)))
         (let ((segments (clempo.node::node-segments node)))
           (is (null (clempo.node::due-merge segments)))
           (is (<= (length segments) 2) "~D segments" (length segments))
